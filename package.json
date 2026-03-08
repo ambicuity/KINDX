@@ -1,0 +1,90 @@
+{
+  "name": "@ambicuity/kindx",
+  "version": "0.1.0",
+  "description": "KINDX - On-device hybrid search engine for markdown documents with BM25, vector embeddings, and LLM reranking",
+  "type": "module",
+  "bin": {
+    "kindx": "dist/kindx.js"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "prepare": "[ -d .git ] && ./tooling/install-hooks.sh || true",
+    "build": "tsc -p tsconfig.build.json && printf '#!/usr/bin/env node\n' | cat - dist/kindx.js > dist/kindx.tmp && mv dist/kindx.tmp dist/kindx.js && chmod +x dist/kindx.js",
+    "test": "vitest run --reporter=verbose specs/",
+    "kindx": "tsx engine/kindx.ts",
+    "index": "tsx engine/kindx.ts index",
+    "vector": "tsx engine/kindx.ts vector",
+    "search": "tsx engine/kindx.ts search",
+    "vsearch": "tsx engine/kindx.ts vsearch",
+    "rerank": "tsx engine/kindx.ts rerank",
+    "inspector": "npx @modelcontextprotocol/inspector tsx engine/kindx.ts mcp",
+    "release": "./tooling/release.sh"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ambicuity/KINDX.git"
+  },
+  "homepage": "https://github.com/ambicuity/KINDX#readme",
+  "bugs": {
+    "url": "https://github.com/ambicuity/KINDX/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "better-sqlite3": "^11.0.0",
+    "fast-glob": "^3.3.0",
+    "node-llama-cpp": "^3.17.1",
+    "picomatch": "^4.0.0",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "yaml": "^2.8.2",
+    "zod": "^4.2.1"
+  },
+  "optionalDependencies": {
+    "sqlite-vec-darwin-arm64": "^0.1.7-alpha.2",
+    "sqlite-vec-darwin-x64": "^0.1.7-alpha.2",
+    "sqlite-vec-linux-arm64": "^0.1.7-alpha.2",
+    "sqlite-vec-linux-x64": "^0.1.7-alpha.2",
+    "sqlite-vec-windows-x64": "^0.1.7-alpha.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^25.3.5",
+    "@types/picomatch": "^4.0.2",
+    "@types/yaml": "^1.9.6",
+    "tsx": "^4.0.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "markdown",
+    "search",
+    "fts",
+    "full-text-search",
+    "vector",
+    "semantic-search",
+    "sqlite",
+    "bm25",
+    "embeddings",
+    "rag",
+    "mcp",
+    "reranking",
+    "knowledge-base",
+    "local-ai",
+    "llm",
+    "on-device",
+    "document-search"
+  ],
+  "author": "Ritesh Rana <contact@riteshrana.engineer>",
+  "license": "MIT"
+}

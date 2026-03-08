@@ -1,0 +1,27 @@
+# CODEOWNERS
+# @ambicuity is auto-requested as reviewer on every PR.
+# This is a solo-maintained repo -- all paths map to the same maintainer.
+
+# Default: everything requires maintainer review
+*                               @ambicuity
+
+# Core engine
+engine/                         @ambicuity
+
+# CI/CD -- workflow changes need explicit maintainer sign-off
+.github/workflows/              @ambicuity
+.github/CODEOWNERS              @ambicuity
+
+# Tests
+specs/                          @ambicuity
+
+# Documentation and community
+reference/                      @ambicuity
+CONTRIBUTING.md                 @ambicuity
+
+# Security policy
+SECURITY.md                     @ambicuity
+
+# Build and release
+tooling/                        @ambicuity
+package.json                    @ambicuity

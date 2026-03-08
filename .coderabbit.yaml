@@ -1,0 +1,83 @@
+# CodeRabbit Configuration
+# https://docs.coderabbit.ai/guides/configure-coderabbit
+
+language: "en-US"
+tone_instructions: "Professional, direct, and engineering-focused. No emojis. Provide actionable feedback with clear rationale."
+early_access: true
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  auto_title_placeholder: "@coderabbitai"
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  changed_files_summary: true
+  labeling_instructions:
+    - label: "engine"
+      instructions: "Apply when changes affect engine/ directory"
+    - label: "specs"
+      instructions: "Apply when changes affect specs/ directory"
+    - label: "ci"
+      instructions: "Apply when changes affect .github/ directory"
+    - label: "documentation"
+      instructions: "Apply when changes only affect .md files"
+    - label: "breaking-change"
+      instructions: "Apply when changes modify public API or CLI interface"
+
+  path_instructions:
+    - path: "engine/repository.ts"
+      instructions: |
+        This is the core data access layer (~3600 lines). Review changes carefully for:
+        - SQL injection via string concatenation
+        - Proper FTS5 query sanitization
+        - Vector dimension mismatches
+        - Transaction safety
+        - Index corruption risks
+
+    - path: "engine/inference.ts"
+      instructions: |
+        This manages LLM model lifecycle. Review for:
+        - Memory leaks from unreleased model contexts
+        - Proper error handling on model download failures
+        - Context size validation
+        - Thread safety of model access
+
+    - path: "engine/protocol.ts"
+      instructions: |
+        MCP server implementation. Review for:
+        - Input validation on all tool parameters
+        - Proper error responses per MCP spec
+        - HTTP endpoint security (if HTTP transport)
+        - Resource cleanup on connection close
+
+    - path: "engine/kindx.ts"
+      instructions: |
+        CLI entry point. Review for:
+        - Argument validation and error messages
+        - Proper exit codes
+        - Help text accuracy
+        - No hardcoded paths
+
+    - path: ".github/workflows/**"
+      instructions: |
+        CI/CD workflows. Review for:
+        - Minimum required permissions
+        - Pinned action versions (hash or tag)
+        - No secret exposure in logs
+        - Proper conditional execution
+
+  tools:
+    shellcheck:
+      enabled: true
+    biome:
+      enabled: true
+    github-checks:
+      enabled: true
+      timeout_ms: 120000
+
+chat:
+  auto_reply: true

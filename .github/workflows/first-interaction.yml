@@ -1,0 +1,39 @@
+name: Welcome New Contributors
+
+on:
+  pull_request_target:
+    types: [opened]
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  welcome:
+    name: Greet First-Time Contributors
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Welcome first-time contributors
+        uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: >
+            Thank you for opening your first issue in KINDX. A maintainer will
+            review this shortly. In the meantime, please make sure you have
+            provided all the requested information in the issue template.
+
+            If this is a bug report, please include your KINDX version, Node.js
+            version, and OS in the environment section.
+          pr-message: >
+            Thank you for your first pull request to KINDX. A maintainer will
+            review your changes shortly.
+
+            Please make sure your PR:
+            - Has a title following Conventional Commits format (e.g., `feat(engine): add collection filter`)
+            - Is linked to an issue with `Fixes #N` in the description
+            - Passes all CI checks
+
+            See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contribution guide.

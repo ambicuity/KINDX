@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and General Discussion
+    url: https://github.com/ambicuity/KINDX/discussions
+    about: Ask questions, share ideas, or discuss KINDX in our community forum.
+  - name: Security Vulnerability
+    url: https://github.com/ambicuity/KINDX/security/policy
+    about: Report a security vulnerability privately. Do not open a public issue.

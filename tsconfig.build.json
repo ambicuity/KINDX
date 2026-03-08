@@ -1,0 +1,19 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "rootDir": "engine",
+        "outDir": "dist",
+        "declaration": true
+    },
+    "include": [
+        "engine/**/*.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        "specs",
+        "training",
+        "engine/benchmarks.ts",
+        "engine/preloader.ts",
+        "engine/test-preload.ts"
+    ]
+}

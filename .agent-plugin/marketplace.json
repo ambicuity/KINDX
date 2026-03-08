@@ -1,0 +1,29 @@
+{
+	"name": "kindx",
+	"owner": {
+		"name": "ambicuity",
+		"email": "contact@riteshrana.engineer"
+	},
+	"plugins": [
+		{
+			"name": "kindx",
+			"source": "./",
+			"description": "Search and retrieve documents from local markdown files.",
+			"version": "0.1.0",
+			"author": {
+				"name": "ambicuity",
+				"email": "contact@riteshrana.engineer"
+			},
+			"repository": "https://github.com/ambicuity/KINDX",
+			"license": "MIT",
+			"keywords": ["markdown", "search", "kindx"],
+			"skills": ["./skills/"],
+			"mcpServers": {
+				"kindx": {
+					"command": "kindx",
+					"args": ["mcp"]
+				}
+			}
+		}
+	]
+}
