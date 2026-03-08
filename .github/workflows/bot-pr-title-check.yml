@@ -1,0 +1,53 @@
+name: PR Title Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions: read-all
+
+jobs:
+  check-title:
+    name: Validate Conventional Commit Title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+
+    steps:
+      - name: Check PR title format
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            test
+            chore
+            refactor
+            perf
+            ci
+            build
+            revert
+          scopes: |
+            engine
+            specs
+            reference
+            tooling
+            training
+            ci
+            deps
+            config
+          requireScope: false
+          subjectPattern: ^[a-z].*[^.]$
+          subjectPatternError: |
+            The PR title "{title}" does not follow Conventional Commits format.
+
+            Expected: <type>(<scope>): <description in lowercase, no trailing period>
+
+            Examples:
+              feat(engine): add collection filter to vector search
+              fix(specs): correct assertion in renderer test
+              docs: update README installation steps
+              chore(deps): bump node-llama-cpp to v3.18

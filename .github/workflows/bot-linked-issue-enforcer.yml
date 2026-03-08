@@ -1,0 +1,21 @@
+name: Linked Issue Enforcer
+
+on:
+  pull_request:
+    types: [opened, edited]
+
+permissions: read-all
+
+jobs:
+  check-linked-issue:
+    name: Require Linked Issue
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]' && github.actor != 'release-please[bot]'
+    permissions:
+      pull-requests: read
+
+    steps:
+      - name: Check for linked issue
+        uses: nearform-actions/github-action-check-linked-issues@v1
+        with:
+          exclude-branches: "release-please--*,dependabot/**"

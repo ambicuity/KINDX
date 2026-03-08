@@ -1,0 +1,36 @@
+# Label PRs based on changed files
+engine:
+  - changed-files:
+    - any-glob-to-any-file: 'engine/**'
+
+specs:
+  - changed-files:
+    - any-glob-to-any-file: 'specs/**'
+
+reference:
+  - changed-files:
+    - any-glob-to-any-file: 'reference/**'
+
+tooling:
+  - changed-files:
+    - any-glob-to-any-file: 'tooling/**'
+
+training:
+  - changed-files:
+    - any-glob-to-any-file: 'training/**'
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file: '.github/**'
+
+documentation:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '*.md'
+      - 'reference/**/*.md'
+
+dependencies:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'package.json'
+      - 'package-lock.json'

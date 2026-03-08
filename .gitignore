@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Lock files (Bun)
+bun.lock
+
+# Test artifacts
+coverage/
+.vitest/
+
+# KINDX cache (local development)
+.cache/kindx/
+
+# Training artifacts
+training/outputs/
+training/checkpoints/
+training/wandb/
+training/.venv/
+
+# Temporary source clones (used during migration)
+.qmd-source/
+.ngj-source/
+
+# Python bytecode (training pipeline)
+__pycache__/
+*.pyc
+*.pyo
+
+# GGUF models (large binary files)
+*.gguf

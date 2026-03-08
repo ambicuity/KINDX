@@ -1,0 +1,59 @@
+name: Architecture Proposal
+description: Propose a significant architectural change to KINDX
+title: "arch: "
+labels: ["architecture", "discussion"]
+assignees: ["ambicuity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Architecture proposals are for significant structural changes that affect multiple components.
+        Please discuss the proposal here before writing any code.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A brief, one-paragraph summary of the proposed change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change needed? What problem does it solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed Design
+      description: Describe the technical design in detail. Include affected files, data flow changes, and API changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Trade-offs and Risks
+      description: What are the downsides? What could go wrong? What alternatives were considered?
+    validations:
+      required: true
+
+  - type: textarea
+    id: migration
+    attributes:
+      label: Migration Path
+      description: If this is a breaking change, how will existing users migrate?
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing proposals to ensure this is not a duplicate.
+          required: true
+        - label: I understand this requires maintainer approval before implementation.
+          required: true
