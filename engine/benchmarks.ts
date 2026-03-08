@@ -109,21 +109,21 @@ async function benchmarkConfig(
 
   // Create contexts. On CPU, split threads evenly across contexts.
   const cpuThreads = !llama.gpu ? Math.floor(llama.cpuMathCores / parallelism) : 0;
-  const contexts = [];
+  const contexts: any[] = [];
   for (let i = 0; i < parallelism; i++) {
     try {
       contexts.push(await model.createRankingContext({
         contextSize: CONTEXT_SIZE,
         flashAttention: flash,
         ...(cpuThreads > 0 ? { threads: cpuThreads } : {}),
-      }));
+      } as any));
     } catch {
       if (contexts.length === 0) {
         // Try without flash
         contexts.push(await model.createRankingContext({
           contextSize: CONTEXT_SIZE,
           ...(cpuThreads > 0 ? { threads: cpuThreads } : {}),
-        }));
+        } as any));
       }
       break;
     }
@@ -280,7 +280,7 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════════════\n");
 
   const header = "  Ctx  Flash  Median    Docs/s   VRAM/ctx   Total VRAM  Peak RSS";
-  const sep    = "  ───  ─────  ──────    ──────   ────────   ──────────  ────────";
+  const sep = "  ───  ─────  ──────    ──────   ────────   ──────────  ────────";
   console.log(header);
   console.log(sep);
 

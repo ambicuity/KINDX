@@ -7,7 +7,7 @@
  * collection management.
  */
 
-import { Database } from "bun:sqlite";
+import Database from "better-sqlite3";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -45,9 +45,9 @@ try {
   console.log(`  ${c.green}✓${c.reset} Updated ${result} rows`);
 
   // Step 3: Verify no NULL values
-  const nullCount = db.query<{ count: number }, []>(
+  const nullCount = db.prepare(
     `SELECT COUNT(*) as count FROM documents WHERE collection IS NULL`
-  ).get();
+  ).get() as { count: number } | undefined;
 
   if (nullCount && nullCount.count > 0) {
     throw new Error(`Found ${nullCount.count} documents with NULL collection names`);
@@ -80,9 +80,9 @@ try {
     SELECT id, collection, path, title, hash, created_at, modified_at, active
     FROM documents
   `);
-  const rowCount = db.query<{ count: number }, []>(
+  const rowCount = db.prepare(
     `SELECT COUNT(*) as count FROM documents_new`
-  ).get();
+  ).get() as { count: number } | undefined;
   console.log(`  ${c.green}✓${c.reset} Copied ${rowCount?.count} documents`);
 
   // Step 6: Drop old table and rename new one
@@ -139,13 +139,13 @@ try {
   console.log(`\n${c.green}✓ Migration completed successfully!${c.reset}`);
 
   // Show summary
-  const collections = db.query<{ collection: string; count: number }, []>(`
+  const collections = db.prepare(`
     SELECT collection, COUNT(*) as count
     FROM documents
     WHERE active = 1
     GROUP BY collection
     ORDER BY collection
-  `).all();
+  `).all() as { collection: string; count: number }[];
 
   console.log(`\n${c.dim}Documents by collection:${c.reset}`);
   for (const coll of collections) {

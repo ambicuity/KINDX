@@ -8,7 +8,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { openDatabase, loadSqliteVec } from "../engine/runtime.js";
 import type { Database } from "../engine/runtime.js";
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/serve./protocol.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getDefaultLlamaCpp, disposeDefaultLlamaCpp } from "../engine/inference.js";
 import { unlinkSync } from "node:fs";

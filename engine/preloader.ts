@@ -4,8 +4,8 @@
  * Uses bun:test afterAll to properly dispose of llama.cpp Metal
  * resources before the process exits, avoiding GGML_ASSERT failures.
  */
-import { afterAll } from "bun:test";
-import { disposeDefaultLlamaCpp } from "./inference";
+import { afterAll } from "vitest";
+import { disposeDefaultLlamaCpp } from "./inference.js";
 
 // Global afterAll runs after all test files complete
 afterAll(async () => {

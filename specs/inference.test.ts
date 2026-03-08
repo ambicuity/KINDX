@@ -141,7 +141,7 @@ describe("LlamaCpp rerank deduping", () => {
     expect(rankAll).toHaveBeenCalledWith("query", ["shared chunk", "different chunk"]);
     expect(result.results).toHaveLength(3);
 
-    const scoreByFile = new Map(result.results.map((item) => [item.file, item.score]));
+    const scoreByFile = new Map(result.results.map((item: any) => [item.file, item.score]));
     expect(scoreByFile.get("a.md")).toBe(0.9);
     expect(scoreByFile.get("b.md")).toBe(0.9);
     expect(scoreByFile.get("c.md")).toBe(0.2);
@@ -275,26 +275,26 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       //
       // The fix uses a promise guard to ensure only one context creation runs at a time.
       // We verify this by instrumenting createEmbeddingContext to count invocations.
-      
+
       const freshLlm = new LlamaCpp({});
       let contextCreateCount = 0;
-      
+
       // Instrument the model's createEmbeddingContext to count calls
       const originalEnsureEmbedModel = (freshLlm as any).ensureEmbedModel.bind(freshLlm);
       let modelInstrumented = false;
-      (freshLlm as any).ensureEmbedModel = async function() {
+      (freshLlm as any).ensureEmbedModel = async function () {
         const model = await originalEnsureEmbedModel();
         if (!modelInstrumented) {
           modelInstrumented = true;
           const originalCreate = model.createEmbeddingContext.bind(model);
-          model.createEmbeddingContext = async function(...args: any[]) {
+          model.createEmbeddingContext = async function (...args: any[]) {
             contextCreateCount++;
             return originalCreate(...args);
           };
         }
         return model;
       };
-      
+
       const texts = Array(10).fill(null).map((_, i) => `Document ${i}`);
 
       // Call embedBatch 5 TIMES in parallel on fresh instance.
@@ -310,7 +310,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
 
       const allResults = batches.flat();
       expect(allResults).toHaveLength(10);
-      
+
       const successCount = allResults.filter(r => r !== null).length;
       expect(successCount).toBe(10);
 
@@ -323,7 +323,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       console.log(`Context creation count: ${contextCreateCount} (expected: ≤ 8, not 5× duplicated)`);
       expect(contextCreateCount).toBeGreaterThanOrEqual(1);
       expect(contextCreateCount).toBeLessThanOrEqual(8);
-      
+
       await freshLlm.dispose();
     }, 60000);
   });
