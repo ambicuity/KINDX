@@ -58,7 +58,7 @@
     "@types/picomatch": "^4.0.2",
     "@types/yaml": "^1.9.6",
     "tsx": "^4.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.0.18"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"
