@@ -49,6 +49,8 @@ bun install -g @ambicuity/kindx
 npx @ambicuity/kindx ...
 bunx @ambicuity/kindx ...
 
+> **Note:** The term "Knowledge Domain" in this documentation corresponds to a `collection` in the CLI.
+
 # Register Knowledge Domains
 kindx collection add ~/notes --name notes
 kindx collection add ~/Documents/meetings --name meetings

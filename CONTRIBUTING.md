@@ -5,7 +5,7 @@ Thank you for contributing to KINDX. This document is the authoritative contribu
 > **TL;DR Quick Start (3 steps):**
 > 1. **Claim** an issue tagged [`good first issue`](https://github.com/ambicuity/KINDX/labels/good%20first%20issue) by commenting `/assign`
 > 2. **Initialize** your local environment: `git clone` → `npm install` → `npm test` (all green)
-> 3. **Ship** your change on a feature branch, then open a PR referencing `Fixes #<issue-number>`
+> 3. **Ship** your change on a feature branch, then open a PR with `Fixes #<issue-number>` in the description
 >
 > Full specification below.
 
