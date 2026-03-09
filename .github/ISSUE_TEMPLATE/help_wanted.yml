@@ -1,0 +1,59 @@
+name: Help Wanted
+description: Suggest a medium-complexity task where maintainer guidance is available.
+title: "Help Wanted: "
+labels: ["help wanted"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a Help Wanted issue! These are medium-complexity tasks that may require some context but are open for community contribution. Focus on providing enough detail so someone can jump in, knowing guidance is available.
+
+  - type: textarea
+    id: overview
+    attributes:
+      label: Overview
+      description: Provide a detailed overview of the problem or feature.
+      placeholder: "e.g., We need to optimize the SQLite insertion latency during large document ingests."
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: Outline the functional and non-functional requirements. What is the scope of this medium-complexity task?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context and Guidance
+      description: What background context does the contributor need? Are there specific constraints?
+      placeholder: "e.g., Guidance: The goal is to avoid locking the database. Look at the `transaction()` wrapper..."
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area of Impact
+      options:
+        - "Search quality (BM25, vector, hybrid)"
+        - "CLI interface and commands"
+        - "MCP server"
+        - "Configuration and Data layer"
+        - "Output formatting"
+        - "Testing and CI/CD"
+        - "Other"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I confirm this task has medium complexity and will benefit from community help and maintainer guidance.
+          required: true
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true

@@ -1,0 +1,45 @@
+name: Good First Issue
+description: Report or suggest a small, scoped task perfect for a first contribution.
+title: "Good First Issue: "
+labels: ["good first issue"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a Good First Issue! These issues should be small, scoped tasks perfect for new contributors to KINDX.
+        Please provide clear context and a concrete goal so that someone new to the project can pick it up easily.
+
+  - type: textarea
+    id: overview
+    attributes:
+      label: Overview
+      description: Describe the task or issue clearly. Include context on why this needs to be done.
+      placeholder: "e.g., We need to update the error message in the parsing module..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements / Expected Outcome
+      description: What exactly needs to be built or fixed? What does success look like?
+    validations:
+      required: true
+
+  - type: textarea
+    id: pointers
+    attributes:
+      label: Helpful Pointers
+      description: Provide any pointers, links to relevant code files, or hints to help a new contributor get started.
+      placeholder: "e.g., You might want to look at `engine/protocol.ts` around line 45."
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have verified that this issue is small, scoped, and suitable for a first-time contributor.
+          required: true
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
