@@ -1,0 +1,103 @@
+name: Epic / Tracking Issue
+description: Track a multi-phase feature that spans multiple PRs
+title: "epic: "
+labels: ["epic"]
+assignees: ["ambicuity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Epics are tracking issues for significant, multi-PR features. They define the objective, break it into sub-tasks, and track progress. Each sub-task should be filed as a separate issue and linked here.
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: A concise description of what this epic achieves and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: Background & Motivation
+      description: The architectural gap being filled. Include context on current limitations and how this changes agent workflows.
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical-design
+    attributes:
+      label: Technical Design
+      description: |
+        High-level design covering:
+        - Schema changes (new tables, columns)
+        - Affected files and components
+        - API surface (CLI flags, MCP tools)
+        - Data flow changes
+      placeholder: |
+        ### Schema Changes
+        ```sql
+        CREATE TABLE ...
+        ```
+
+        ### Affected Files
+        - `engine/repository.ts` — ...
+        - `engine/protocol.ts` — ...
+
+        ### CLI Surface
+        ```bash
+        kindx <new-command> ...
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: sub-tasks
+    attributes:
+      label: Sub-Tasks
+      description: |
+        Break the epic into implementable units. Each should be a separate PR.
+        Use `- [ ]` for uncompleted tasks and link to child issues as they are created.
+      placeholder: |
+        - [ ] Phase 1: Schema migration (#___)
+        - [ ] Phase 2: Core implementation (#___)
+        - [ ] Phase 3: CLI/MCP integration (#___)
+        - [ ] Phase 4: Tests and documentation (#___)
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Concrete, verifiable conditions that must be met for this epic to be considered complete.
+      placeholder: |
+        - [ ] New CLI command `kindx <cmd>` works end-to-end
+        - [ ] MCP tool `kindx_<tool>` registered and functional
+        - [ ] Unit tests cover core logic with >80% branch coverage
+        - [ ] README updated with usage examples
+        - [ ] `npm run build` and `npm test` pass
+    validations:
+      required: true
+
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Estimated Complexity
+      options:
+        - "Low (1-2 PRs, single component)"
+        - "Medium (3-5 PRs, 2-3 components)"
+        - "High (5+ PRs, cross-cutting changes)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing epics and proposals to ensure this is not a duplicate.
+          required: true
+        - label: This epic has been discussed in an architecture proposal or is maintainer-initiated.
+          required: true

@@ -1,0 +1,64 @@
+name: Documentation
+description: Report missing, incorrect, or unclear documentation
+title: "docs: "
+labels: ["documentation"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for documentation gaps, inaccuracies, or improvement suggestions — README, CLI help text, CONTRIBUTING guide, inline code comments, or API reference.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Documentation Issue
+      description: Describe what is missing, incorrect, or unclear.
+      placeholder: "The README does not document the `--explain` flag for `kindx query`."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: Documentation Type
+      description: Which documentation area is affected?
+      options:
+        - "README.md"
+        - "CONTRIBUTING.md"
+        - "CLI help text (--help)"
+        - "Inline code comments"
+        - "CHANGELOG.md"
+        - "MCP tool descriptions"
+        - "Architecture / design docs"
+        - "SECURITY.md"
+        - "Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      options:
+        - "Missing documentation"
+        - "Incorrect / outdated information"
+        - "Unclear or confusing wording"
+        - "Missing examples or code snippets"
+        - "Typo or formatting error"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-change
+    attributes:
+      label: Proposed Change
+      description: If you have a specific correction or addition in mind, describe it here.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true

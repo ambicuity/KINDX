@@ -1,0 +1,98 @@
+name: Performance Improvement
+description: Report a performance bottleneck or propose an optimization for KINDX
+title: "perf: "
+labels: ["performance"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for performance-related issues — latency regressions, throughput bottlenecks, memory overhead, or cold start problems.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Performance Issue Summary
+      description: Describe the performance problem or optimization opportunity.
+      placeholder: "Vector search latency exceeds 500ms when the index contains more than 50K chunks."
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-metrics
+    attributes:
+      label: Current Metrics
+      description: Provide measured numbers — latency, throughput, memory usage, corpus size. Include how you measured them (e.g., `kindx status`, `time kindx search ...`, profiling tools).
+      placeholder: |
+        - Corpus: 12,000 documents, 48,000 chunks
+        - `time kindx query "auth flow"` → 4.2s wall clock
+        - Model load: ~3.1s, query expansion: ~0.8s, vector scan: ~0.3s
+    validations:
+      required: true
+
+  - type: textarea
+    id: target-metrics
+    attributes:
+      label: Target Metrics
+      description: What performance target should this change achieve?
+      placeholder: |
+        - `kindx query` on warm daemon: < 1.5s end-to-end
+        - Cold start (no daemon): < 2.5s end-to-end
+
+  - type: dropdown
+    id: pipeline-stage
+    attributes:
+      label: Affected Pipeline Stage
+      description: Which part of the KINDX pipeline is the bottleneck?
+      options:
+        - "Model loading / cold start"
+        - "Embedding (kindx embed)"
+        - "BM25 / FTS5 search"
+        - "Vector search (sqlite-vec)"
+        - "Query expansion (LLM)"
+        - "Reranking (LLM)"
+        - "RRF fusion / blending"
+        - "MCP server overhead"
+        - "Database I/O"
+        - "Multiple stages"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-optimization
+    attributes:
+      label: Proposed Optimization
+      description: If you have a specific optimization in mind, describe it here. Include affected files and any trade-offs.
+
+  - type: textarea
+    id: profiling-data
+    attributes:
+      label: Profiling Data
+      description: Attach flame graphs, `--prof` output, or other profiling artifacts if available.
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Hardware and software details relevant to the performance issue.
+      value: |
+        - KINDX version: (run `kindx --version`)
+        - Node.js version: (run `node --version`)
+        - OS / Architecture: (e.g., macOS 15.2 ARM64, Ubuntu 24.04 x86_64)
+        - GPU: (e.g., Apple M3 Pro, NVIDIA RTX 4090, CPU-only)
+        - RAM: (e.g., 16 GB)
+        - Corpus size: (documents and approximate chunk count)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have included measured metrics, not just subjective impressions.
+          required: true
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
