@@ -43,7 +43,7 @@ If you're looking for where things live:
 | `engine/kindx.ts` | CLI entry point |
 | `engine/repository.ts` | Core data access and Contextual Retrieval |
 | `engine/inference.ts` | LLM abstraction layer (embed, rerank, expand) |
-| `engine/catalogs.ts` | YAML Knowledge Domain configuration |
+| `engine/catalogs.ts` | YAML collection configuration |
 | `engine/renderer.ts` | Output formatting (JSON, CSV, XML, MD) |
 | `engine/protocol.ts` | MCP server implementation |
 | `engine/runtime.ts` | SQLite compatibility and extension layer |
@@ -57,7 +57,7 @@ We organize work into clear categories using issue labels:
 
 - [`good first issue`](https://github.com/ambicuity/KINDX/labels/good%20first%20issue) — Small, scoped tasks perfect for your first contribution.
 - [`help wanted`](https://github.com/ambicuity/KINDX/labels/help%20wanted) — Medium-complexity tasks. Don't hesitate to ask for guidance!
-- **Architecture Proposals** — Thinking about structural changes to the core retrieval pipeline? We'd love to hear your ideas! Please open an issue to discuss the approach before writing code to ensure we're aligned.
+- **Architecture Proposals** — Thinking about structural changes to the core retrieval pipeline? We'd love to hear your ideas! Please [open an issue](https://github.com/ambicuity/KINDX/issues/new/choose) to discuss the approach before writing code to ensure we're aligned.
 
 Feel free to comment `/assign` on any unassigned issue to let others know you're working on it.
 

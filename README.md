@@ -27,7 +27,7 @@ KINDX combines BM25 full-text retrieval, vector semantic retrieval, and LLM re-r
 ## The Three Pillars
 
 ### 1. Deterministic Privacy
-Every inference — embedding, reranking, query expansion — runs on local GGUF models via `node-llama-cpp`. Sensitive Knowledge Assets never leave the edge. There is no telemetry, no API call, no cloud dependency.
+Every inference — embedding, reranking, query expansion — runs on local GGUF models via `node-llama-cpp`. Sensitive documents never leave the edge. There is no telemetry, no API call, no cloud dependency.
 
 ### 2. Agent-Native Design
 KINDX is architected for `child_process` invocation from autonomous agents (AutoGPT, OpenDevin, Claude Code, LangGraph). The `--json`, `--files`, `--csv`, and `--xml` output flags produce structured payloads for agent consumption. The MCP server provides tight protocol-level integration.
@@ -49,15 +49,15 @@ bun install -g @ambicuity/kindx
 npx @ambicuity/kindx ...
 bunx @ambicuity/kindx ...
 
-> **Note:** The term "Knowledge Domain" in this documentation corresponds to a `collection` in the CLI.
+> **Note:** The term "collection" in this documentation corresponds to a `collection` in the CLI.
 
-# Register Knowledge Domains
+# Register collections
 kindx collection add ~/notes --name notes
 kindx collection add ~/Documents/meetings --name meetings
 kindx collection add ~/work/docs --name docs
 
-# Annotate Knowledge Domains with semantic context
-kindx context add kindx://notes "Personal knowledge assets and ideation corpus"
+# Annotate collections with semantic context
+kindx context add kindx://notes "Personal documents and ideation corpus"
 kindx context add kindx://meetings "Meeting transcripts and decision records"
 kindx context add kindx://docs "Engineering documentation corpus"
 
@@ -69,7 +69,7 @@ kindx search "project timeline"          # BM25 full-text retrieval (fast)
 kindx vsearch "how to deploy"            # Neural vector retrieval
 kindx query "quarterly planning process" # Hybrid + reranking (highest precision)
 
-# Neural Extraction — retrieve a specific Knowledge Asset
+# Neural Extraction — retrieve a specific document
 kindx get "meetings/2024-01-15.md"
 
 # Neural Extraction by docid (shown in retrieval results)
@@ -78,7 +78,7 @@ kindx get "#abc123"
 # Bulk Neural Extraction via glob pattern
 kindx multi-get "journals/2025-05*.md"
 
-# Scoped Contextual Retrieval within a Knowledge Domain
+# Scoped Contextual Retrieval within a collection
 kindx search "API" -c notes
 
 # Export full match set for agent pipeline
@@ -98,11 +98,11 @@ kindx search "authentication" --json -n 10
 # Filepath manifest above relevance threshold — agent file consumption
 kindx query "error handling" --all --files --min-score 0.4
 
-# Full Knowledge Asset content for agent context window
+# Full document content for agent context window
 kindx get "docs/api-reference.md" --full
 ```
 
-> **Pro-tip (Agentic Performance):** Prefer `kindx query` over `kindx search` for open-ended agent instructions. The query expansion and LLM re-ranking pipeline surfaces semantically adjacent Knowledge Assets that keyword retrieval misses.
+> **Pro-tip (Agentic Performance):** Prefer `kindx query` over `kindx search` for open-ended agent instructions. The query expansion and LLM re-ranking pipeline surfaces semantically adjacent documents that keyword retrieval misses.
 
 > **Pro-tip (Context Window Budgeting):** Use `--min-score 0.4` with `--files` to produce a ranked manifest, then `multi-get` only the top-k assets. This two-phase pattern prevents context window overflow while preserving retrieval precision.
 
@@ -113,12 +113,12 @@ kindx get "docs/api-reference.md" --full
 KINDX exposes a Model Context Protocol (MCP) server for tool-call integration with any MCP-compatible agent runtime.
 
 **Registered Tools:**
-- `kindx_search` — BM25 Contextual Retrieval (supports Knowledge Domain filter)
-- `kindx_vector_search` — Neural vector Contextual Retrieval (supports Knowledge Domain filter)
-- `kindx_deep_search` — Hybrid Neural-Symbolic retrieval with query expansion and reranking (supports Knowledge Domain filter)
+- `kindx_search` — BM25 Contextual Retrieval (supports collection filter)
+- `kindx_vector_search` — Neural vector Contextual Retrieval (supports collection filter)
+- `kindx_deep_search` — Hybrid Neural-Symbolic retrieval with query expansion and reranking (supports collection filter)
 - `kindx_get` — Neural Extraction by path or docid (with fuzzy matching fallback)
 - `kindx_multi_get` — Bulk Neural Extraction by glob pattern, list, or docids
-- `kindx_status` — Index health and Knowledge Domain inventory
+- `kindx_status` — Index health and collection inventory
 
 **Claude Desktop configuration** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
@@ -276,7 +276,7 @@ The `query` command uses Reciprocal Rank Fusion (RRF) with position-aware blendi
 1. **Query Expansion**: Original query (x2 for weighting) + 1 LLM variation
 2. **Parallel Retrieval**: Each query searches both FTS and vector indexes
 3. **RRF Fusion**: Combine all result lists using `score = Sum(1/(k+rank+1))` where k=60
-4. **Top-Rank Bonus**: Knowledge Assets ranking #1 in any list get +0.05, #2-3 get +0.02
+4. **Top-Rank Bonus**: documents ranking #1 in any list get +0.05, #2-3 get +0.02
 5. **Top-K Selection**: Take top 30 candidates for reranking
 6. **Re-ranking**: LLM scores each asset (yes/no with logprobs confidence)
 7. **Position-Aware Blending**:
@@ -284,7 +284,7 @@ The `query` command uses Reciprocal Rank Fusion (RRF) with position-aware blendi
    - RRF rank 4-10: 60% retrieval, 40% reranker
    - RRF rank 11+: 40% retrieval, 60% reranker (trust reranker more)
 
-**Design rationale:** Pure RRF can dilute exact matches when expanded queries don't match. The top-rank bonus preserves Knowledge Assets that score #1 for the original query. Position-aware blending prevents the reranker from overriding high-confidence retrieval signals.
+**Design rationale:** Pure RRF can dilute exact matches when expanded queries don't match. The top-rank bonus preserves documents that score #1 for the original query. Position-aware blending prevents the reranker from overriding high-confidence retrieval signals.
 
 ---
 
@@ -320,7 +320,7 @@ Override the default embedding model via the `KINDX_EMBED_MODEL` environment var
 # Use Qwen3-Embedding-0.6B for multilingual corpus (CJK) support
 export KINDX_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-q8_0.gguf"
 
-# Force re-embed all Knowledge Assets after model switch
+# Force re-embed all documents after model switch
 kindx embed -f
 ```
 
@@ -356,25 +356,25 @@ npm link
 
 ## Usage Reference
 
-### Knowledge Domain Management
+### collection Management
 
 ```bash
-# Register a Knowledge Domain from current directory
+# Register a collection from current directory
 kindx collection add . --name myproject
 
 # Register with explicit path and glob mask
 kindx collection add ~/Documents/notes --name notes --mask "**/*.md"
 
-# List all registered Knowledge Domains
+# List all registered collections
 kindx collection list
 
-# Remove a Knowledge Domain
+# Remove a collection
 kindx collection remove myproject
 
-# Rename a Knowledge Domain
+# Rename a collection
 kindx collection rename myproject my-project
 
-# List Knowledge Assets within a domain
+# List documents within a domain
 kindx ls notes
 kindx ls notes/subfolder
 ```
@@ -382,7 +382,7 @@ kindx ls notes/subfolder
 ### Vector Index Generation
 
 ```bash
-# Embed all indexed Knowledge Assets (900 tokens/chunk, 15% overlap)
+# Embed all indexed documents (900 tokens/chunk, 15% overlap)
 kindx embed
 
 # Force re-embed entire corpus
@@ -391,18 +391,18 @@ kindx embed -f
 
 ### Context Management
 
-Context annotations add semantic metadata to Knowledge Domains and paths, improving Contextual Retrieval precision.
+Context annotations add semantic metadata to collections and paths, improving Contextual Retrieval precision.
 
 ```bash
-# Annotate a Knowledge Domain (using kindx:// virtual paths)
-kindx context add kindx://notes "Personal knowledge assets and ideation corpus"
+# Annotate a collection (using kindx:// virtual paths)
+kindx context add kindx://notes "Personal documents and ideation corpus"
 kindx context add kindx://docs/api "API and integration documentation corpus"
 
 # Annotate from within a corpus directory
-cd ~/notes && kindx context add "Personal knowledge assets and ideas"
+cd ~/notes && kindx context add "Personal documents and ideas"
 cd ~/notes/work && kindx context add "Work-related knowledge corpus"
 
-# Add global context (applies across all Knowledge Domains)
+# Add global context (applies across all collections)
 kindx context add / "Enterprise knowledge base for agent context injection"
 
 # List all context annotations
@@ -440,10 +440,10 @@ kindx query "user authentication"
 ```bash
 # Retrieval options
 -n <num>           # Number of results (default: 5, or 20 for --files/--json)
--c, --collection   # Restrict retrieval to a specific Knowledge Domain
+-c, --collection   # Restrict retrieval to a specific collection
 --all              # Return all matches (combine with --min-score to filter)
 --min-score <num>  # Minimum relevance threshold (default: 0)
---full             # Return full Knowledge Asset content
+--full             # Return full document content
 --line-numbers     # Annotate output with line numbers
 --explain          # Include retrieval score traces (query, JSON/CLI output)
 --index <name>     # Use named index
@@ -456,7 +456,7 @@ kindx query "user authentication"
 --xml              # XML output
 
 # Neural Extraction options
-kindx get <file>[:line]  # Extract Knowledge Asset, optionally from line offset
+kindx get <file>[:line]  # Extract document, optionally from line offset
 -l <num>                 # Maximum lines to return
 --from <num>             # Start from line number
 
@@ -468,10 +468,10 @@ kindx get <file>[:line]  # Extract Knowledge Asset, optionally from line offset
 ### Index Maintenance
 
 ```bash
-# Report index health and Knowledge Domain inventory
+# Report index health and collection inventory
 kindx status
 
-# Re-index all Knowledge Domains
+# Re-index all collections
 kindx update
 
 # Re-index with upstream git pull (for remote corpus repos)
@@ -483,7 +483,7 @@ kindx get notes/meeting.md
 # Neural Extraction by docid (from retrieval results)
 kindx get "#abc123"
 
-# Extract Knowledge Asset starting at line 50, max 100 lines
+# Extract document starting at line 50, max 100 lines
 kindx get notes/meeting.md:50 -l 100
 
 # Bulk Neural Extraction via glob pattern
@@ -577,8 +577,8 @@ erDiagram
 
 ```mermaid
 flowchart LR
-    COL["Knowledge Domain Config"] --> GLOB["Glob Pattern Scan"]
-    GLOB --> MD["Markdown Knowledge Assets"]
+    COL["collection Config"] --> GLOB["Glob Pattern Scan"]
+    GLOB --> MD["Markdown documents"]
     MD --> PARSE["Parse Title + Hash Content"]
     PARSE --> DOCID["Generate docid (6-char hash)"]
     DOCID --> SQL["Store in SQLite"]
@@ -587,11 +587,11 @@ flowchart LR
 
 ### Embedding Flow
 
-Knowledge Assets are chunked into ~900-token pieces with 15% overlap using smart boundary detection:
+documents are chunked into ~900-token pieces with 15% overlap using smart boundary detection:
 
 ```mermaid
 flowchart LR
-    DOC["Knowledge Asset"] --> CHUNK["Smart Chunk (~900 tokens)"]
+    DOC["document"] --> CHUNK["Smart Chunk (~900 tokens)"]
     CHUNK --> FMT["Format: title | text"]
     FMT --> LLM["node-llama-cpp embedBatch"]
     LLM --> STORE["Store Vectors in sqlite-vec"]
@@ -604,7 +604,7 @@ flowchart LR
 Instead of cutting at hard token boundaries, KINDX uses a scoring algorithm to find natural markdown break points. This keeps semantic units (sections, paragraphs, code blocks) together within a single chunk.
 
 **Algorithm:**
-1. Scan Knowledge Asset for all break points with scores
+1. Scan document for all break points with scores
 2. When approaching the 900-token target, search a 200-token window before the cutoff
 3. Score each break point: `finalScore = baseScore x (1 - (distance/window)^2 x 0.7)`
 4. Cut at the highest-scoring break point
