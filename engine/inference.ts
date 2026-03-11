@@ -195,7 +195,7 @@ export type RerankDocument = {
 // Override via KINDX_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-q8_0.gguf)
 const DEFAULT_EMBED_MODEL = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
-const DEFAULT_GENERATE_MODEL = process.env.KINDX_GENERATE_MODEL ?? "hf:rr1904/kindx-query-expansion-1.7B-gguf/kindx-query-expansion-1.7B-q4_k_m.gguf";
+const DEFAULT_GENERATE_MODEL = process.env.KINDX_GENERATE_MODEL ?? "hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
 
 // Alternative generation models for query expansion:
 // LiquidAI LFM2 - hybrid architecture optimized for edge/on-device inference
@@ -1010,11 +1010,26 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
-    const llama = await this.ensureLlama();
-    await this.ensureGenerateModel();
-
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;
+
+    // -------------------------------------------------------------------------
+    // Task 2: Dynamic HyDE Bypass
+    // Short entity-lookup queries (≤3 tokens) lack sufficient semantic surface
+    // area for the LLM to extrapolate a meaningful hypothetical document.
+    // Generating HyDE passages for these actively harms precision by shifting
+    // the embedding centroid away from the actual target.
+    // Bypass generation entirely and return direct lex + vec targets.
+    // -------------------------------------------------------------------------
+    const tokenCount = query.trim().split(/\s+/).filter(Boolean).length;
+    if (tokenCount <= 3) {
+      const bypass: Queryable[] = [{ type: 'vec', text: query }];
+      if (includeLexical) bypass.unshift({ type: 'lex', text: query });
+      return bypass;
+    }
+
+    const llama = await this.ensureLlama();
+    await this.ensureGenerateModel();
 
     const grammar = await llama.createGrammar({
       grammar: `
@@ -1027,12 +1042,47 @@ export class LlamaCpp implements LLM {
 
     const prompt = `/no_think Expand this search query: ${query}`;
 
-    // Create a bounded context for expansion to prevent large default VRAM allocations.
+    // -------------------------------------------------------------------------
+    // Task 1: Strict System Prompt Injection
+    // Enforces three constraints on the generation model:
+    //   1. Grammar adherence: output must strictly match the EBNF grammar.
+    //   2. No conversational filler: eliminates "Of course!", apologies, etc.
+    //   3. Domain anchoring: if options.context is provided, inject it so the
+    //      model stays within the bounded knowledge domain and does not
+    //      hallucinate external concepts (e.g., "blockchain" for a code repo).
+    // -------------------------------------------------------------------------
+    const domainInstruction = context
+      ? `Domain context: ${context}\nYour expansions MUST stay within this domain. Do not introduce concepts from outside it.`
+      : `Stay strictly within the semantic domain implied by the query itself.`;
+
+    const systemPrompt = [
+      `You are a search query expansion engine. Your ONLY task is to output structured query variations.`,
+      ``,
+      `OUTPUT FORMAT (strict — do not deviate):`,
+      `  lex: <exact keyword phrase>`,
+      `  vec: <semantically equivalent rephrasing>`,
+      `  hyde: <a verbatim 1-2 sentence excerpt that would appear in a relevant technical document>`,
+      ``,
+      `RULES (violations will break the downstream parser):`,
+      `  - Do NOT write greetings, apologies, explanations, or any prose outside the format.`,
+      `  - Do NOT write "Here is...", "Of course!", "I'd be happy to...", or similar filler.`,
+      `  - Each line MUST start with "lex:", "vec:", or "hyde:" followed by a single space.`,
+      `  - hyde entries MUST read like an excerpt from a technical document, NOT a question or summary.`,
+      `  - Output 2–4 lines maximum. Output NOTHING else.`,
+      ``,
+      domainInstruction,
+    ].join('\n');
+
+    // Create a bounded context for expansion.
+    // The system prompt adds ~400 tokens of overhead. We allocate a 512-token buffer
+    // on top of expandContextSize to prevent native llama.cpp from aborting on context
+    // overflow when the combined system prompt + user query exceeds the window.
+    const SYSTEM_PROMPT_TOKEN_OVERHEAD = 512;
     const genContext = await this.generateModel!.createContext({
-      contextSize: this.expandContextSize,
+      contextSize: this.expandContextSize + SYSTEM_PROMPT_TOKEN_OVERHEAD,
     });
     const sequence = genContext.getSequence();
-    const session = new LlamaChatSession({ contextSequence: sequence });
+    const session = new LlamaChatSession({ contextSequence: sequence, systemPrompt });
 
     try {
       // Qwen3 recommended settings for non-thinking mode:
