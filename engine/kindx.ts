@@ -2455,6 +2455,7 @@ function showHelp(): void {
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
+  console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
@@ -2814,14 +2815,53 @@ if (isMain) {
     case "migrate": {
       const target = cli.args[0];
       const dbPath = cli.args[1];
-      if (target !== "chroma" || !dbPath) {
-        console.error("Usage: kindx migrate chroma <chroma-db-path>");
+      if (!target || !dbPath) {
+        console.error("Usage: kindx migrate <chroma|openclaw> <path>");
         process.exit(1);
       }
-      const { migrateChroma } = await import("./migrate.js");
-      const store = getStore();
-      await migrateChroma(dbPath, "chroma_import", store);
-      closeDb();
+      
+      if (target === "chroma") {
+        const { migrateChroma } = await import("./migrate.js");
+        const store = getStore();
+        await migrateChroma(dbPath, "chroma_import", store);
+        closeDb();
+      } else if (target === "openclaw") {
+        try {
+          const { execSync } = await import("child_process");
+          const isMac = process.platform === "darwin";
+          const sedOpts = isMac ? "-i ''" : "-i";
+          
+          console.log(`🦞 Migrating OpenCLAW integration from QMD to KINDX in ${dbPath}...`);
+          
+          // Rename files and directories matching "qmd"
+          execSync(`find . -depth -name '*qmd*' -execdir bash -c 'mv "$1" "\${1//qmd/kindx}"' _ {} \\;`, { cwd: dbPath, stdio: "inherit" });
+          
+          console.log("Updating internal references, configuration schemas, and executable commands...");
+          // Replace references within matched files
+          const replacements = [
+            `find src test -type f -exec sed ${sedOpts} 's/qmd/kindx/g' {} +`,
+            `find src test -type f -exec sed ${sedOpts} 's/Qmd/Kindx/g' {} +`,
+            `find src test -type f -exec sed ${sedOpts} 's/QMD/KINDX/g' {} +`
+          ];
+          
+          const env = { ...process.env, LC_ALL: "C" };
+          for (const cmd of replacements) {
+            try {
+              execSync(cmd, { cwd: dbPath, env, stdio: "ignore" });
+            } catch (err) {
+              // Ignore errors if find fails to match any files on certain passes or if sed complains
+            }
+          }
+          console.log("✅ Migration complete. Please run 'npm run build' inside OpenCLAW to verify.");
+        } catch (err) {
+          console.error("Migration failed:", err);
+          process.exit(1);
+        }
+      } else {
+        console.error(`Unknown migration target: ${target}`);
+        console.error("Usage: kindx migrate <chroma|openclaw> <path>");
+        process.exit(1);
+      }
       break;
     }
 
