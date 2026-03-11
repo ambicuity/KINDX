@@ -10,8 +10,8 @@
 import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   LlamaCpp,
-  getDefaultLlamaCpp,
-  disposeDefaultLlamaCpp,
+  getDefaultLLM,
+  disposeDefaultLLM,
   withLLMSession,
   canUnloadLLM,
   SessionReleasedError,
@@ -25,9 +25,9 @@ import {
 
 describe("Default LlamaCpp Singleton", () => {
   // Test singleton behavior without resetting to avoid orphan instances
-  test("getDefaultLlamaCpp returns same instance on subsequent calls", () => {
-    const llm1 = getDefaultLlamaCpp();
-    const llm2 = getDefaultLlamaCpp();
+  test("getDefaultLLM returns same instance on subsequent calls", () => {
+    const llm1 = getDefaultLLM();
+    const llm2 = getDefaultLLM();
     expect(llm1).toBe(llm2);
     expect(llm1).toBeInstanceOf(LlamaCpp);
   });
@@ -39,7 +39,7 @@ describe("Default LlamaCpp Singleton", () => {
 
 describe("LlamaCpp.modelExists", () => {
   test("returns exists:true for HuggingFace model URIs", async () => {
-    const llm = getDefaultLlamaCpp();
+    const llm = getDefaultLLM();
     const result = await llm.modelExists("hf:org/repo/model.gguf");
 
     expect(result.exists).toBe(true);
@@ -47,7 +47,7 @@ describe("LlamaCpp.modelExists", () => {
   });
 
   test("returns exists:false for non-existent local paths", async () => {
-    const llm = getDefaultLlamaCpp();
+    const llm = getDefaultLLM();
     const result = await llm.modelExists("/nonexistent/path/model.gguf");
 
     expect(result.exists).toBe(false);
@@ -154,11 +154,11 @@ describe("LlamaCpp rerank deduping", () => {
 
 describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
   // Use the singleton to avoid multiple Metal contexts
-  const llm = getDefaultLlamaCpp();
+  const llm = getDefaultLLM();
 
   afterAll(async () => {
     // Ensure native resources are released to avoid ggml-metal asserts on process exit.
-    await disposeDefaultLlamaCpp();
+    await disposeDefaultLLM();
   });
 
   describe("embed", () => {
@@ -367,12 +367,12 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       expect(result.results).toHaveLength(4);
 
       // Auth documents should score highest
-      const topTwo = result.results.slice(0, 2).map((r) => r.file);
+      const topTwo = result.results.slice(0, 2).map((r: any) => r.file);
       expect(topTwo).toContain("auth.md");
       expect(topTwo).toContain("jwt.md");
 
       // Irrelevant documents should score lowest
-      const bottomTwo = result.results.slice(2).map((r) => r.file);
+      const bottomTwo = result.results.slice(2).map((r: any) => r.file);
       expect(bottomTwo).toContain("weather.md");
       expect(bottomTwo).toContain("pizza.md");
     });
@@ -415,7 +415,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
 
       const result = await llm.rerank("query", documents);
 
-      const files = result.results.map((r) => r.file).sort();
+      const files = result.results.map((r: any) => r.file).sort();
       expect(files).toEqual(["another/path/doc2.md", "path/to/doc1.md"]);
     });
 
@@ -545,7 +545,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       const result = await llm.expandQuery("authentication setup", { includeLexical: false });
 
       // Should not contain any 'lex' type entries
-      const lexEntries = result.filter(q => q.type === "lex");
+      const lexEntries = result.filter((q: any) => q.type === "lex");
       expect(lexEntries).toHaveLength(0);
     });
   });

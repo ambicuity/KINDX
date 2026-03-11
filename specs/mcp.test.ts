@@ -10,7 +10,7 @@ import { openDatabase, loadSqliteVec } from "../engine/runtime.js";
 import type { Database } from "../engine/runtime.js";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getDefaultLlamaCpp, disposeDefaultLlamaCpp } from "../engine/inference.js";
+import { getDefaultLLM, disposeDefaultLLM } from "../engine/inference.js";
 import { unlinkSync } from "node:fs";
 import { mkdtemp, writeFile, readdir, unlink, rmdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,7 +29,7 @@ let testConfigDir: string;
 
 afterAll(async () => {
   // Ensure native resources are released to avoid ggml-metal asserts on process exit.
-  await disposeDefaultLlamaCpp();
+  await disposeDefaultLLM();
 });
 
 function initTestDatabase(db: Database): void {
@@ -206,7 +206,7 @@ describe("MCP Server", () => {
   beforeAll(async () => {
     // LlamaCpp uses node-llama-cpp for local model inference (no HTTP mocking needed)
     // Use shared singleton to avoid creating multiple instances with separate GPU resources
-    getDefaultLlamaCpp();
+    getDefaultLLM();
 
     // Reset index name in case another test file mutated it (bun test shares process)
     setConfigIndexName("index");
@@ -327,7 +327,7 @@ describe("MCP Server", () => {
 
   describe.skipIf(!!process.env.CI)("hybridQuery (expansion + reranking)", () => {
     test("expands query with typed variations", async () => {
-      const expanded = await expandQuery("api documentation", DEFAULT_QUERY_MODEL, testDb);
+      const expanded = await expandQuery("api documentation for the endpoints", DEFAULT_QUERY_MODEL, testDb);
       // Returns ExpandedQuery[] — typed expansions, original excluded
       expect(expanded.length).toBeGreaterThanOrEqual(1);
       for (const q of expanded) {

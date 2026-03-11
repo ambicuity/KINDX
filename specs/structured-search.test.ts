@@ -21,7 +21,7 @@ import {
   type StructuredSubSearch,
   type Store,
 } from "../engine/repository.js";
-import { disposeDefaultLlamaCpp } from "../engine/inference.js";
+import { disposeDefaultLLM } from "../engine/inference.js";
 
 // =============================================================================
 // parseStructuredQuery Tests (CLI Parser)
@@ -294,7 +294,7 @@ describe("structuredSearch", () => {
 
   afterAll(async () => {
     store.close();
-    await disposeDefaultLlamaCpp();
+    await disposeDefaultLLM();
     if (testDir) {
       await rm(testDir, { recursive: true, force: true });
     }

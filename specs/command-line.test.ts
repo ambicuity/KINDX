@@ -13,6 +13,8 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
+import Database from "better-sqlite3";
+import * as http from "http";
 
 // Test fixtures directory and database path
 let testDir: string;
@@ -1419,8 +1421,263 @@ describe("mcp http daemon", () => {
     // Clean up
     const ready = await waitForServer(port);
     expect(ready).toBe(true);
-    process.kill(pid, "SIGTERM");
     await sleep(500);
     try { unlinkSync(pidPath()); } catch { }
+  });
+});
+
+describe("CLI Migrate Chroma Command", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+  let mockChromaPath: string;
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("migrate-chroma");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+    
+    mockChromaPath = join(testDir, `chroma-${testCounter}.sqlite3`);
+    const db = new Database(mockChromaPath);
+    db.exec(`
+      CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT);
+      CREATE TABLE embeddings (id TEXT PRIMARY KEY, collection_id TEXT, embedding_id TEXT);
+      CREATE TABLE embedding_metadata (id TEXT, key TEXT, string_value TEXT, int_value INTEGER, float_value REAL);
+      CREATE TABLE embedding_fulltext (rowid INTEGER PRIMARY KEY, string_value TEXT);
+    `);
+    db.prepare(`INSERT INTO collections (id, name) VALUES (?, ?)`).run("col-1", "test_collection");
+    db.prepare(`INSERT INTO embeddings (rowid, id, collection_id, embedding_id) VALUES (?, ?, ?, ?)`).run(1, "emb-1", "col-1", "doc1.txt");
+    db.prepare(`INSERT INTO embedding_metadata (id, key, string_value) VALUES (?, ?, ?)`).run("emb-1", "source", "http://example.com/doc1");
+    db.prepare(`INSERT INTO embedding_fulltext (rowid, string_value) VALUES (?, ?)`).run(1, "This is a migrated document about machine learning.");
+    db.close();
+  });
+
+  test("migrates documents from Chroma", async () => {
+    // Note: 'chroma_import' is the default collection name used in migrateChroma
+    const { stdout, exitCode } = await runQmd(["migrate", "chroma", mockChromaPath], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Migration Summary");
+    expect(stdout).toContain("Migrated: 1 documents");
+
+    // The collection should now be in the index.yml
+    const indexConfig = readFileSync(join(localConfigDir, "index.yml"), "utf-8");
+    expect(indexConfig).toContain("chroma_import");
+
+    // We should be able to ls it
+    const lsResult = await runQmd(["ls", "chroma_import"], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(lsResult.exitCode).toBe(0);
+    expect(lsResult.stdout).toContain("doc1");
+
+    // Re-embed it
+    const embedResult = await runQmd(["embed"], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(embedResult.exitCode).toBe(0);
+
+    // Search it
+    const searchResult = await runQmd(["search", "-c", "chroma_import", "machine"], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(searchResult.exitCode).toBe(0);
+    expect(searchResult.stdout).toContain("machine learning");
+  });
+});
+
+describe("CLI Watch Command", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+  let watchDir: string;
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("watch-cmd");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+    
+    watchDir = join(testDir, `watch-fixtures-${testCounter}`);
+    await mkdir(watchDir, { recursive: true });
+    
+    // Add collection and start with one file
+    await writeFile(join(watchDir, "initial.md"), "# Initial document");
+    await runQmd(["collection", "add", watchDir, "--name", "watch_test"], { dbPath: localDbPath, configDir: localConfigDir });
+  });
+
+  test("watches for newly added and modified files", async () => {
+    const proc = spawn(tsxBin, [qmdScript, "watch", "--collection", "watch_test"], {
+      env: {
+        ...process.env,
+        INDEX_PATH: localDbPath,
+        KINDX_CONFIG_DIR: localConfigDir,
+      },
+      stdio: "pipe",
+    });
+
+    let daemonOut = "";
+    proc.stdout.on("data", d => daemonOut += d.toString());
+    proc.stderr.on("data", d => daemonOut += d.toString());
+
+    try {
+      // Give watcher time to boot and bind chokidar
+      await sleep(2500);
+
+      // Mutate existing file and add new file
+      await writeFile(join(watchDir, "initial.md"), "# Initial document\n\nNow with huge mutations.");
+      await writeFile(join(watchDir, "new-file.md"), "# This is a new file created during watch.");
+
+      // Wait for debounce (500ms) and embedding
+      await sleep(3500);
+
+      const resCreated = await runQmd(["search", "created during watch"], { dbPath: localDbPath, configDir: localConfigDir });
+      if (resCreated.exitCode !== 0 || !resCreated.stdout.includes("new-file.md")) {
+         console.error("Watch Daemon Output:", daemonOut);
+      }
+      expect(resCreated.exitCode).toBe(0);
+      expect(resCreated.stdout).toContain("new-file.md");
+
+      const resMutated = await runQmd(["search", "huge mutations"], { dbPath: localDbPath, configDir: localConfigDir });
+      expect(resMutated.exitCode).toBe(0);
+      expect(resMutated.stdout).toContain("initial.md");
+    } finally {
+      // Ensure we kill the watcher
+      proc.kill("SIGTERM");
+      await new Promise(r => proc.on("close", r));
+    }
+  }, 15000);
+});
+
+describe("CLI Skill Install Command", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("skill-install");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+  });
+
+  test("installs the KINDX skill to the claude commands directory", async () => {
+    // homedir in kindx.ts is mocked/overridden via KINDX_CONFIG_DIR to be the parent dir of configDir
+    const expectedDest = join(dirname(localConfigDir), ".claude", "commands", "kindx.md");
+    
+    // Ensure it doesn't exist initially
+    if (existsSync(expectedDest)) unlinkSync(expectedDest);
+
+    const { stdout, exitCode } = await runQmd(["skill", "install"], { 
+      configDir: localConfigDir,
+      env: { MOCK_HOMEDIR: dirname(localConfigDir) }
+    });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("KINDX skill successfully installed");
+
+    // Verify it was copied
+    expect(existsSync(expectedDest)).toBe(true);
+    const content = readFileSync(expectedDest, "utf-8");
+    expect(content.length).toBeGreaterThan(0);
+  });
+});
+
+describe("Remote API Integration", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+  let mockServer: http.Server;
+  let mockPort: number;
+  let requests: { method: string; url: string; body: any }[] = [];
+
+  beforeAll(async () => {
+    mockServer = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      req.on("data", (chunk: any) => body += chunk);
+      req.on("end", () => {
+        try {
+          const parsed = body ? JSON.parse(body) : null;
+          requests.push({ method: req.method || "", url: req.url || "", body: parsed });
+        } catch (e) { }
+
+        res.setHeader("Content-Type", "application/json");
+
+        if (req.url?.includes("/v1/models")) {
+          res.end(JSON.stringify({ data: [{ id: "mock-embed" }, { id: "mock-generate" }] }));
+        }
+        else if (req.url?.includes("/v1/embeddings")) {
+          const vec = new Array(768).fill(0.1);
+          res.end(JSON.stringify({ data: [{ embedding: vec, index: 0 }] }));
+        }
+        else if (req.url?.includes("/v1/chat/completions")) {
+          const expandVariant = JSON.stringify([{ type: "vec", text: "this is a remote search" }]);
+          res.end(JSON.stringify({ choices: [{ message: { content: expandVariant } }] }));
+        }
+        else if (req.url?.includes("/v1/rerank")) {
+          res.end(JSON.stringify({ results: [{ index: 0, relevance_score: 0.99 }] }));
+        }
+        else {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: "Not found" }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => {
+      mockServer.listen(0, "127.0.0.1", () => {
+        mockPort = (mockServer.address() as any).port;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => {
+      mockServer.close(() => resolve());
+    });
+  });
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("remote-api");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+    requests = [];
+  });
+
+  test("runs embed and query completely through remote API", async () => {
+    // 1. Initial collection
+    const notesDir = join(tmpdir(), `kindx-test-remote-${Date.now()}`);
+    await mkdir(notesDir, { recursive: true });
+    await writeFile(join(notesDir, "remote.md"), "This is a document processed by the remote API.");
+
+    await runQmd(["collection", "add", notesDir], { dbPath: localDbPath, configDir: localConfigDir });
+
+    // 2. Run embed (should hit /v1/embeddings)
+    const embedRes = await runQmd(["embed"], {
+      dbPath: localDbPath,
+      configDir: localConfigDir,
+      env: {
+        KINDX_LLM_BACKEND: "remote",
+        KINDX_OPENAI_BASE_URL: `http://127.0.0.1:${mockPort}/v1`
+      }
+    });
+
+    expect(embedRes.exitCode).toBe(0);
+    const embedCalls = requests.filter(r => r.url.includes("/v1/embeddings"));
+    expect(embedCalls.length).toBeGreaterThan(0);
+    expect(embedCalls[0]!.body.input).toContain("processed by the remote API");
+
+    // Clear requests for the query phase
+    requests = [];
+
+    // 3. Run a query (should hit expand, embed, and rerank)
+    const queryRes = await runQmd(["query", "this is a completely different phrasing"], {
+      dbPath: localDbPath,
+      configDir: localConfigDir,
+      env: {
+        KINDX_LLM_BACKEND: "remote",
+        KINDX_OPENAI_BASE_URL: `http://127.0.0.1:${mockPort}/v1`
+      }
+    });
+
+    expect(queryRes.exitCode).toBe(0);
+    console.log("QUERY RUN STDOUT:", queryRes.stdout);
+    console.log("REQUESTS RECORDED:", JSON.stringify(requests, null, 2));
+
+    // Verify the pipeline was explicitly routed remotely
+    const chatCalls = requests.filter(r => r.url.includes("/chat/completions")); // Expansion
+    const rerankCalls = requests.filter(r => r.url.includes("/rerank"));         // Reranking
+
+    expect(chatCalls.length).toBeGreaterThan(0);
+    expect(rerankCalls.length).toBeGreaterThan(0);
+    
+    await rm(notesDir, { recursive: true, force: true });
   });
 });

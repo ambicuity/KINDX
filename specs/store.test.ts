@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import * as llmModule from "../engine/inference.js";
-import { disposeDefaultLlamaCpp } from "../engine/inference.js";
+import { disposeDefaultLLM } from "../engine/inference.js";
 import {
   createStore,
   verifySqliteVecLoaded,
@@ -233,7 +233,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   // Ensure native resources are released to avoid ggml-metal asserts on process exit.
-  await disposeDefaultLlamaCpp();
+  await disposeDefaultLLM();
 
   try {
     // Clean up test directory
@@ -2371,13 +2371,13 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
   test("expandQuery returns typed expansions (no original query)", async () => {
     const store = await createTestStore();
 
-    const expanded = await store.expandQuery("test query");
+    const expanded = await store.expandQuery("this is a test query for expansion");
     // Returns ExpandedQuery[] — typed results from LLM, excluding original
     expect(expanded.length).toBeGreaterThanOrEqual(1);
     for (const q of expanded) {
       expect(['lex', 'vec', 'hyde']).toContain(q.type);
       expect(q.text.length).toBeGreaterThan(0);
-      expect(q.text).not.toBe("test query"); // original excluded
+      expect(q.text).not.toBe("this is a test query for expansion"); // original excluded
     }
 
     await cleanupTestDb(store);
@@ -2387,9 +2387,9 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
     const store = await createTestStore();
 
     // First call — hits LLM
-    const queries1 = await store.expandQuery("cached query test");
+    const queries1 = await store.expandQuery("this is a cached query test");
     // Second call — hits cache
-    const queries2 = await store.expandQuery("cached query test");
+    const queries2 = await store.expandQuery("this is a cached query test");
 
     // Cache should preserve full typed structure
     expect(queries1).toEqual(queries2);
@@ -2440,7 +2440,7 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       model: "mock-reranker",
     }));
 
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLlamaCpp").mockReturnValue({
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
       rerank: rerankSpy,
     } as any);
 

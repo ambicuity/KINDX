@@ -36,7 +36,7 @@ import {
   DEFAULT_EMBED_MODEL,
   type RankedResult,
 } from "../engine/repository.js";
-import { getDefaultLlamaCpp, formatDocForEmbedding, disposeDefaultLlamaCpp } from "../engine/inference.js";
+import { getDefaultLLM, formatDocForEmbedding, disposeDefaultLLM } from "../engine/inference.js";
 
 // Eval queries with expected documents
 const evalQueries: {
@@ -179,7 +179,7 @@ describe.skipIf(!!process.env.CI)("Vector Search", () => {
     }
 
     // Generate embeddings for test documents
-    const llm = getDefaultLlamaCpp();
+    const llm = getDefaultLLM();
     store.ensureVecTable(768); // embeddinggemma uses 768 dimensions
 
     const evalDocsDir = join(dirname(fileURLToPath(import.meta.url)), "eval-docs");
@@ -411,6 +411,6 @@ describe.skipIf(!!process.env.CI)("Hybrid Search (RRF)", () => {
 
 afterAll(async () => {
   // Ensure native resources are released to avoid ggml-metal asserts on process exit.
-  await disposeDefaultLlamaCpp();
+  await disposeDefaultLLM();
   rmSync(tempDir, { recursive: true, force: true });
 });

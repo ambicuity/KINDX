@@ -74,7 +74,7 @@ GENERIC_LEX_PHRASES = frozenset({
 
 # Words commonly injected as filler/noise into lex lines by template generators
 # (e.g. "ancient overview rome timeline"). Penalized when absent from the query.
-INTERIOR_FILLER_WORDS = frozenset({'overview', 'basics'})
+INTERIOR_FILLER_WORDS = frozenset({'overview', 'basics', 'guide', 'tutorial', 'example', 'details', 'information', 'about', 'notes', 'summary', 'meeting', 'discussion'})
 
 # Chat template tokens that indicate a broken output
 CHAT_TEMPLATE_TOKENS = frozenset({
@@ -105,7 +105,9 @@ def parse_expansion(text: str) -> dict:
     return result
 
 
-def detect_only_mode(query: str) -> tuple[str | None, str]:
+from typing import Optional
+
+def detect_only_mode(query: str) -> tuple[Optional[str], str]:
     """Detect if query ends with 'only: lex/vec/hyde'.
     
     Returns (only_type, base_query) where only_type is None for normal queries.
@@ -147,8 +149,8 @@ def extract_named_entities(query: str) -> set:
     Position-0 words are also detected as entities if they are capitalized and
     not common query-starting verbs (e.g. "Bob asked about deploy" -> "bob").
 
-    Compound chaining extends one level from a directly-detected entity:
-    "TDS motorsports" -> {tds, motorsports}; "TDS motorsports team" -> {tds, motorsports}.
+    Compound chaining extends infinitely across adjacent capitalized words:
+    "TDS motorsports team" -> {tds, motorsports, team}
     """
     entities = set()
     words = query.split()
@@ -187,6 +189,7 @@ def extract_named_entities(query: str) -> set:
         # Compound names: word following a BASE entity only (one level deep).
         elif prev_was_base_entity and clean.lower() not in KEY_TERM_STOPWORDS:
             entities.add(clean.lower())
+            is_base_entity = True
 
         prev_was_base_entity = is_base_entity
 
@@ -239,7 +242,7 @@ def word_set_distance(a: str, b: str) -> int:
     return len(set(a.lower().split()) ^ set(b.lower().split()))
 
 
-def is_diverse(a: str, b: str, min_distance: int = 2) -> bool:
+def is_diverse(a: str, b: str, min_distance: int = 3) -> bool:
     """Are two strings sufficiently different?"""
     a, b = a.lower().strip(), b.lower().strip()
     if a == b or a in b or b in a:
@@ -332,7 +335,7 @@ def _score_only_mode(query: str, base_query: str, text: str, used_thinking: bool
         # Penalty: lex lines containing filler words absent from the query
         filler_count = sum(1 for l in expected_items if lex_has_filler(l, base_query))
         if filler_count > 0:
-            quality_score -= filler_count * 3
+            quality_score -= filler_count * 10
             deductions.append(f"{filler_count} lex line(s) with filler words")
     
     elif only_type == "vec":
@@ -365,7 +368,7 @@ def _score_only_mode(query: str, base_query: str, text: str, used_thinking: bool
         elif with_entities > 0:
             entity_score += 5
         else:
-            entity_score = 0
+            entity_score -= 65
             deductions.append(f"missing entities: {entities}")
     
     # --- Think bonus (0-20) ---
@@ -541,16 +544,22 @@ def score_expansion_detailed(query: str, expansion: str) -> dict:
     if parsed["lex"]:
         filler_count = sum(1 for l in parsed["lex"] if lex_has_filler(l, query))
         if filler_count > 0:
-            quality_score -= filler_count * 3
+            quality_score -= filler_count * 10
             deductions.append(f"{filler_count} lex line(s) with filler words")
 
-    # Bonus: lex uses quoted phrases for multi-word queries (+3)
+    # Bonus: lex uses quoted phrases for multi-word queries (+5)
     if parsed["lex"] and len(query.split()) >= 2:
         lex_joined = " ".join(parsed["lex"])
         if '"' in lex_joined:
-            quality_score += 3
+            quality_score += 5
+            
+    # Bonus: lex uses negation matching (-term) (+5)
+    if parsed["lex"]:
+        lex_joined = " ".join(parsed["lex"])
+        if re.search(r'\s-\w+', lex_joined):
+            quality_score += 5
 
-    # --- Entity Preservation (-45 to +20) ---
+    # --- Entity Preservation (-65 to +20) ---
     entity_score = 0
     if entities and parsed["lex"]:
         # Per-line check: do lex lines contain entities?
@@ -560,14 +569,14 @@ def score_expansion_detailed(query: str, expansion: str) -> dict:
         elif with_entities > 0:
             entity_score += 5
         else:
-            entity_score -= 30
+            entity_score -= 65
             deductions.append(f"lex missing entities: {entities}")
 
         # Per-entity coverage: is each entity mentioned somewhere in lex+vec?
         all_output = " ".join(parsed["lex"] + parsed["vec"]).lower()
         missing_entities = {e for e in entities if e not in all_output}
         if missing_entities:
-            penalty = len(missing_entities) * 20
+            penalty = len(missing_entities) * 65
             entity_score -= penalty
             deductions.append(f"entities dropped: {missing_entities}")
 
