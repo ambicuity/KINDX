@@ -63,4 +63,36 @@ When contributing to this project, please observe the following:
 - **Pin dependency versions** -- use exact versions in `package.json` to prevent supply-chain attacks
 - **Review GitHub Actions permissions** -- workflows should request the minimum permissions required
 
+## MCP HTTP Server Security
+
+When running KINDX in HTTP daemon mode (`kindx mcp --http`), the MCP endpoint is bound to `localhost` only but is unauthenticated by default, since the primary use case is single-user local access.
+
+**For any shared server or networked deployment**, authentication MUST be enabled:
+
+```bash
+# Generate a token and export it before starting the daemon:
+export KINDX_MCP_TOKEN="$(openssl rand -hex 32)"
+kindx mcp --http --port 7700
+```
+
+When `KINDX_MCP_TOKEN` is set:
+- All requests to `/mcp`, `/query`, and `/search` must include `Authorization: Bearer <token>`
+- The `/health` endpoint is intentionally exempt (monitoring probe compatibility)
+- Any request with a missing or incorrect token receives `401 Unauthorized`
+
+**MCP client configuration:** Pass the token via the `Authorization` header in your MCP client config. For Claude Desktop and most MCP-compatible clients, set the `headers` field in the server configuration:
+
+```json
+{
+  "mcpServers": {
+    "kindx": {
+      "url": "http://localhost:7700/mcp",
+      "headers": { "Authorization": "Bearer <your-token>" }
+    }
+  }
+}
+```
+
+Failure to set `KINDX_MCP_TOKEN` in a networked environment allows any process on the host to query your knowledge base and retrieve document content.
+
 Thank you for helping keep KINDX and its users safe.

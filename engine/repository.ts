@@ -3121,7 +3121,15 @@ export async function hybridQuery(
     const textsToEmbed = vecQueries.map(q => formatQueryForEmbedding(q.text));
     hooks?.onEmbedStart?.(textsToEmbed.length);
     const embedStart = Date.now();
-    const embeddings = await llm.embedBatch(textsToEmbed);
+    let embeddings: Awaited<ReturnType<typeof llm.embedBatch>>;
+    try {
+      embeddings = await llm.embedBatch(textsToEmbed);
+    } catch (err) {
+      process.stderr.write(
+        `KINDX Warning: embedBatch failed during hybridQuery, falling back to FTS-only results. ${err}\n`
+      );
+      embeddings = textsToEmbed.map(() => null);
+    }
     hooks?.onEmbedDone?.(Date.now() - embedStart);
 
     // Run sqlite-vec lookups with pre-computed embeddings
@@ -3444,7 +3452,15 @@ export async function structuredSearch(
       const textsToEmbed = vecSearches.map(s => formatQueryForEmbedding(s.query));
       hooks?.onEmbedStart?.(textsToEmbed.length);
       const embedStart = Date.now();
-      const embeddings = await llm.embedBatch(textsToEmbed);
+      let embeddings: Awaited<ReturnType<typeof llm.embedBatch>>;
+      try {
+        embeddings = await llm.embedBatch(textsToEmbed);
+      } catch (err) {
+        process.stderr.write(
+          `KINDX Warning: embedBatch failed during structuredSearch, falling back to FTS-only results. ${err}\n`
+        );
+        embeddings = vecSearches.map(() => null);
+      }
       hooks?.onEmbedDone?.(Date.now() - embedStart);
 
       for (let i = 0; i < vecSearches.length; i++) {

@@ -150,3 +150,28 @@ Once the KINDX repository is live on GitHub, each item above should be filed as 
 - **Enhancements 5-11:** Use the `Feature Request` template
 
 Apply the labels listed under each item.
+
+---
+
+### 12. `kindx watch` — Real-Time Incremental Indexing
+
+**Labels:** `enhancement`, `strategic`
+
+**Context:** No competitor in the local-first RAG space offers live incremental indexing for desktop corpora. This is a first-mover differentiator that moves KINDX from a "batch indexer" to a live knowledge substrate for agents.
+
+**Problem:** Currently, users must manually run `kindx update` after editing files. In agentic pipelines where documents change frequently (meeting notes, code, logs), stale retrieval is a silent correctness failure.
+
+**Proposed solution:** Implement a `kindx watch` daemon mode using Node.js `fs.watch` / `chokidar`:
+
+1. Subscribe to filesystem events on all registered collection paths
+2. Debounce changes (e.g., 500 ms) and trigger targeted re-index (not full re-index) per changed file
+3. Update FTS5 and vector indexes atomically per changed file using an existing SQLite WAL transaction
+4. Expose `kindx_index_freshness` field in `kindx_status` MCP tool to report last-updated timestamp per collection
+
+**Affected files:** `engine/repository.ts`, `engine/kindx.ts`, `engine/protocol.ts`
+
+**Implementation notes:**
+- `chokidar` (MIT, stable) is the recommended watcher — handles macOS FSEvents, Linux inotify, and Windows ReadDirectoryChangesW uniformly
+- Debounce rapid saves (e.g., editor auto-save storms) before triggering re-index to avoid redundant embed calls
+- Re-embedding should be skipped if the file hash hasn't changed (content-addressed storage already handles this)
+

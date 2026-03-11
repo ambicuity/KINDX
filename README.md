@@ -24,6 +24,23 @@ KINDX combines BM25 full-text retrieval, vector semantic retrieval, and LLM re-r
 
 ---
 
+## Why KINDX?
+
+The local RAG ecosystem is fragmenting: LanceDB is moving to multimodal ML infrastructure, Chroma is moving to managed cloud, Orama is moving to the browser. **KINDX is the only tool that stays on the desktop and speaks the agent's native language.**
+
+| Capability | KINDX | LanceDB | Chroma | Orama | Khoj |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Local-first / Air-gapped** | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **MCP Server (agent protocol)** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **On-device GGUF inference** | ✅ | ❌ | ❌ | ❌ | Partial |
+| **Hybrid BM25 + Vector + Rerank** | ✅ | Partial | Partial | ✅ | ❌ |
+| **Structured agent output (JSON/CSV/XML)** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **CLI-first / `child_process` invocable** | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+KINDX is the only product in this category that combines local-first privacy, first-class MCP support, on-device GGUF inference, structured pipeline output, and CLI invocability — making it the ideal Memory Node for MCP-compatible autonomous agents (Claude Code, Cursor, Continue.dev, AutoGPT, and beyond).
+
+---
+
 ## The Three Pillars
 
 ### 1. Deterministic Privacy

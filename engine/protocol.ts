@@ -558,6 +558,9 @@ export type HttpServerHandle = {
 export async function startMcpHttpServer(port: number, options?: { quiet?: boolean }): Promise<HttpServerHandle> {
   const store = createStore();
 
+  // Read token once at startup. Undefined / empty = auth disabled (single-user local mode).
+  const mcpToken = process.env.KINDX_MCP_TOKEN?.trim() || null;
+
   // Session map: each client gets its own McpServer + Transport pair (MCP spec requirement).
   // The store is shared — it's stateless SQLite, safe for concurrent access.
   const sessions = new Map<string, WebStandardStreamableHTTPServerTransport>();
@@ -631,6 +634,19 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         nodeRes.end(body);
         log(`${ts()} GET /health (${Date.now() - reqStart}ms)`);
         return;
+      }
+
+      // Bearer token authentication — enforced when KINDX_MCP_TOKEN env var is set.
+      // /health is intentionally exempt to allow monitoring probes without credentials.
+      // Set KINDX_MCP_TOKEN before starting the daemon in any shared or networked deployment.
+      if (mcpToken) {
+        const authHeader = nodeReq.headers["authorization"];
+        if (!authHeader || authHeader !== `Bearer ${mcpToken}`) {
+          nodeRes.writeHead(401, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({ error: "Unauthorized: set Authorization: Bearer <KINDX_MCP_TOKEN>" }));
+          log(`${ts()} 401 Unauthorized ${nodeReq.method} ${pathname}`);
+          return;
+        }
       }
 
       // REST endpoint: POST /search — structured search without MCP protocol
