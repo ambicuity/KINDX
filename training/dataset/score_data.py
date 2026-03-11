@@ -50,8 +50,8 @@ def main() -> int:
     parser.add_argument(
         "paths",
         nargs="*",
-        default=["finetune/data/*.jsonl"],
-        help="JSONL files or glob patterns (default: finetune/data/*.jsonl)",
+        default=["training/data/*.jsonl"],
+        help="JSONL files or glob patterns (default: training/data/*.jsonl)",
     )
     args = parser.parse_args()
 
