@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+const child_process = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+// Path to the compiled kindx executable
+const binPath = path.join(__dirname, '..', 'dist', 'kindx.js');
+
+if (!fs.existsSync(binPath)) {
+  console.error("Executable not found at " + binPath);
+  console.error("Did you run 'npm run build'?");
+  process.exit(1);
+}
+
+// Detect if running under bun. Bun has ABI mismatches with node's better-sqlite3
+if (process.versions && process.versions.bun) {
+  console.warn("WARNING: Running KINDX under Bun is known to cause better-sqlite3 ABI crashes.");
+  console.warn("Attempting to spawn the process under Node.js instead...");
+  
+  try {
+    const result = child_process.spawnSync('node', [binPath, ...process.argv.slice(2)], {
+      stdio: 'inherit',
+      env: process.env
+    });
+    process.exit(result.status ?? 0);
+  } catch (err) {
+    console.error("Failed to spawn node. Please ensure Node.js is installed.");
+    process.exit(1);
+  }
+} else {
+  // If not bun, just require the compiled js directly to save process spawning overhead
+  require(binPath);
+}

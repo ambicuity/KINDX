@@ -335,7 +335,7 @@ Override the default embedding model via the `KINDX_EMBED_MODEL` environment var
 
 ```bash
 # Use Qwen3-Embedding-0.6B for multilingual corpus (CJK) support
-export KINDX_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-q8_0.gguf"
+export KINDX_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-Q8_0.gguf"
 
 # Force re-embed all documents after model switch
 kindx embed -f
@@ -585,6 +585,12 @@ erDiagram
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
 | `XDG_CACHE_HOME` | `~/.cache` | Cache base directory |
 | `NO_COLOR` | (unset) | Disable ANSI terminal colors |
+| `KINDX_LLM_BACKEND` | `local` | Set to `remote` to use an OpenAI-compatible API instead of local GPU |
+| `KINDX_OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | URL for the Remote API backend (e.g. Ollama, LM Studio) |
+| `KINDX_OPENAI_API_KEY` | (unset) | API key for the Remote API backend if required |
+| `KINDX_OPENAI_EMBED_MODEL`| `nomic-embed-text` | Model name to pass for `/v1/embeddings` |
+| `KINDX_OPENAI_GENERATE_MODEL` | `llama3.2` | Model name to pass for `/v1/chat/completions` (query expansion) |
+| `KINDX_OPENAI_RERANK_MODEL` | (unset) | Model name to pass for `/v1/rerank` (if supported by backend) |
 
 ---
 

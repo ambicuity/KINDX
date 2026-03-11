@@ -26,7 +26,7 @@ import { cpus } from "os";
 // Config
 // ============================================================================
 
-const RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
+const RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-Q8_0.gguf";
 const MODEL_CACHE = join(homedir(), ".cache", "kindx", "models");
 const CONTEXT_SIZE = 2048;
 

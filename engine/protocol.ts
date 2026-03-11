@@ -25,7 +25,7 @@ import {
 } from "./repository.js";
 import type { Store, StructuredSubSearch } from "./repository.js";
 import { getCollection, getGlobalContext, getDefaultCollectionNames } from "./catalogs.js";
-import { disposeDefaultLlamaCpp } from "./inference.js";
+import { disposeDefaultLLM } from "./inference.js";
 
 // =============================================================================
 // Types for structured content
@@ -51,6 +51,7 @@ type StatusResult = {
     documents: number;
     lastUpdated: string;
   }[];
+  watchDaemon?: "active" | "inactive";
 };
 
 // =============================================================================
@@ -508,12 +509,41 @@ Intent-aware lex (C++ performance, not sports):
     async () => {
       const status: StatusResult = store.getStatus();
 
+      let watchDaemon: "active" | "inactive" = "inactive";
+      try {
+        const { resolve } = await import("path");
+        const { homedir } = await import("os");
+        const { readFileSync, existsSync, unlinkSync } = await import("fs");
+        const cacheDir = process.env.XDG_CACHE_HOME
+          ? resolve(process.env.XDG_CACHE_HOME, "kindx")
+          : resolve(homedir(), ".cache", "kindx");
+        const watchPidPath = resolve(cacheDir, "watch.pid");
+        if (existsSync(watchPidPath)) {
+          const watchPid = parseInt(readFileSync(watchPidPath, "utf-8").trim());
+          process.kill(watchPid, 0);
+          watchDaemon = "active";
+        }
+      } catch (err) {
+        try {
+          const { resolve } = await import("path");
+          const { homedir } = await import("os");
+          const { unlinkSync } = await import("fs");
+          const cacheDir = process.env.XDG_CACHE_HOME
+            ? resolve(process.env.XDG_CACHE_HOME, "kindx")
+            : resolve(homedir(), ".cache", "kindx");
+          unlinkSync(resolve(cacheDir, "watch.pid"));
+        } catch (e) {}
+      }
+
+      const fullStatus = { ...status, watchDaemon };
+
       const summary = [
         `KINDX Index Status:`,
         `  Total documents: ${status.totalDocuments}`,
         `  Needs embedding: ${status.needsEmbedding}`,
         `  Vector index: ${status.hasVectorIndex ? 'yes' : 'no'}`,
         `  Collections: ${status.collections.length}`,
+        `  Watch Daemon: ${watchDaemon === "active" ? "active" : "inactive"}`,
       ];
 
       for (const col of status.collections) {
@@ -522,7 +552,7 @@ Intent-aware lex (C++ performance, not sports):
 
       return {
         content: [{ type: "text", text: summary.join('\n') }],
-        structuredContent: status,
+        structuredContent: fullStatus,
       };
     }
   );
@@ -811,7 +841,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     sessions.clear();
     httpServer.close();
     store.close();
-    await disposeDefaultLlamaCpp();
+    await disposeDefaultLLM();
   };
 
   process.on("SIGTERM", async () => {

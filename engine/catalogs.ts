@@ -151,7 +151,12 @@ export function saveConfig(config: CollectionConfig): void {
  */
 export function getCollection(name: string): NamedCollection | null {
   const config = loadConfig();
-  const collection = config.collections[name];
+  let collection: any;
+  if (Array.isArray(config.collections)) {
+    collection = config.collections.find((c: any) => c.name === name);
+  } else {
+    collection = config.collections[name];
+  }
 
   if (!collection) {
     return null;
@@ -193,7 +198,12 @@ export function updateCollectionSettings(
   settings: { update?: string | null; includeByDefault?: boolean }
 ): boolean {
   const config = loadConfig();
-  const collection = config.collections[name];
+  let collection: any;
+  if (Array.isArray(config.collections)) {
+    collection = config.collections.find((c: any) => c.name === name);
+  } else {
+    collection = config.collections[name];
+  }
   if (!collection) return false;
 
   if (settings.update !== undefined) {
@@ -227,11 +237,20 @@ export function addCollection(
 ): void {
   const config = loadConfig();
 
-  config.collections[name] = {
-    path,
-    pattern,
-    context: config.collections[name]?.context, // Preserve existing context
-  };
+  if (Array.isArray(config.collections)) {
+    const existingIdx = config.collections.findIndex((c: any) => c.name === name);
+    if (existingIdx >= 0) {
+      config.collections[existingIdx] = { name, path, pattern, context: config.collections[existingIdx].context };
+    } else {
+      config.collections.push({ name, path, pattern } as any);
+    }
+  } else {
+    config.collections[name] = {
+      path,
+      pattern,
+      context: config.collections[name]?.context, // Preserve existing context
+    };
+  }
 
   saveConfig(config);
 }
@@ -242,11 +261,16 @@ export function addCollection(
 export function removeCollection(name: string): boolean {
   const config = loadConfig();
 
-  if (!config.collections[name]) {
-    return false;
+  if (Array.isArray(config.collections)) {
+    const idx = config.collections.findIndex((c: any) => c.name === name);
+    if (idx === -1) return false;
+    config.collections.splice(idx, 1);
+  } else {
+    if (!config.collections[name]) {
+      return false;
+    }
+    delete config.collections[name];
   }
-
-  delete config.collections[name];
   saveConfig(config);
   return true;
 }
@@ -257,16 +281,23 @@ export function removeCollection(name: string): boolean {
 export function renameCollection(oldName: string, newName: string): boolean {
   const config = loadConfig();
 
-  if (!config.collections[oldName]) {
-    return false;
-  }
+  if (Array.isArray(config.collections)) {
+    if (config.collections.some((c: any) => c.name === newName)) throw new Error(`Collection '${newName}' already exists`);
+    const idx = config.collections.findIndex((c: any) => c.name === oldName);
+    if (idx === -1) return false;
+    config.collections[idx].name = newName;
+  } else {
+    if (!config.collections[oldName]) {
+      return false;
+    }
 
-  if (config.collections[newName]) {
-    throw new Error(`Collection '${newName}' already exists`);
-  }
+    if (config.collections[newName]) {
+      throw new Error(`Collection '${newName}' already exists`);
+    }
 
-  config.collections[newName] = config.collections[oldName];
-  delete config.collections[oldName];
+    config.collections[newName] = config.collections[oldName];
+    delete config.collections[oldName];
+  }
   saveConfig(config);
   return true;
 }

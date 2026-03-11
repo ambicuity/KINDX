@@ -14,6 +14,7 @@ import {
   type LlamaEmbeddingContext,
   type Token as LlamaToken,
 } from "node-llama-cpp";
+import { RemoteLLM } from "./remote-llm.js";
 import { homedir } from "os";
 import { join } from "path";
 import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync } from "fs";
@@ -194,7 +195,7 @@ export type RerankDocument = {
 // Format: hf:<user>/<repo>/<file>
 // Override via KINDX_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-q8_0.gguf)
 const DEFAULT_EMBED_MODEL = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
+const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-Q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = process.env.KINDX_GENERATE_MODEL ?? "hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
 
 // Alternative generation models for query expansion:
@@ -317,6 +318,11 @@ export interface LLM {
   embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null>;
 
   /**
+   * Batch get embeddings for text
+   */
+  embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]>;
+
+  /**
    * Generate text completion
    */
   generate(prompt: string, options?: GenerateOptions): Promise<GenerateResult | null>;
@@ -337,6 +343,27 @@ export interface LLM {
    * Returns list of documents with relevance scores (higher = more relevant)
    */
   rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult>;
+
+  /**
+   * Tokenize text into backend-specific tokens (optional, implemented by local models)
+   */
+  tokenize?(text: string): Promise<readonly any[]>;
+
+  /**
+   * Detokenize token IDs back to text (optional)
+   */
+  detokenize?(tokens: readonly any[]): Promise<string>;
+
+  /**
+   * Get device and GPU accelerator info (optional)
+   */
+  getDeviceInfo?(): Promise<{
+    gpu: string | false;
+    gpuOffloading: boolean;
+    gpuDevices: string[];
+    vram?: { total: number; used: number; free: number };
+    cpuCores: number;
+  }>;
 
   /**
    * Dispose of resources
@@ -1318,11 +1345,11 @@ export class LlamaCpp implements LLM {
  * Coordinates with LlamaCpp idle timeout to prevent disposal during active sessions.
  */
 class LLMSessionManager {
-  private llm: LlamaCpp;
+  private llm: LLM;
   private _activeSessionCount = 0;
   private _inFlightOperations = 0;
 
-  constructor(llm: LlamaCpp) {
+  constructor(llm: LLM) {
     this.llm = llm;
   }
 
@@ -1358,7 +1385,7 @@ class LLMSessionManager {
     this._inFlightOperations = Math.max(0, this._inFlightOperations - 1);
   }
 
-  getLlamaCpp(): LlamaCpp {
+  getLLM(): LLM {
     return this.llm;
   }
 }
@@ -1461,18 +1488,18 @@ class LLMSession implements ILLMSession {
   }
 
   async embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null> {
-    return this.withOperation(() => this.manager.getLlamaCpp().embed(text, options));
+    return this.withOperation(() => this.manager.getLLM().embed(text, options));
   }
 
   async embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]> {
-    return this.withOperation(() => this.manager.getLlamaCpp().embedBatch(texts));
+    return this.withOperation(() => this.manager.getLLM().embedBatch(texts));
   }
 
   async expandQuery(
     query: string,
     options?: { context?: string; includeLexical?: boolean }
   ): Promise<Queryable[]> {
-    return this.withOperation(() => this.manager.getLlamaCpp().expandQuery(query, options));
+    return this.withOperation(() => this.manager.getLLM().expandQuery(query, options));
   }
 
   async rerank(
@@ -1480,19 +1507,19 @@ class LLMSession implements ILLMSession {
     documents: RerankDocument[],
     options?: RerankOptions
   ): Promise<RerankResult> {
-    return this.withOperation(() => this.manager.getLlamaCpp().rerank(query, documents, options));
+    return this.withOperation(() => this.manager.getLLM().rerank(query, documents, options));
   }
 }
 
-// Session manager for the default LlamaCpp instance
+// Session manager for the default LLM instance
 let defaultSessionManager: LLMSessionManager | null = null;
 
 /**
- * Get the session manager for the default LlamaCpp instance.
+ * Get the session manager for the default LLM instance.
  */
 function getSessionManager(): LLMSessionManager {
-  const llm = getDefaultLlamaCpp();
-  if (!defaultSessionManager || defaultSessionManager.getLlamaCpp() !== llm) {
+  const llm = getDefaultLLM();
+  if (!defaultSessionManager || defaultSessionManager.getLLM() !== llm) {
     defaultSessionManager = new LLMSessionManager(llm);
   }
   return defaultSessionManager;
@@ -1536,36 +1563,40 @@ export function canUnloadLLM(): boolean {
 }
 
 // =============================================================================
-// Singleton for default LlamaCpp instance
+// Singleton for default LLM instance
 // =============================================================================
 
-let defaultLlamaCpp: LlamaCpp | null = null;
+let defaultLLM: LLM | null = null;
 
 /**
- * Get the default LlamaCpp instance (creates one if needed)
+ * Get the default LLM instance (creates one if needed)
  */
-export function getDefaultLlamaCpp(): LlamaCpp {
-  if (!defaultLlamaCpp) {
-    const embedModel = process.env.KINDX_EMBED_MODEL;
-    defaultLlamaCpp = new LlamaCpp(embedModel ? { embedModel } : {});
+export function getDefaultLLM(): LLM {
+  if (!defaultLLM) {
+    if (process.env.KINDX_LLM_BACKEND === "remote") {
+      defaultLLM = new RemoteLLM();
+    } else {
+      const embedModel = process.env.KINDX_EMBED_MODEL;
+      defaultLLM = new LlamaCpp(embedModel ? { embedModel } : {});
+    }
   }
-  return defaultLlamaCpp;
+  return defaultLLM;
 }
 
 /**
- * Set a custom default LlamaCpp instance (useful for testing)
+ * Set a custom default LLM instance (useful for testing)
  */
-export function setDefaultLlamaCpp(llm: LlamaCpp | null): void {
-  defaultLlamaCpp = llm;
+export function setDefaultLLM(llm: LLM | null): void {
+  defaultLLM = llm;
 }
 
 /**
- * Dispose the default LlamaCpp instance if it exists.
+ * Dispose the default LLM instance if it exists.
  * Call this before process exit to prevent NAPI crashes.
  */
-export async function disposeDefaultLlamaCpp(): Promise<void> {
-  if (defaultLlamaCpp) {
-    await defaultLlamaCpp.dispose();
-    defaultLlamaCpp = null;
+export async function disposeDefaultLLM(): Promise<void> {
+  if (defaultLLM) {
+    await defaultLLM.dispose();
+    defaultLLM = null;
   }
 }

@@ -71,7 +71,7 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./repository.js";
-import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
+import { disposeDefaultLLM, getDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -315,6 +315,18 @@ async function showStatus(): Promise<void> {
       // Stale PID file cleaned up silently
     }
   }
+
+  // Watch daemon status
+  const watchPidPath = resolve(mcpCacheDir, "watch.pid");
+  if (existsSync(watchPidPath)) {
+    const watchPid = parseInt(readFileSync(watchPidPath, "utf-8").trim());
+    try {
+      process.kill(watchPid, 0);
+      console.log(`Watch: ${c.green}running${c.reset} (PID ${watchPid})`);
+    } catch {
+      unlinkSync(watchPidPath);
+    }
+  }
   console.log("");
 
   console.log(`${c.bold}Documents${c.reset}`);
@@ -399,30 +411,35 @@ async function showStatus(): Promise<void> {
 
   // Device / GPU info
   try {
-    const llm = getDefaultLlamaCpp();
-    const device = await llm.getDeviceInfo();
-    console.log(`\n${c.bold}Device${c.reset}`);
-    if (device.gpu) {
-      console.log(`  GPU:      ${c.green}${device.gpu}${c.reset} (offloading: ${device.gpuOffloading ? 'yes' : 'no'})`);
-      if (device.gpuDevices.length > 0) {
-        // Deduplicate and count GPUs
-        const counts = new Map<string, number>();
-        for (const name of device.gpuDevices) {
-          counts.set(name, (counts.get(name) || 0) + 1);
+    const llm = getDefaultLLM();
+    if (typeof llm.getDeviceInfo === "function") {
+      const device = await llm.getDeviceInfo();
+      console.log(`\n${c.bold}Device${c.reset}`);
+      if (device.gpu) {
+        console.log(`  GPU:      ${c.green}${device.gpu}${c.reset} (offloading: ${device.gpuOffloading ? 'yes' : 'no'})`);
+        if (device.gpuDevices.length > 0) {
+          // Deduplicate and count GPUs
+          const counts = new Map<string, number>();
+          for (const name of device.gpuDevices) {
+            counts.set(name, (counts.get(name) || 0) + 1);
+          }
+          const deviceStr = Array.from(counts.entries())
+            .map(([name, count]) => count > 1 ? `${count}× ${name}` : name)
+            .join(', ');
+          console.log(`  Devices:  ${deviceStr}`);
         }
-        const deviceStr = Array.from(counts.entries())
-          .map(([name, count]) => count > 1 ? `${count}× ${name}` : name)
-          .join(', ');
-        console.log(`  Devices:  ${deviceStr}`);
+        if (device.vram) {
+          console.log(`  VRAM:     ${formatBytes(device.vram.free)} free / ${formatBytes(device.vram.total)} total`);
+        }
+      } else {
+        console.log(`  GPU:      ${c.yellow}none${c.reset} (running on CPU — models will be slow)`);
+        console.log(`  ${c.dim}Tip: Install CUDA, Vulkan, or Metal support for GPU acceleration.${c.reset}`);
       }
-      if (device.vram) {
-        console.log(`  VRAM:     ${formatBytes(device.vram.free)} free / ${formatBytes(device.vram.total)} total`);
-      }
+      console.log(`  CPU:      ${device.cpuCores} math cores`);
     } else {
-      console.log(`  GPU:      ${c.yellow}none${c.reset} (running on CPU — models will be slow)`);
-      console.log(`  ${c.dim}Tip: Install CUDA, Vulkan, or Metal support for GPU acceleration.${c.reset}`);
+      console.log(`\n${c.bold}Device${c.reset}`);
+      console.log(`  Accelerator: ${c.cyan}Remote API${c.reset} (API backend)`);
     }
-    console.log(`  CPU:      ${device.cpuCores} math cores`);
   } catch {
     // Don't fail status if LLM init fails
   }
@@ -2434,6 +2451,31 @@ function showSkill(): void {
   process.stdout.write(content.endsWith("\n") ? content : content + "\n");
 }
 
+function installSkill(): void {
+  const argv1 = process.argv[1];
+  const actualScriptPath = argv1 ? realpathSync(argv1) : fileURLToPath(import.meta.url);
+  const scriptDir = dirname(actualScriptPath);
+  const relativePath = pathJoin("capabilities", "kindx", "SKILL.md");
+  const skillPath = pathJoin(scriptDir, "..", relativePath);
+
+  if (!existsSync(skillPath)) {
+    console.error("SKILL.md not found. If you built from source, ensure capabilities/kindx/SKILL.md exists.");
+    process.exit(1);
+  }
+
+  const content = readFileSync(skillPath, "utf-8");
+  const home = process.env.MOCK_HOMEDIR || homedir();
+  const claudeCommandsDir = pathJoin(home, ".claude", "commands");
+  
+  if (!existsSync(claudeCommandsDir)) {
+    mkdirSync(claudeCommandsDir, { recursive: true });
+  }
+
+  const destPath = pathJoin(claudeCommandsDir, "kindx.md");
+  writeFileSync(destPath, content, "utf-8");
+  console.log(`✓ KINDX skill successfully installed to ${destPath}`);
+}
+
 function showHelp(): void {
   console.log("kindx -- Knowledge INDexer");
   console.log("");
@@ -2448,6 +2490,7 @@ function showHelp(): void {
   console.log("  kindx get <file>[:line] [-l N]  - Show a single document, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
+  console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
   console.log("  kindx collection add/list/remove/rename/show   - Manage indexed folders");
@@ -2456,6 +2499,8 @@ function showHelp(): void {
   console.log("");
   console.log("Maintenance:");
   console.log("  kindx status                    - View index + collection health");
+  console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
+  console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
@@ -2812,6 +2857,58 @@ if (isMain) {
       await showStatus();
       break;
 
+    case "migrate": {
+      const target = cli.args[0];
+      const dbPath = cli.args[1];
+      if (target !== "chroma" || !dbPath) {
+        console.error("Usage: kindx migrate chroma <chroma-db-path>");
+        process.exit(1);
+      }
+      const { migrateChroma } = await import("./migrate.js");
+      const store = getStore();
+      await migrateChroma(dbPath, "chroma_import", store);
+      closeDb();
+      break;
+    }
+
+    case "skill": {
+      const subcommand = cli.args[0];
+      if (subcommand === "install") {
+        installSkill();
+      } else {
+        console.error("Usage: kindx skill install");
+        process.exit(1);
+      }
+      break;
+    }
+
+    case "watch": {
+      const { WatchDaemon } = await import("./watcher.js");
+      const store = getStore();
+      const daemon = new WatchDaemon(store);
+      
+      // Let it handle graceful shutdown
+      process.on("SIGINT", async () => {
+        console.log("\nGot SIGINT, stopping watcher...");
+        await daemon.stop();
+        closeDb();
+        process.exit(0);
+      });
+      process.on("SIGTERM", async () => {
+        console.log("\nGot SIGTERM, stopping watcher...");
+        await daemon.stop();
+        closeDb();
+        process.exit(0);
+      });
+
+      // User can pass specific collections: `kindx watch notes brain`
+      await daemon.start(cli.args.length > 0 ? cli.args : undefined);
+      
+      // Keep process alive indefinitely
+      await new Promise(() => {});
+      break;
+    }
+
     case "update": {
       const collFilter = cli.values.collection as string | undefined;
       await updateCollections(collFilter);
@@ -2994,7 +3091,7 @@ if (isMain) {
   }
 
   if (cli.command !== "mcp") {
-    await disposeDefaultLlamaCpp();
+    await disposeDefaultLLM();
     process.exit(0);
   }
 
