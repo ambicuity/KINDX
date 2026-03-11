@@ -1041,10 +1041,55 @@ describe("MCP HTTP Transport", () => {
 
     const { status, json } = await mcpRequest({
       jsonrpc: "2.0", id: 4, method: "tools/call",
-      params: { name: "get", arguments: { path: "readme.md" } },
+      params: { name: "get", arguments: { file: "readme.md" } },
     });
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
+  });
+
+  test("server uses dbPath instead of default index.sqlite", async () => {
+    const originalIndexPath = process.env.INDEX_PATH;
+    delete process.env.INDEX_PATH;
+
+    const testHandle = await startMcpHttpServer(0, { quiet: true, dbPath: httpTestDbPath });
+    const testBaseUrl = `http://localhost:${testHandle.port}`;
+
+    let localSessionId: string | null = null;
+    try {
+      const res = await fetch(`${testBaseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+        }),
+      });
+      localSessionId = res.headers.get("mcp-session-id");
+      expect(res.status).toBe(200);
+
+      const searchRes = await fetch(`${testBaseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "mcp-session-id": localSessionId || "",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 2, method: "tools/call",
+          params: { name: "query", arguments: { searches: [{ type: "lex", query: "readme" }] } },
+        }),
+      });
+
+      const searchJson = await searchRes.json();
+      expect(searchRes.status).toBe(200);
+      expect(searchJson.result.content.length).toBeGreaterThan(0);
+    } finally {
+      await testHandle.stop();
+      if (originalIndexPath !== undefined) process.env.INDEX_PATH = originalIndexPath;
+    }
   });
 });

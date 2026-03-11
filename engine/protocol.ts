@@ -564,8 +564,8 @@ Intent-aware lex (C++ performance, not sports):
 // Transport: stdio (default)
 // =============================================================================
 
-export async function startMcpServer(): Promise<void> {
-  const store = createStore();
+export async function startMcpServer(dbPath?: string): Promise<void> {
+  const store = createStore(dbPath);
   const server = createMcpServer(store);
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -585,8 +585,8 @@ export type HttpServerHandle = {
  * Start MCP server over Streamable HTTP (JSON responses, no SSE).
  * Binds to localhost only. Returns a handle for shutdown and port discovery.
  */
-export async function startMcpHttpServer(port: number, options?: { quiet?: boolean }): Promise<HttpServerHandle> {
-  const store = createStore();
+export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string }): Promise<HttpServerHandle> {
+  const store = createStore(options?.dbPath);
 
   // Read token once at startup. Undefined / empty = auth disabled (single-user local mode).
   const mcpToken = process.env.KINDX_MCP_TOKEN?.trim() || null;

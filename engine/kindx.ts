@@ -61,6 +61,7 @@ import {
   vectorSearchQuery,
   structuredSearch,
   addLineNumbers,
+  findDocument,
   type ExpandedQuery,
   type HybridQueryExplain,
   type StructuredSubSearch,
@@ -946,65 +947,18 @@ function multiGet(pattern: string, maxLines?: number, maxBytes: number = DEFAULT
   let files: { filepath: string; displayPath: string; bodyLength: number; collection?: string; path?: string }[];
 
   if (isCommaSeparated) {
-    // Comma-separated list of files (can be virtual paths or relative paths)
+    // Comma-separated list of files (can be virtual paths, local paths, or #docids)
     const names = pattern.split(',').map(s => s.trim()).filter(Boolean);
     files = [];
     for (const name of names) {
-      let doc: { virtual_path: string; body_length: number; collection: string; path: string } | null = null;
-
-      // Handle virtual paths
-      if (isVirtualPath(name)) {
-        const parsed = parseVirtualPath(name);
-        if (parsed) {
-          // Try exact match on collection + path
-          doc = db.prepare(`
-            SELECT
-              'kindx://' || d.collection || '/' || d.path as virtual_path,
-              LENGTH(content.doc) as body_length,
-              d.collection,
-              d.path
-            FROM documents d
-            JOIN content ON content.hash = d.hash
-            WHERE d.collection = ? AND d.path = ? AND d.active = 1
-          `).get(parsed.collectionName, parsed.path) as typeof doc;
-        }
-      } else {
-        // Try exact match on path
-        doc = db.prepare(`
-          SELECT
-            'kindx://' || d.collection || '/' || d.path as virtual_path,
-            LENGTH(content.doc) as body_length,
-            d.collection,
-            d.path
-          FROM documents d
-          JOIN content ON content.hash = d.hash
-          WHERE d.path = ? AND d.active = 1
-          LIMIT 1
-        `).get(name) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
-
-        // Try suffix match
-        if (!doc) {
-          doc = db.prepare(`
-            SELECT
-              'kindx://' || d.collection || '/' || d.path as virtual_path,
-              LENGTH(content.doc) as body_length,
-              d.collection,
-              d.path
-            FROM documents d
-            JOIN content ON content.hash = d.hash
-            WHERE d.path LIKE ? AND d.active = 1
-            LIMIT 1
-          `).get(`%${name}`) as { virtual_path: string; body_length: number; collection: string; path: string } | null;
-        }
-      }
-
-      if (doc) {
+      const found = findDocument(db, name, { includeBody: false });
+      if (!("error" in found)) {
         files.push({
-          filepath: doc.virtual_path,
-          displayPath: doc.virtual_path,
-          bodyLength: doc.body_length,
-          collection: doc.collection,
-          path: doc.path
+          filepath: found.filepath,
+          displayPath: found.displayPath,
+          bodyLength: found.bodyLength,
+          collection: found.collectionName,
+          path: found.filepath.replace(`kindx://${found.collectionName}/`, '')
         });
       } else {
         console.error(`File not found: ${name}`);
@@ -3017,9 +2971,11 @@ if (isMain) {
           const logPath = resolve(cacheDir, "mcp.log");
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const selfPath = fileURLToPath(import.meta.url);
+          const iName = cli.values.index as string | undefined;
+          const indexFlag = iName ? ["--index", iName] : [];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port)]
-            : [selfPath, "mcp", "--http", "--port", String(port)];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...indexFlag]
+            : [selfPath, "mcp", "--http", "--port", String(port), ...indexFlag];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -3033,13 +2989,13 @@ if (isMain) {
           process.exit(0);
         }
 
-        // Foreground HTTP mode — remove top-level cursor handlers so the
+        // foreground HTTP mode — remove top-level cursor handlers so the
         // async cleanup handlers in startMcpHttpServer actually run.
         process.removeAllListeners("SIGTERM");
         process.removeAllListeners("SIGINT");
         const { startMcpHttpServer } = await import("./protocol.js");
         try {
-          await startMcpHttpServer(port);
+          await startMcpHttpServer(port, { dbPath: storeDbPathOverride });
         } catch (e: any) {
           if (e?.code === "EADDRINUSE") {
             console.error(`Port ${port} already in use. Try a different port with --port.`);
@@ -3050,7 +3006,7 @@ if (isMain) {
       } else {
         // Default: stdio transport
         const { startMcpServer } = await import("./protocol.js");
-        await startMcpServer();
+        await startMcpServer(storeDbPathOverride);
       }
       break;
     }
