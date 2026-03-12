@@ -2,7 +2,7 @@
 # https://docs.coderabbit.ai/guides/configure-coderabbit
 
 language: "en-US"
-tone_instructions: "Professional, direct, and engineering-focused. No emojis. Provide actionable feedback with clear rationale."
+tone_instructions: "Professional, direct, and engineering-focused. Prioritize correctness, security, backward compatibility, and maintainability. No emojis. Prefer concrete fixes over generic commentary."
 early_access: true
 
 reviews:
@@ -18,66 +18,99 @@ reviews:
   changed_files_summary: true
   labeling_instructions:
     - label: "engine"
-      instructions: "Apply when changes affect engine/ directory"
+      instructions: "Apply when changes affect core retrieval, CLI, MCP, inference, or runtime logic under engine/."
     - label: "specs"
-      instructions: "Apply when changes affect specs/ directory"
+      instructions: "Apply when changes affect Vitest coverage, fixtures, or CLI/MCP contract tests under specs/."
     - label: "ci"
-      instructions: "Apply when changes affect .github/ directory"
+      instructions: "Apply when changes affect GitHub Actions, release automation, reviewer config, or PR governance under .github/."
     - label: "documentation"
-      instructions: "Apply when changes only affect .md files"
+      instructions: "Apply when changes are limited to Markdown documentation or contributor guidance."
     - label: "breaking-change"
-      instructions: "Apply when changes modify public API or CLI interface"
+      instructions: "Apply when changes modify the public CLI, MCP tool names/shapes, package publishing flow, or repository contracts."
+    - label: "training"
+      instructions: "Apply when changes affect Python training data tooling, reward logic, schema validation, or training configs."
+    - label: "release"
+      instructions: "Apply when changes affect GitHub Packages publishing, release-please, changelog automation, or signed artifacts."
 
   path_instructions:
     - path: "engine/repository.ts"
       instructions: |
-        This is the core data access layer (~3600 lines). Review changes carefully for:
-        - SQL injection via string concatenation
-        - Proper FTS5 query sanitization
-        - Vector dimension mismatches
-        - Transaction safety
-        - Index corruption risks
+        Core retrieval/data layer (~3700 lines). Review changes carefully for:
+        - SQL safety, FTS5 query sanitization, and sqlite-vec compatibility
+        - BM25/vector/RRF scoring correctness and collection filtering
+        - Cross-platform path/docid normalization and inactive-document handling
+        - Cache invalidation, embedding bookkeeping, and graceful LLM fallback paths
 
     - path: "engine/inference.ts"
       instructions: |
-        This manages LLM model lifecycle. Review for:
-        - Memory leaks from unreleased model contexts
-        - Proper error handling on model download failures
-        - Context size validation
-        - Thread safety of model access
+        Manages on-device model lifecycle and typed query expansion. Review for:
+        - Native resource cleanup, context pooling, and memory leaks
+        - CPU/GPU fallback behavior and KINDX_* environment-variable handling
+        - Model download/cache error handling and offline behavior
+        - Strict lex/vec/hyde output hygiene with no conversational leakage
 
     - path: "engine/protocol.ts"
       instructions: |
         MCP server implementation. Review for:
-        - Input validation on all tool parameters
-        - Proper error responses per MCP spec
-        - HTTP endpoint security (if HTTP transport)
-        - Resource cleanup on connection close
+        - Input validation and structuredContent contract stability
+        - Proper error responses per MCP expectations
+        - HTTP auth/localhost safeguards and transport cleanup
+        - Backward compatibility of tool/resource names and payload shapes
 
     - path: "engine/kindx.ts"
       instructions: |
-        CLI entry point. Review for:
-        - Argument validation and error messages
-        - Proper exit codes
-        - Help text accuracy
-        - No hardcoded paths
+        CLI entry point (~3000 lines). Review for:
+        - Argument validation, exit codes, stdout/stderr discipline, and help text accuracy
+        - Stability of machine-readable JSON/CSV/XML/files outputs
+        - Safe filesystem/daemon operations and no hardcoded host assumptions
+        - Alignment with README/CONTRIBUTING examples and GitHub Packages release flow
+
+    - path: "engine/catalogs.ts"
+      instructions: |
+        YAML configuration is the source of truth for collections and context. Review for:
+        - Schema/runtime consistency and rename/remove correctness
+        - Context inheritance behavior and migration safety
+
+    - path: "engine/runtime.ts"
+      instructions: |
+        Runtime compatibility layer. Review for:
+        - Correct Bun vs Node branching
+        - sqlite-vec loading behavior across platforms
+        - No regressions in low-level database initialization
 
     - path: ".github/workflows/**"
       instructions: |
         CI/CD workflows. Review for:
         - Minimum required permissions
-        - Pinned action versions (hash or tag)
-        - No secret exposure in logs
-        - Proper conditional execution
+        - Reliable path filters, concurrency, and duplication reduction
+        - Correct GitHub Packages auth/publish behavior
+        - No secret exposure in logs and no flaky required checks
+        - Security scans separated from core deterministic PR validation
+
+    - path: "specs/**"
+      instructions: |
+        Test suite. Review for:
+        - Stable temp-dir isolation and no host-specific assumptions
+        - CI-safe skipping of live llama/model-dependent scenarios
+        - Coverage of CLI, MCP, retrieval, and renderer contracts after behavior changes
+
+    - path: "training/**"
+      instructions: |
+        Python training pipeline. Review for:
+        - Strict JSONL schema correctness and deterministic scoring
+        - No stale path references or hidden heavyweight CI assumptions
+        - Lightweight validations rather than full model training in CI
+
+    - path: ".gemini/**"
+      instructions: |
+        Gemini Code Assist repo guidance. Ensure the instructions match this repository's architecture, ESM rules, CI philosophy, and GitHub Packages release flow.
 
   tools:
     shellcheck:
       enabled: true
-    biome:
-      enabled: true
     github-checks:
       enabled: true
-      timeout_ms: 120000
+      timeout_ms: 180000
 
 chat:
   auto_reply: true

@@ -1,0 +1,48 @@
+name: Training Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'training/**'
+      - '.github/workflows/training-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'training/**'
+      - '.github/workflows/training-ci.yml'
+
+concurrency:
+  group: training-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  validate:
+    name: Python 3.11 Dataset Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Compile Python sources
+        run: python -m compileall training
+
+      - name: Validate JSONL training schema
+        run: uv run training/dataset/validate_schema.py
+
+      - name: Score datasets with reward function
+        run: uv run training/dataset/score_data.py

@@ -4,10 +4,15 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: release-please-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
   packages: write
+  id-token: write
 
 jobs:
   release-please:
@@ -33,6 +38,8 @@ jobs:
           node-version: '22'
           registry-url: 'https://npm.pkg.github.com'
           cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          always-auth: true
 
       - name: Install dependencies
         if: ${{ steps.release.outputs.release_created }}
@@ -42,9 +49,9 @@ jobs:
         if: ${{ steps.release.outputs.release_created }}
         run: npm run build
 
-      - name: Publish to npm
+      - name: Publish to GitHub Packages
         if: ${{ steps.release.outputs.release_created }}
-        run: npm publish --access public
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

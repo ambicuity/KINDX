@@ -1,4 +1,4 @@
-name: SBOM Generation
+name: SBOM
 
 on:
   push:
@@ -6,15 +6,21 @@ on:
     paths:
       - 'package.json'
       - 'package-lock.json'
+      - '.github/workflows/sbom.yml'
   workflow_dispatch:
 
-permissions:
-  contents: write
+concurrency:
+  group: sbom-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
 
 jobs:
   sbom:
-    name: Generate Software Bill of Materials
+    name: Generate SPDX SBOM
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -26,3 +32,10 @@ jobs:
           artifact-name: kindx-sbom.spdx.json
           format: spdx-json
           output-file: kindx-sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kindx-sbom-spdx
+          path: kindx-sbom.spdx.json
+          if-no-files-found: error

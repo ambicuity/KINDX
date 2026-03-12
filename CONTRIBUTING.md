@@ -101,9 +101,14 @@ We prefer atomic commits that describe exactly what changed. We loosely follow t
 
 ## 4. Pull Request Reviews and AI
 
-We use **CodeRabbit**, an AI assistant, to help with initial code reviews. Think of it as an automated peer reviewer that helps catch quick issues or suggest improvements!
+We use **CodeRabbit** and **Gemini Code Assist** as advisory reviewers on pull requests. Think of them as automated peer reviewers that help catch quick issues, CI gaps, or maintainability concerns before human review.
 
-CodeRabbit might leave comments on your PR. You can converse directly with it by mentioning `@coderabbitai` if you want it to explain a suggestion or try a different approach. The AI is here to help, but human maintainers will be the ones making the final review and merge decisions.
+- **CodeRabbit** is configured in `.coderabbit.yaml` and is tuned for KINDX's TypeScript engine, MCP surface, workflows, and training tooling.
+- **Gemini Code Assist** is configured in `.gemini/config.yaml` and `.gemini/styleguide.md` so its feedback stays aligned with this repo's architecture and release flow.
+
+These tools can comment and summarize, but human maintainers still make the final review and merge decisions.
+
+CodeRabbit might leave comments on your PR. You can converse directly with it by mentioning `@coderabbitai` if you want it to explain a suggestion or try a different approach.
 
 ---
 

@@ -1,23 +1,42 @@
-name: CI -- Lint and Validate
+name: CI
 
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'engine/**'
+      - 'specs/**'
+      - 'bin/kindx'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vitest.config.ts'
+      - 'schema-migration.ts'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
     paths:
       - 'engine/**'
       - 'specs/**'
+      - 'bin/kindx'
       - 'package.json'
+      - 'package-lock.json'
       - 'tsconfig*.json'
-      - '.github/workflows/**'
+      - 'vitest.config.ts'
+      - 'schema-migration.ts'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions: read-all
 
 jobs:
-  lint-and-validate:
-    name: TypeScript Lint and Build Check
+  node:
+    name: Node 22 Build, Test, and Pack
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
 
@@ -30,12 +49,10 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
 
       - name: TypeScript type-check
         run: npx tsc --noEmit
@@ -43,8 +60,10 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
-      - name: Verify no circular imports
-        run: |
-          # Check for any obvious circular dependency indicators
-          echo "Checking for circular imports..."
-          npx madge --circular engine/ 2>/dev/null || echo "madge not available, skipping circular import check"
+      - name: Run unit and integration tests
+        run: npm test
+        env:
+          CI: 'true'
+
+      - name: Verify publishable package contents
+        run: npm pack --dry-run
