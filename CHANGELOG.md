@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/ambicuity/KINDX/compare/v1.0.0...v1.0.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* resolve npm install -g EACCES guidance and TS import regression (closes [#35](https://github.com/ambicuity/KINDX/issues/35)) ([#36](https://github.com/ambicuity/KINDX/issues/36)) ([006f5e1](https://github.com/ambicuity/KINDX/commit/006f5e1d16e7ecde14aab2329dd5aca6730a3135))
+
 ## 1.0.0 (2026-03-08)
 
 
