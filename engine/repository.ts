@@ -15,7 +15,7 @@ import { openDatabase, loadSqliteVec } from "./runtime.js";
 import type { Database } from "./runtime.js";
 import picomatch from "picomatch";
 import { createHash } from "crypto";
-import { dirname } from "path";
+import { dirname, resolve as pathResolve, relative } from "path";
 import { realpathSync, statSync, mkdirSync } from "node:fs";
 import {
   LLM,
@@ -1645,13 +1645,39 @@ export function matchFilesByGlob(db: Database, pattern: string): { filepath: str
   `).all() as { virtual_path: string; body_length: number; path: string; collection: string }[];
 
   const isMatch = picomatch(pattern);
-  return allFiles
-    .filter(f => isMatch(f.virtual_path) || isMatch(f.path))
-    .map(f => ({
-      filepath: f.virtual_path,  // Virtual path for precise lookup
-      displayPath: f.path,        // Relative path for display
-      bodyLength: f.body_length
-    }));
+  const cwd = process.cwd();
+
+  const results: { filepath: string; displayPath: string; bodyLength: number }[] = [];
+
+  for (const f of allFiles) {
+    // 1. Check against virtual path or generic database path
+    if (isMatch(f.virtual_path) || isMatch(f.path)) {
+      results.push({
+        filepath: f.virtual_path,
+        displayPath: f.path,
+        bodyLength: f.body_length
+      });
+      continue;
+    }
+
+    // 2. Check against the real filesystem layout
+    const coll = getCollectionByName(db, f.collection);
+    // If the path evaluates to the actual workspace via relative evaluation
+    if (coll) {
+      const physicalPath = pathResolve(coll.pwd, f.path);
+      const relativePathToCwd = relative(cwd, physicalPath);
+      
+      if (isMatch(physicalPath) || isMatch(relativePathToCwd) || (relativePathToCwd.startsWith('..') === false && isMatch(`./${relativePathToCwd}`))) {
+         results.push({
+            filepath: f.virtual_path,
+            displayPath: f.path,
+            bodyLength: f.body_length
+          });
+      }
+    }
+  }
+
+  return results;
 }
 
 // =============================================================================
@@ -2639,6 +2665,20 @@ export function findDocument(db: Database, filename: string, options: { includeB
     `).get(`%${filepath}`) as DbDocRow | null;
   }
 
+  // Try to match by absolute path or relative to CWD
+  if (!doc && !filepath.startsWith('kindx://')) {
+    const absolutePath = pathResolve(process.cwd(), filepath);
+    const virtualP = toVirtualPath(db, absolutePath);
+    if (virtualP) {
+       doc = db.prepare(`
+        SELECT ${selectCols}
+        FROM documents d
+        JOIN content ON content.hash = d.hash
+        WHERE 'kindx://' || d.collection || '/' || d.path = ? AND d.active = 1
+      `).get(virtualP) as DbDocRow | null;
+    }
+  }
+
   // Try to match by absolute path (requires looking up collection paths from YAML)
   if (!doc && !filepath.startsWith('kindx://')) {
     const collections = collectionsListCollections();
@@ -3226,7 +3266,10 @@ export async function hybridQuery(
     if (rrfRank <= 3) rrfWeight = 0.75;
     else if (rrfRank <= 10) rrfWeight = 0.60;
     else rrfWeight = 0.40;
-    const rrfScore = 1 / rrfRank;
+    
+    // Replace severe 1/rank penalty with a softer exponential decay.
+    // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
+    const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
     const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
 
     const candidate = candidateMap.get(r.file);
@@ -3565,7 +3608,10 @@ export async function structuredSearch(
     if (rrfRank <= 3) rrfWeight = 0.75;
     else if (rrfRank <= 10) rrfWeight = 0.60;
     else rrfWeight = 0.40;
-    const rrfScore = 1 / rrfRank;
+    
+    // Replace severe 1/rank penalty with a softer exponential decay.
+    // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
+    const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
     const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
 
     const candidate = candidateMap.get(r.file);

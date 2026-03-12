@@ -15,9 +15,11 @@ import {
   type Token as LlamaToken,
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
-import { homedir } from "os";
-import { join } from "path";
-import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync, promises as fs } from "node:fs";
+import * as os from "node:os";
+import { resolve, join } from "path";
+import { homedir } from "node:os";
 
 // =============================================================================
 // Embedding Formatting Functions
@@ -618,6 +620,13 @@ export class LlamaCpp implements LLM {
       } else if (llama.gpu === false) {
         process.stderr.write(
           "KINDX Warning: no GPU acceleration, running on CPU (slow). Run 'kindx status' for details.\n"
+        );
+      } else if (llama.gpu === "vulkan" && os.release().toLowerCase().includes("microsoft")) {
+        process.stderr.write(
+          "\nKINDX Warning: Vulkan backend detected on WSL2. This is often slow or unstable (using 'dzn').\n" +
+          "For native NVIDIA GPU acceleration on WSL2, please install the CUDA toolkit:\n" +
+          "  sudo apt-get install cuda-toolkit-13-1  (or cuda-toolkit-12-6)\n" +
+          "See https://github.com/ambicuity/KINDX/issues/141 for more details.\n\n"
         );
       }
       this.llama = llama;
