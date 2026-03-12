@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2](https://github.com/ambicuity/KINDX/compare/v1.0.1...v1.0.2) (2026-03-12)
+
+
+### Bug Fixes
+
+* **ci:** make trivy scheduled only ([59def18](https://github.com/ambicuity/KINDX/commit/59def18a7e96b8c69aa4f6a6dd6e6199f8cc56d3))
+* **ci:** repair trivy and training validation ([b99713c](https://github.com/ambicuity/KINDX/commit/b99713c72a056b94f1e00ed262f87ea8928e6f9b))
+
 ## [1.0.1](https://github.com/ambicuity/KINDX/compare/v1.0.0...v1.0.1) (2026-03-12)
 
 
