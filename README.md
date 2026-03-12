@@ -100,6 +100,8 @@ kindx search "API" -c notes
 
 # Export full match set for agent pipeline
 kindx search "API" --all --files --min-score 0.3
+
+> **Pro-tip (Small Collections):** For collections under ~100 documents, `kindx search` (BM25) is incredibly fast and often sufficient. The query expansion and reranking overhead of `kindx query` is best suited for larger, noisier corporate datasets.
 ```
 
 ---
@@ -317,6 +319,19 @@ The `query` command uses Reciprocal Rank Fusion (RRF) with position-aware blendi
 brew install sqlite
 ```
 
+### WSL2 GPU Support (Windows)
+
+If you are running KINDX inside WSL2 with an NVIDIA GPU, `node-llama-cpp` might fall back to the slow, non-conformant Vulkan translation layer (`dzn`) causing `vsearch` and `query` to take 60-90 seconds or crash.
+
+To enable native CUDA GPU acceleration, install the CUDA toolkit runtime libraries (do *not* install the driver meta-packages, WSL2 passes the driver through from Windows):
+
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get install cuda-toolkit-13-1  # or cuda-toolkit-12-6
+```
+
 ### GGUF Models (via node-llama-cpp)
 
 KINDX uses three local GGUF models (auto-downloaded on first use):
@@ -369,7 +384,46 @@ npm install
 npm link
 ```
 
----
+### Troubleshooting: Permission Errors (`EACCES`)
+
+If you see `npm error code EACCES` when running `npm install -g`, your system npm is configured to write to a directory owned by root (e.g. `/usr/local/lib/node_modules`). **Do not use `sudo npm install -g`** — this is a security risk.
+
+The recommended fix is to use a Node version manager so that npm writes to a user-owned prefix:
+
+**Option 1 — `nvm` (most common)**
+
+```bash
+# Install nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
+# Restart your shell, then:
+nvm install --lts
+nvm use --lts
+npm install -g @ambicuity/kindx
+```
+
+**Option 2 — `mise` (polyglot version manager)**
+
+```bash
+# Install mise
+curl https://mise.run | sh
+# Restart your shell, then:
+mise use -g node@lts
+npm install -g @ambicuity/kindx
+```
+
+**Option 3 — configure a user-writable npm prefix**
+
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix ~/.npm-global
+# Add to your shell profile (~/.zshrc or ~/.bashrc):
+export PATH="$HOME/.npm-global/bin:$PATH"
+# Then:
+npm install -g @ambicuity/kindx
+```
+
+After any of the above, `kindx --version` should print the installed version.
+
 
 ## Usage Reference
 

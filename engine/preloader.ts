@@ -5,9 +5,9 @@
  * resources before the process exits, avoiding GGML_ASSERT failures.
  */
 import { afterAll } from "vitest";
-import { disposeDefaultLlamaCpp } from "./inference.js";
+import { disposeDefaultLLM } from "./inference.js";
 
 // Global afterAll runs after all test files complete
 afterAll(async () => {
-  await disposeDefaultLlamaCpp();
+  await disposeDefaultLLM();
 });
