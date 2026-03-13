@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<results query="API design" count="5" time="0.02s">
+  <result>
+    <docid>#a1b2c3</docid>
+    <score>4.87</score>
+    <file>kindx://docs/api-design.md</file>
+    <title>API Design Principles</title>
+    <line>1</line>
+    <snippet>All public APIs must follow REST conventions with consistent resource naming, proper HTTP verb usage, and structured error responses.</snippet>
+  </result>
+  <result>
+    <docid>#d4e5f6</docid>
+    <score>3.64</score>
+    <file>kindx://docs/api-versioning.md</file>
+    <title>API Versioning Strategy</title>
+    <line>12</line>
+    <snippet>Use URL-based versioning (v1, v2) for breaking changes. Minor additions are backward-compatible and do not require a new version.</snippet>
+  </result>
+  <result>
+    <docid>#g7h8i9</docid>
+    <score>2.91</score>
+    <file>kindx://docs/api-auth.md</file>
+    <title>API Authentication Guide</title>
+    <line>5</line>
+    <snippet>All API endpoints require Bearer token authentication. Tokens are issued via the /auth/token endpoint with a 1-hour TTL.</snippet>
+  </result>
+  <result>
+    <docid>#j0k1l2</docid>
+    <score>2.33</score>
+    <file>kindx://docs/api-pagination.md</file>
+    <title>API Pagination Patterns</title>
+    <line>8</line>
+    <snippet>Use cursor-based pagination for list endpoints. Offset pagination is acceptable only for admin/internal APIs with small result sets.</snippet>
+  </result>
+  <result>
+    <docid>#m3n4o5</docid>
+    <score>1.78</score>
+    <file>kindx://docs/api-errors.md</file>
+    <title>API Error Handling</title>
+    <line>3</line>
+    <snippet>All errors return a JSON body with 'code', 'message', and optional 'details' array. HTTP status codes follow RFC 7231.</snippet>
+  </result>
+</results>
