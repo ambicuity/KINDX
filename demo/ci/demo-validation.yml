@@ -35,12 +35,12 @@ jobs:
 
       - name: Check eval-results.json with jq
         run: |
-          if [ -f demo/eval-results.json ]; then
-            echo "Validating demo/eval-results.json"
-            jq empty demo/eval-results.json
+          if [ -f demo/benchmarks/eval-results.json ]; then
+            echo "Validating demo/benchmarks/eval-results.json"
+            jq empty demo/benchmarks/eval-results.json
             echo "JSON is valid."
           else
-            echo "demo/eval-results.json not found — skipping."
+            echo "demo/benchmarks/eval-results.json not found — skipping."
           fi
 
   validate-markdown:

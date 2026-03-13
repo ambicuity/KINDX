@@ -2224,7 +2224,7 @@ function runDemo(): void {
   console.log(`${c.bold}${c.cyan}║    2. kindx embed                                            ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here"                       ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/nicholasgriffintn/kindx            ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/ambicuity/KINDX                    ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
 }
 

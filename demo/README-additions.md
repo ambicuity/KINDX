@@ -51,11 +51,11 @@ Evaluated on a curated retrieval benchmark of 24 queries across code and documen
 
 Step-by-step guides for connecting KINDX to your workflow:
 
-- [Claude Desktop](docs/recipes/claude-desktop.md) — Use KINDX as a memory backend for Claude Desktop via MCP.
-- [VS Code + Continue](docs/recipes/vscode-continue.md) — Add project-aware retrieval to Continue's AI assistant.
-- [Cursor](docs/recipes/cursor.md) — Connect Cursor's AI features to your local KINDX index.
-- [CLI Pipelines](docs/recipes/cli-pipelines.md) — Pipe data in and query results out from shell scripts and CI/CD.
-- [Custom MCP Client](docs/recipes/custom-mcp-client.md) — Build your own MCP client that talks to KINDX.
+- [Claude Desktop](demo/recipes/claude-desktop.md) — Use KINDX as a memory backend for Claude Desktop via MCP.
+- [VS Code + Continue](demo/recipes/continue-dev.md) — Add project-aware retrieval to Continue's AI assistant.
+- [Cursor](demo/recipes/cursor-integration.md) — Connect Cursor's AI features to your local KINDX index.
+- [LangChain Agent](demo/recipes/langchain-agent.md) — Use KINDX as a tool in LangChain agent pipelines.
+- [AutoGPT](demo/recipes/autogpt-integration.md) — Connect autonomous agent frameworks to KINDX.
 
 ---
 
