@@ -7,13 +7,13 @@ Shows a BM25 keyword search returning ranked results. BM25 (Best Matching 25) is
 ## Command
 
 ```bash
-$ kindx search my-docs "API design patterns"
+$ kindx search "API design patterns" -c my-docs
 ```
 
 ## Expected Terminal Output
 
 ```
-$ kindx search my-docs "API design patterns"
+$ kindx search "API design patterns" -c my-docs
 BM25 Search: "API design patterns" (5 results)
 
   #1  [14.2] kindx://my-docs/api-reference.md

@@ -7,13 +7,13 @@ Shows a vector similarity search that finds semantically related documents even 
 ## Command
 
 ```bash
-$ kindx vsearch my-docs "prevent overfitting in ML models"
+$ kindx vsearch "prevent overfitting in ML models" -c my-docs
 ```
 
 ## Expected Terminal Output
 
 ```
-$ kindx vsearch my-docs "prevent overfitting in ML models"
+$ kindx vsearch "prevent overfitting in ML models" -c my-docs
 Vector Search: "prevent overfitting in ML models" (5 results)
 
   #1  [0.92] kindx://my-docs/model-training.md

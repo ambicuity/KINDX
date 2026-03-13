@@ -146,27 +146,20 @@ fi
 # ── Create Temp Collection ──────────────────────────────────────────────────
 
 WORK_DIR=$(mktemp -d "${TMPDIR_BASE}/kindx-eval.XXXXXX")
-COLLECTION_DIR="${WORK_DIR}/collection"
 log "Temp directory: ${WORK_DIR}"
 
 log "Creating eval collection..."
-${KINDX_BIN} init "${COLLECTION_DIR}" 2>/dev/null || true
-
-# Copy eval docs into collection
-cp "${EVAL_DOCS}"/*.md "${COLLECTION_DIR}/" 2>/dev/null || \
-  die "Failed to copy eval documents"
+${KINDX_BIN} collection add kindx-eval "${EVAL_DOCS}" 2>/dev/null || true
 
 # ── Index and Embed ─────────────────────────────────────────────────────────
 
-log "Indexing documents..."
-time_ms ${KINDX_BIN} index "${COLLECTION_DIR}"
-INDEX_TIME_MS=${ELAPSED_MS}
-log "Indexing completed in ${INDEX_TIME_MS}ms"
-
 log "Generating embeddings..."
-time_ms ${KINDX_BIN} embed "${COLLECTION_DIR}"
+time_ms ${KINDX_BIN} embed -c kindx-eval
 EMBED_TIME_MS=${ELAPSED_MS}
 log "Embedding completed in ${EMBED_TIME_MS}ms"
+
+# BM25 index is built automatically; no separate index step needed
+INDEX_TIME_MS=0
 
 # ── Run Evaluations ─────────────────────────────────────────────────────────
 
@@ -186,17 +179,13 @@ done
 run_search() {
   local mode=$1
   local query=$2
-  local search_flags=""
 
   case "${mode}" in
-    bm25)          search_flags="--mode bm25" ;;
-    vector)        search_flags="--mode vector" ;;
-    hybrid)        search_flags="--mode hybrid" ;;
-    hybrid_rerank) search_flags="--mode hybrid --rerank" ;;
+    bm25)          ${KINDX_BIN} search "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
+    vector)        ${KINDX_BIN} vsearch "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
+    hybrid)        ${KINDX_BIN} query "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
+    hybrid_rerank) ${KINDX_BIN} query "${query}" --json -n 5 --rerank -c kindx-eval 2>/dev/null ;;
   esac
-
-  ${KINDX_BIN} search ${search_flags} --top 5 --json \
-    "${COLLECTION_DIR}" "${query}" 2>/dev/null
 }
 
 log ""

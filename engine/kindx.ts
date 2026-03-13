@@ -2111,36 +2111,8 @@ function runDemo(): void {
   const bm25Query = "API versioning best practices";
   console.log(`  ${c.dim}$ kindx search "${bm25Query}"${c.reset}\n`);
 
-  if (hasEvalDocs) {
-    // Run real BM25 search against the eval-docs
-    try {
-      const db = getDb();
-      // Check if the eval docs are already indexed in any collection
-      const results = searchFTS(db, bm25Query, 5);
-      closeDb();
-
-      if (results.length > 0) {
-        for (const r of results.slice(0, 3)) {
-          const score = Math.round(r.score * 100) / 100;
-          console.log(`  ${c.cyan}kindx://${r.displayPath || r.filepath.split('/').pop()}${c.reset}`);
-          console.log(`  ${c.bold}Title: ${r.title || 'Untitled'}${c.reset}`);
-          console.log(`  Score: ${c.bold}${score}${c.reset}`);
-          const snippet = extractSnippet(r.body || '', bm25Query, 200);
-          const lines = snippet.snippet.split('\n').slice(0, 4);
-          for (const line of lines) {
-            console.log(`  ${c.dim}${line}${c.reset}`);
-          }
-          console.log();
-        }
-      } else {
-        showSimulatedBM25Results();
-      }
-    } catch {
-      showSimulatedBM25Results();
-    }
-  } else {
-    showSimulatedBM25Results();
-  }
+  // Always show simulated results to avoid leaking user's private indexed data
+  showSimulatedBM25Results();
 
   // Step 4: Vector search (simulated)
   console.log(`${c.bold}Step 4: Vector Search (Semantic)${c.reset}`);

@@ -7,13 +7,13 @@ Shows a hybrid search combining BM25 keyword matching and vector semantic simila
 ## Command
 
 ```bash
-$ kindx query my-docs "startup fundraising strategy" --explain
+$ kindx query "startup fundraising strategy" -c my-docs --explain
 ```
 
 ## Expected Terminal Output
 
 ```
-$ kindx query my-docs "startup fundraising strategy" --explain
+$ kindx query "startup fundraising strategy" -c my-docs --explain
 Hybrid Search: "startup fundraising strategy" (5 results)
 
   #1  [0.93] kindx://my-docs/fundraising-guide.md

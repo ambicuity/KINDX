@@ -40,7 +40,7 @@ Sleep 8s
 Sleep 3s
 
 # --- Scene 2: Hybrid search ---
-Type "kindx query kindx-demo 'raising money for startup' --top 3"
+Type "kindx query 'raising money for startup' -c kindx-demo -n 3"
 Sleep 500ms
 Enter
 Sleep 3s
@@ -63,7 +63,7 @@ Sleep 3s
 Sleep 4s
 
 # --- Scene 3: JSON output ---
-Type "kindx search kindx-demo 'fundraising' --json | head -12"
+Type "kindx search 'fundraising' -c kindx-demo --json | head -12"
 Sleep 500ms
 Enter
 Sleep 2s
@@ -84,7 +84,7 @@ Sleep 2s
 Sleep 4s
 
 # --- Scene 4: Show Claude Desktop config ---
-Type "echo '{\"mcpServers\":{\"kindx\":{\"command\":\"kindx\",\"args\":[\"serve\"]}}}'"
+Type "echo '{\"mcpServers\":{\"kindx\":{\"command\":\"kindx\",\"args\":[\"mcp\"]}}}'"
 Sleep 500ms
 Enter
 Sleep 3s

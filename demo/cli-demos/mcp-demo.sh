@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-MCP_PORT=3100
+MCP_PORT=8181
 MCP_BASE="http://localhost:${MCP_PORT}"
 
 # ---------------------------------------------------------------------------

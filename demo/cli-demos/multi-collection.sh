@@ -42,11 +42,11 @@ echo "=== Step 2: Index and embed ==="
 echo ""
 
 echo "Updating all collections..."
-kindx update --all
+kindx update
 echo ""
 
 echo "Embedding all collections..."
-kindx embed --all
+kindx embed
 echo ""
 
 # ---------------------------------------------------------------------------

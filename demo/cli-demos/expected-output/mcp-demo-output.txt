@@ -1,9 +1,9 @@
 === Step 1: Start MCP server ===
-Starting KINDX MCP server on port 3100...
+Starting KINDX MCP server on port 8181...
 
 ✓ MCP server started (PID 48201)
   Transport: HTTP
-  Endpoint:  http://localhost:3100/mcp
+  Endpoint:  http://localhost:8181/mcp
   Tools:     search, vsearch, query, get, ls, status
 
 Server is running in the background.
@@ -15,8 +15,8 @@ MCP Server Status
 Status:       running
 PID:          48201
 Transport:    HTTP
-Port:         3100
-Endpoint:     http://localhost:3100/mcp
+Port:         8181
+Endpoint:     http://localhost:8181/mcp
 Uptime:       2s
 Collections:  2 available (docs, notes)
 Tools:        search, vsearch, query, get, ls, status

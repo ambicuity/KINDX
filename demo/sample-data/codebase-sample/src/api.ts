@@ -1,13 +1,17 @@
 import { Router, Request, Response } from "express";
+import rateLimit from "express-rate-limit";
 import { requireAuth, AuthRequest, login, generateToken } from "./auth";
 import { db } from "./db";
 import { slugify, generateId, validateEmail } from "./utils";
 
 const router = Router();
 
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many attempts. Try again later." } });
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
+
 // ── Auth Routes ──────────────────────────────────────────────────────
 
-router.post("/auth/login", async (req: Request, res: Response) => {
+router.post("/auth/login", authLimiter, async (req: Request, res: Response) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
@@ -22,19 +26,19 @@ router.post("/auth/login", async (req: Request, res: Response) => {
   res.json({ token });
 });
 
-router.post("/auth/logout", requireAuth, (_req: AuthRequest, res: Response) => {
+router.post("/auth/logout", authLimiter, requireAuth, (_req: AuthRequest, res: Response) => {
   // In a full implementation this would blacklist the token
   res.json({ message: "Logged out successfully" });
 });
 
 // ── User Routes ──────────────────────────────────────────────────────
 
-router.get("/users", requireAuth, async (_req: AuthRequest, res: Response) => {
+router.get("/users", apiLimiter, requireAuth, async (_req: AuthRequest, res: Response) => {
   const users = await db.query("SELECT id, email, name, created_at FROM users");
   res.json({ users });
 });
 
-router.get("/users/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+router.get("/users/:id", apiLimiter, requireAuth, async (req: AuthRequest, res: Response) => {
   const user = await db.query("SELECT id, email, name, created_at FROM users WHERE id = ?", [req.params.id]);
   if (!user.length) {
     return res.status(404).json({ error: "User not found" });
@@ -42,7 +46,7 @@ router.get("/users/:id", requireAuth, async (req: AuthRequest, res: Response) =>
   res.json({ user: user[0] });
 });
 
-router.put("/users/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+router.put("/users/:id", apiLimiter, requireAuth, async (req: AuthRequest, res: Response) => {
   const { name, email } = req.body;
   await db.update("users", req.params.id, { name, email });
   res.json({ message: "User updated" });
@@ -63,7 +67,7 @@ router.get("/products/:slug", async (req: Request, res: Response) => {
   res.json({ product: product[0] });
 });
 
-router.post("/products", requireAuth, async (req: AuthRequest, res: Response) => {
+router.post("/products", apiLimiter, requireAuth, async (req: AuthRequest, res: Response) => {
   const { name, description, price } = req.body;
   if (!name || price == null) {
     return res.status(400).json({ error: "Name and price are required" });
@@ -74,7 +78,7 @@ router.post("/products", requireAuth, async (req: AuthRequest, res: Response) =>
   res.status(201).json({ id, slug });
 });
 
-router.delete("/products/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+router.delete("/products/:id", apiLimiter, requireAuth, async (req: AuthRequest, res: Response) => {
   await db.update("products", req.params.id, { active: 0 });
   res.json({ message: "Product deactivated" });
 });
