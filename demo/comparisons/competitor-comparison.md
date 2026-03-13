@@ -29,7 +29,7 @@ agent integration, performance, and honest weaknesses.
 | **BM25 / Keyword** | Yes | Yes (sparse) | Yes | Yes | No | No | No | Yes | No |
 | **Vector / Semantic** | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | **Hybrid Search** | Yes | Yes | Yes | Yes | No | No | No | Yes (70/30) | No |
-| **Reranking** | No | No | Yes (RRF, CrossEncoder) | No | Yes (cross-encoder) | No | Yes (cross-encoder) | Yes (ColBERT) | No |
+| **Reranking** | Yes (Qwen3 cross-encoder) | No | Yes (RRF, CrossEncoder) | No | Yes (cross-encoder) | No | Yes (cross-encoder) | Yes (ColBERT) | No |
 | **Native MCP Server** | Yes | Separate (chroma-mcp) | No (community) | No | No | Yes (StdIO/SSE) | No | No | No |
 | **CLI Query** | Yes | Yes (chroma CLI) | No | No | Yes (server start) | Yes (anything-llm-cli) | No | Scripts only | No |
 | **JSON Output** | Yes (`--json`) | No (app-level) | Yes (Arrow/JSON) | Yes (native) | No | Yes (REST API) | No | Yes (REST API) | No |
@@ -135,7 +135,7 @@ How well does each tool work as a building block for AI agents and LLM pipelines
 
 | Tool | BM25 | Vector | Hybrid | Reranking | Fusion Method |
 |------|------|--------|--------|-----------|--------------|
-| **KINDX** | Yes | Yes | Yes | No | RRF (BM25 + vector) |
+| **KINDX** | Yes | Yes | Yes | Yes (Qwen3-Reranker-0.6B) | RRF (BM25 + vector + reranker) |
 | **ChromaDB** | Yes (sparse) | Yes | Yes | No | Dense + sparse + full-text combined |
 | **LanceDB** | Yes | Yes | Yes | Yes | RRF (default), LinearCombination, CrossEncoder |
 | **Orama** | Yes | Yes | Yes | No | Weighted aggregation (configurable text:vector) |
@@ -146,8 +146,9 @@ How well does each tool work as a building block for AI agents and LLM pipelines
 | **GPT4All** | No | Yes | No | No | N/A |
 
 **Key insight:** Only **KINDX**, **ChromaDB**, **LanceDB**, **Orama**, and **LocalGPT** support
-hybrid search. Of those, only **LanceDB** offers built-in reranking with hybrid. KINDX provides
-the most accessible hybrid search (single CLI command: `kindx query`).
+hybrid search. Of those, **KINDX** and **LanceDB** both offer built-in reranking with hybrid
+retrieval. KINDX is unique in combining local-only Qwen3-Reranker-0.6B cross-encoder reranking
+with RRF hybrid fusion — all accessible via a single CLI command: `kindx query`.
 
 **Sources:**
 - LanceDB hybrid: [Docs](https://docs.lancedb.com/search/hybrid-search)
@@ -193,17 +194,13 @@ KINDX is CLI-only by design. If you need a chat interface with file browsing, do
 management, and visual settings, **Khoj**, **AnythingLLM**, **GPT4All**, and **PrivateGPT** all
 offer polished UIs.
 
-### 3. No Reranking
-KINDX does not currently implement reranking. **LanceDB** (RRF + CrossEncoder), **Khoj**
-(cross-encoder), **PrivateGPT** (cross-encoder), and **LocalGPT** (ColBERT) all offer
-reranking which can significantly improve retrieval precision.
+### 3. Markdown-Only File Types
+KINDX focuses on markdown and plain-text documents. Tools like **AnythingLLM**, **PrivateGPT**,
+**Khoj**, and **GPT4All** handle PDF, DOCX, XLSX, and other binary formats out of the box.
+If your corpus includes non-text files, you'll need to pre-convert them to markdown before
+indexing with KINDX.
 
-### 4. Limited File Type Support
-KINDX focuses on Markdown and plain text. **AnythingLLM** and **PrivateGPT** handle PDF, DOCX,
-XLSX, and many other formats out of the box. **GPT4All** LocalDocs also supports common
-office formats.
-
-### 5. No Built-in LLM
+### 4. No Built-in LLM
 KINDX is a retrieval tool, not a RAG pipeline. Tools like **GPT4All**, **LocalGPT**,
 **PrivateGPT**, **AnythingLLM**, and **Khoj** include built-in LLM inference for
 question-answering over retrieved documents. KINDX returns search results — you bring your
