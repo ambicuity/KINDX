@@ -2,42 +2,31 @@
 
 ## Description
 
-Shows the process of creating a new document collection by pointing KINDX at a local directory. The screenshot captures the collection creation confirmation and initial document scan.
+Shows the process of registering a directory as a KINDX collection before indexing and embedding it.
 
 ## Command
 
 ```bash
-$ kindx collection add my-docs ~/Documents
+$ kindx collection add ~/Documents --name my-docs
 ```
 
 ## Expected Terminal Output
 
-```
-$ kindx collection add my-docs ~/Documents
-Collection "my-docs" created
-  Source: /Users/demo/Documents
-  Documents found: 34
+```text
+$ kindx collection add ~/Documents --name my-docs
+✓ Collection 'my-docs' added -> /Users/demo/Documents
 
-  Breakdown by type:
-    .md     18 files
-    .txt     9 files
-    .pdf     5 files
-    .py      2 files
-
-  Next steps:
-    kindx collection update my-docs   # Build BM25 index
-    kindx embed my-docs               # Generate vector embeddings
+Next steps:
+  kindx update -c my-docs
+  kindx embed
 
 $ kindx collection list
-  NAME       DOCS   EMBEDDED   SOURCE
-  my-docs    34     0          /Users/demo/Documents
+my-docs  /Users/demo/Documents
 ```
 
 ## Annotations
 
-- **Collection name (`my-docs`):** User-chosen identifier used in all subsequent commands. Must be unique across collections.
-- **Source path:** Absolute path to the directory KINDX will scan. Supports `~` expansion.
-- **Documents found (34):** KINDX scanned the directory recursively and found 34 files with supported extensions.
-- **Breakdown by type:** Shows the distribution of document types detected. KINDX supports markdown, plain text, PDF, and common code file formats.
-- **Next steps:** KINDX suggests the two-step indexing process -- first build the BM25 keyword index with `update`, then generate vector embeddings with `embed`.
-- **`collection list`:** Shows the collection registry with document count, embedding status (0 embedded so far), and source path.
+- **Collection name (`my-docs`):** The identifier used with `-c my-docs` in later search commands.
+- **Source path:** KINDX expands `~` and stores the absolute path internally.
+- **Next steps:** Run `kindx update -c my-docs` to refresh the lexical index, then `kindx embed` to generate vectors.
+- **`collection list`:** A quick way to verify the collection name and source path.

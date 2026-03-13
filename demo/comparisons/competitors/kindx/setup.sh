@@ -19,10 +19,10 @@ fi
 
 # Step 2: Register eval-docs as a collection
 echo "[2/3] Registering eval corpus as collection 'eval-bench'..."
-kindx collection add eval-bench "$CORPUS_DIR" --name eval-bench 2>/dev/null || true
+kindx collection add "$CORPUS_DIR" --name eval-bench 2>/dev/null || true
 
 # Step 3: Build embeddings
 echo "[3/3] Building embeddings (this downloads the model on first run)..."
-kindx embed -c eval-bench
+kindx embed
 
 echo "=== KINDX setup complete ==="

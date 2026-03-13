@@ -23,58 +23,31 @@ $ kindx demo
 
 ## SCENE 2: Setup Magic (0:05 - 0:15)
 
-**On screen:** The demo command auto-scaffolds a sample collection and begins embedding.
+**On screen:** The demo command prints a guided walkthrough with sample commands and results.
 
 **Expected output:**
 ```
-Setting up demo collection "kindx-demo"...
-  Added 12 sample documents from built-in corpus
-  Embedding documents... ████████████████████████ 12/12 (100%)
-  BM25 index built (12 docs, 3,847 terms)
-  Vector index ready (12 docs, 384 dimensions)
+KINDX - Interactive Demo
 
-Demo collection "kindx-demo" is ready!
+Step 1: Collection Setup
+  $ kindx collection add ./specs/eval-docs --name kindx-demo
+  Registered collection 'kindx-demo'
+
+Step 2: Embedding
+  $ kindx embed
+  Embedded 42 chunks from 6 documents
+
+Step 3: BM25 Search
+  $ kindx search "API versioning best practices" -c kindx-demo
 ```
 
-**Talking point:** "Automatic collection setup, local embeddings, zero API keys."
+**Talking point:** "One command shows the real workflow: add a collection, embed locally, then search."
 
-**Timing cue:** Let the progress bar animate naturally (~8s). Do not fast-forward -- the speed is the point.
+**Timing cue:** Let the walkthrough breathe for a few seconds so viewers can read the commands.
 
 ---
 
-## SCENE 3: Hybrid Search (0:15 - 0:25)
-
-**On screen:** Type and run a hybrid search query.
-
-**Type:**
-```
-$ kindx query "raising money for startup" --top 3
-```
-
-**Expected output:**
-```
-Hybrid Search: "raising money for startup" (3 results)
-
-  #1  [0.91] kindx://kindx-demo/fundraising-guide.md
-      "Series A fundraising requires a clear narrative around traction,
-       market size, and capital efficiency..."
-
-  #2  [0.84] kindx://kindx-demo/startup-finance.md
-      "Early-stage startups typically raise through SAFEs or convertible
-       notes before pricing a priced round..."
-
-  #3  [0.78] kindx://kindx-demo/investor-relations.md
-      "Building investor relationships 6-12 months before you need
-       capital gives you leverage in negotiations..."
-```
-
-**Talking point:** "Hybrid retrieval -- keyword + semantic -- ranked and scored, all local."
-
-**Timing cue:** Results appear instantly. Pause 2s so viewer can scan the output.
-
----
-
-## SCENE 4: The CTA (0:25 - 0:30)
+## SCENE 3: The CTA (0:15 - 0:30)
 
 **On screen:** Type the config snippet, then freeze.
 
@@ -89,7 +62,7 @@ $ cat ~/.claude/claude_desktop_config.json
   "mcpServers": {
     "kindx": {
       "command": "kindx",
-      "args": ["serve"]
+      "args": ["mcp"]
     }
   }
 }

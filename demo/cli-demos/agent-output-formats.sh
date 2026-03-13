@@ -80,16 +80,16 @@ echo ""
 echo ""
 
 # ---------------------------------------------------------------------------
-# Markdown output (--markdown)
+# Markdown output (--md)
 # ---------------------------------------------------------------------------
 # Returns results formatted as a Markdown document with headings, scores, and
 # code-fenced snippets. Great for rendering in chat UIs or documentation.
 
 echo "=== Markdown output ==="
-echo "Use --markdown for chat UIs, documentation, or human-readable reports."
+echo "Use --md for chat UIs, documentation, or human-readable reports."
 echo ""
 
-kindx search "$QUERY" --markdown
+kindx search "$QUERY" --md
 
 echo ""
 echo "=== Format demo complete ==="

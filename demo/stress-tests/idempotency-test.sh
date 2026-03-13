@@ -11,6 +11,7 @@ set -euo pipefail
 
 COLLECTION="stress-test-idempotency"
 TMPDIR=""
+KINDX_STATE_DIR=""
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -25,6 +26,10 @@ cleanup() {
   if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
     rm -rf "$TMPDIR"
     echo "Removed temp directory: $TMPDIR"
+  fi
+  if [[ -n "$KINDX_STATE_DIR" && -d "$KINDX_STATE_DIR" ]]; then
+    rm -rf "$KINDX_STATE_DIR"
+    echo "Removed isolated KINDX state: $KINDX_STATE_DIR"
   fi
   exit "$exit_code"
 }
@@ -56,7 +61,13 @@ echo "=== Idempotency Test Suite ==="
 echo ""
 
 TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-idempotent-XXXXXX")
+KINDX_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-idempotent-state-XXXXXX")
+export INDEX_PATH="$KINDX_STATE_DIR/index.sqlite"
+export KINDX_CONFIG_DIR="$KINDX_STATE_DIR/config"
+export XDG_CACHE_HOME="$KINDX_STATE_DIR/cache"
+mkdir -p "$KINDX_CONFIG_DIR" "$XDG_CACHE_HOME"
 echo "Temp directory: $TMPDIR"
+echo "Isolated KINDX state: $KINDX_STATE_DIR"
 
 # Generate 20 small markdown files — enough to exercise the pipeline
 for i in $(seq 1 20); do
@@ -83,10 +94,10 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "--- Test 1: Collection add is idempotent ---"
 
-kindx collection add "$COLLECTION" "$TMPDIR" 2>&1
+kindx collection add "$TMPDIR" --name "$COLLECTION" 2>&1
 add_exit_1=$?
 
-output_2=$(kindx collection add "$COLLECTION" "$TMPDIR" 2>&1) || true
+output_2=$(kindx collection add "$TMPDIR" --name "$COLLECTION" 2>&1) || true
 add_exit_2=$?
 
 # The second add should either succeed silently or report "already exists"
@@ -110,12 +121,12 @@ echo "--- Test 2: Embed is idempotent (no re-embedding unchanged files) ---"
 
 # First embed — processes all files
 kindx update -c "$COLLECTION" 2>&1 || true
-embed_out_1=$(kindx embed -c "$COLLECTION" 2>&1) || true
+embed_out_1=$(kindx embed 2>&1) || true
 echo "  First embed output (last 3 lines):"
 echo "$embed_out_1" | tail -3 | sed 's/^/    /'
 
 # Second embed — should detect nothing changed
-embed_out_2=$(kindx embed -c "$COLLECTION" 2>&1) || true
+embed_out_2=$(kindx embed 2>&1) || true
 echo "  Second embed output (last 3 lines):"
 echo "$embed_out_2" | tail -3 | sed 's/^/    /'
 
@@ -151,7 +162,7 @@ else
 fi
 
 # Now start an embed in the background and immediately search
-kindx embed -c "$COLLECTION" &>/dev/null &
+kindx embed &>/dev/null &
 embed_pid=$!
 
 # Give it a moment to start, then search
@@ -188,7 +199,7 @@ else
 fi
 
 # Re-embed after cleanup — should process files again since cleanup cleared state
-reembed_out=$(kindx embed -c "$COLLECTION" 2>&1) || true
+reembed_out=$(kindx embed 2>&1) || true
 reembed_exit=$?
 
 if [[ $reembed_exit -eq 0 ]]; then

@@ -2,94 +2,87 @@
 
 ## Description
 
-Shows the MCP Inspector tool connected to the KINDX server, displaying the available tools, their schemas, and a sample tool invocation. The MCP Inspector is a developer tool for testing and debugging MCP servers.
+Shows the MCP Inspector connected to KINDX over stdio and displaying the current tool surface.
 
 ## Command
 
 ```bash
-$ kindx serve
+$ kindx mcp
 ```
 
 Then, in a separate terminal:
 
 ```bash
-$ npx @modelcontextprotocol/inspector kindx serve
+$ npx @modelcontextprotocol/inspector kindx mcp
 ```
 
 ## Expected Terminal Output
 
 **KINDX server (terminal 1):**
-```
-$ kindx serve
-KINDX MCP Server running on stdio
-  Collections: my-docs (34 docs)
-  Tools: kindx_search, kindx_vsearch, kindx_query, kindx_collections
-  Ready for connections
+
+```text
+$ kindx mcp
+KINDX MCP server ready on stdio
+  Tools: query, get, multi_get, status
 ```
 
 **MCP Inspector (terminal 2 / browser UI):**
 
-The Inspector shows a web interface with the following panels:
-
 ### Tools Panel
 
-```
+```text
 Available Tools (4):
 
-kindx_search
-  Description: BM25 keyword search across a document collection
+query
+  Description: Search the knowledge base with one or more lex/vec/hyde sub-queries
   Parameters:
-    collection (string, required): Collection name to search
-    query (string, required): Search query text
-    top (number, optional): Number of results to return (default: 5)
+    searches (array, required)
+    limit (number, optional)
+    collections (array, optional)
 
-kindx_vsearch
-  Description: Vector similarity search using semantic embeddings
-  Parameters:
-    collection (string, required): Collection name to search
-    query (string, required): Search query text
-    top (number, optional): Number of results to return (default: 5)
+get
+  Description: Retrieve a single document by file path or docid
 
-kindx_query
-  Description: Hybrid search combining BM25 and vector retrieval
-  Parameters:
-    collection (string, required): Collection name to search
-    query (string, required): Search query text
-    top (number, optional): Number of results to return (default: 5)
-    explain (boolean, optional): Show retrieval trace (default: false)
+multi_get
+  Description: Retrieve multiple documents by glob or comma-separated paths
 
-kindx_collections
-  Description: List all available document collections
-  Parameters: (none)
+status
+  Description: Show collection and index health information
 ```
 
 ### Test Invocation Panel
 
-```
-Tool: kindx_search
+```text
+Tool: query
 Input:
 {
-  "collection": "my-docs",
-  "query": "authentication",
-  "top": 3
+  "searches": [
+    { "type": "lex", "query": "authentication" },
+    { "type": "vec", "query": "how does auth work" }
+  ],
+  "collections": ["my-docs"],
+  "limit": 3
 }
 
 Response:
 {
-  "content": [
-    {
-      "type": "text",
-      "text": "BM25 Search: \"authentication\" (3 results)\n\n  #1  [11.3] kindx://my-docs/security.md\n      \"Authentication is handled via JWT tokens issued by the /auth/login endpoint...\"\n\n  #2  [8.9] kindx://my-docs/api-reference.md\n      \"All authenticated endpoints require a Bearer token in the Authorization header...\"\n\n  #3  [5.4] kindx://my-docs/middleware.md\n      \"The authentication middleware validates tokens and attaches the user context...\""
-    }
-  ]
+  "structuredContent": {
+    "results": [
+      {
+        "docid": "#762e73",
+        "file": "kindx://my-docs/security.md",
+        "title": "Authentication Guide",
+        "score": 0.82,
+        "snippet": "Authentication is handled via JWT tokens issued by the /auth/login endpoint..."
+      }
+    ]
+  }
 }
 ```
 
 ## Annotations
 
-- **4 tools exposed:** KINDX registers four MCP tools -- three search modes and a collection listing utility. These are the tools AI agents see and can call.
-- **Tool schemas:** Each tool has typed parameters with descriptions. The `collection` and `query` parameters are required; `top` and `explain` are optional with sensible defaults.
-- **`kindx_collections` tool:** A parameter-free tool that lets agents discover which collections are available before searching. This enables dynamic collection selection.
-- **MCP response format:** Results are returned as `content` blocks with `type: "text"`. This follows the MCP tool response specification and is compatible with all MCP clients.
-- **Inspector test panel:** The Inspector allows sending test invocations to the server and viewing raw responses, making it useful for debugging tool behavior.
-- **stdio transport:** KINDX uses stdio transport (standard MCP protocol). The Inspector connects to it by wrapping the `kindx serve` command.
+- **Current tool surface:** KINDX exposes `query`, `get`, `multi_get`, and `status`.
+- **Typed search input:** `query` accepts `lex`, `vec`, and `hyde` sub-queries plus optional collection filters.
+- **Structured output:** Search responses include machine-readable result objects rather than only formatted text.
+- **stdio transport:** The Inspector connects by wrapping `kindx mcp`, not an old `serve` subcommand.

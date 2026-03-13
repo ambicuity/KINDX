@@ -18,6 +18,7 @@ set -euo pipefail
 
 COLLECTION="stress-test-corruption"
 TMPDIR=""
+KINDX_STATE_DIR=""
 PASS_COUNT=0
 FAIL_COUNT=0
 INFO_COUNT=0
@@ -45,6 +46,10 @@ cleanup() {
   if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
     rm -rf "$TMPDIR"
     echo "  Removed temp directory: $TMPDIR"
+  fi
+  if [[ -n "$KINDX_STATE_DIR" && -d "$KINDX_STATE_DIR" ]]; then
+    rm -rf "$KINDX_STATE_DIR"
+    echo "  Removed isolated KINDX state: $KINDX_STATE_DIR"
   fi
 
   exit "$exit_code"
@@ -90,7 +95,13 @@ echo "      This script will NOT permanently damage your KINDX installation."
 echo ""
 
 TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-corrupt-XXXXXX")
+KINDX_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-corrupt-state-XXXXXX")
+export INDEX_PATH="$KINDX_STATE_DIR/index.sqlite"
+export KINDX_CONFIG_DIR="$KINDX_STATE_DIR/config"
+export XDG_CACHE_HOME="$KINDX_STATE_DIR/cache"
+mkdir -p "$KINDX_CONFIG_DIR" "$XDG_CACHE_HOME"
 echo "Temp directory: $TMPDIR"
+echo "Isolated KINDX state: $KINDX_STATE_DIR"
 
 # Generate sample files
 for i in $(seq 1 15); do
@@ -116,9 +127,9 @@ done
 echo "Generated 15 sample files."
 
 # Register and do initial embed
-kindx collection add "$COLLECTION" "$TMPDIR"
+kindx collection add "$TMPDIR" --name "$COLLECTION"
 kindx update -c "$COLLECTION" 2>&1 || true
-kindx embed -c "$COLLECTION" 2>&1 || true
+kindx embed 2>&1 || true
 echo "Initial indexing complete."
 echo ""
 
@@ -142,7 +153,7 @@ done
 kindx update -c "$COLLECTION" 2>&1 || true
 
 # Start embed in background
-kindx embed -c "$COLLECTION" &>/dev/null &
+kindx embed &>/dev/null &
 EMBED_PID=$!
 
 # Wait briefly then kill it hard
@@ -167,7 +178,7 @@ else
 fi
 
 # Re-run embed to verify it can recover and finish
-reembed_out=$(kindx embed -c "$COLLECTION" 2>&1) || true
+reembed_out=$(kindx embed 2>&1) || true
 reembed_exit=$?
 
 if [[ $reembed_exit -eq 0 ]]; then
@@ -185,24 +196,7 @@ echo "  corrupts a few bytes in a copy, and checks how kindx responds."
 echo ""
 
 # Locate the KINDX database
-KINDX_DB=""
-for candidate in \
-  "$HOME/.cache/kindx/kindx.db" \
-  "$HOME/.cache/kindx/index.db" \
-  "$HOME/.cache/kindx/data.db" \
-  "$HOME/.local/share/kindx/kindx.db" \
-  "$HOME/.cache/kindx/kindx.sqlite" \
-  "$HOME/.cache/kindx/db.sqlite"; do
-  if [[ -f "$candidate" ]]; then
-    KINDX_DB="$candidate"
-    break
-  fi
-done
-
-if [[ -z "$KINDX_DB" ]]; then
-  # Try to find it
-  KINDX_DB=$(find "$HOME/.cache/kindx" -name "*.db" -o -name "*.sqlite" 2>/dev/null | head -1) || true
-fi
+KINDX_DB="${INDEX_PATH}"
 
 if [[ -n "$KINDX_DB" && -f "$KINDX_DB" ]]; then
   echo "  Found database: $KINDX_DB"
@@ -287,7 +281,7 @@ if [[ -n "$MODEL_CACHE_ORIGINAL" ]]; then
   echo "  Renamed to: $MODEL_CACHE_BACKUP"
 
   # Try to embed — should fail with a helpful error, not a crash
-  missing_out=$(kindx embed -c "$COLLECTION" 2>&1) || true
+  missing_out=$(kindx embed 2>&1) || true
   missing_exit=$?
 
   if [[ $missing_exit -eq 139 || $missing_exit -eq 134 ]]; then
@@ -316,7 +310,7 @@ if [[ -n "$MODEL_CACHE_ORIGINAL" ]]; then
   echo "  Model cache restored."
 
   # Verify embed works after restore
-  restored_out=$(kindx embed -c "$COLLECTION" 2>&1) || true
+  restored_out=$(kindx embed 2>&1) || true
   restored_exit=$?
 
   if [[ $restored_exit -eq 0 ]]; then

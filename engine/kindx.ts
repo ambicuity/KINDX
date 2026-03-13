@@ -483,7 +483,7 @@ async function showStatus(): Promise<void> {
   closeDb();
 }
 
-async function updateCollections(collectionFilter?: string): Promise<void> {
+async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
 
@@ -498,11 +498,15 @@ async function updateCollections(collectionFilter?: string): Promise<void> {
     return;
   }
 
-  // Filter to a single collection if --collection flag was provided
-  if (collectionFilter) {
-    collections = collections.filter(col => col.name === collectionFilter);
+  // Filter to specific collections if --collection flags were provided
+  const requestedCollections = Array.isArray(collectionFilter)
+    ? collectionFilter
+    : collectionFilter ? [collectionFilter] : [];
+  if (requestedCollections.length > 0) {
+    const requestedSet = new Set(requestedCollections);
+    collections = collections.filter(col => requestedSet.has(col.name));
     if (collections.length === 0) {
-      console.error(`${c.yellow}Collection not found: ${collectionFilter}${c.reset}`);
+      console.error(`${c.yellow}Collection not found: ${requestedCollections.join(", ")}${c.reset}`);
       console.error(`Run 'kindx collection list' to see available collections.`);
       closeDb();
       process.exit(1);
@@ -2093,13 +2097,13 @@ function runDemo(): void {
     console.log(`  ${c.yellow}eval-docs corpus not found at expected path.${c.reset}`);
     console.log(`  Demo will show simulated results.\n`);
   }
-  console.log(`  ${c.dim}$ kindx collection add kindx-demo ${hasEvalDocs ? evalDocsDir : './specs/eval-docs'}${c.reset}`);
+  console.log(`  ${c.dim}$ kindx collection add ${hasEvalDocs ? evalDocsDir : './specs/eval-docs'} --name kindx-demo${c.reset}`);
   console.log(`  ${c.green}✓${c.reset} Registered collection 'kindx-demo' (6 documents)\n`);
 
   // Step 2: Embedding
   console.log(`${c.bold}Step 2: Embedding${c.reset}`);
   console.log(`${c.dim}──────────────────${c.reset}`);
-  console.log(`  ${c.dim}$ kindx embed -c kindx-demo${c.reset}`);
+  console.log(`  ${c.dim}$ kindx embed${c.reset}`);
   console.log(`  ${c.dim}Model: nomic-embed-text-v1.5 (137M params, Q8_0)${c.reset}`);
   console.log(`  ${c.dim}Chunking 6 documents → 42 chunks${c.reset}`);
   console.log(`  ${c.dim}████████████████████████████████████████ 42/42 chunks  2.1s${c.reset}`);
@@ -2172,7 +2176,7 @@ function runDemo(): void {
   console.log(`  ${c.dim}$ kindx search "API design" --csv${c.reset}      → CSV for spreadsheet import`);
   console.log(`  ${c.dim}$ kindx search "API design" --xml${c.reset}      → XML for enterprise pipelines`);
   console.log(`  ${c.dim}$ kindx search "API design" --files${c.reset}    → docid,score,path for context injection`);
-  console.log(`  ${c.dim}$ kindx search "API design" --markdown${c.reset} → Markdown table\n`);
+  console.log(`  ${c.dim}$ kindx search "API design" --md${c.reset} → Markdown table\n`);
 
   // Step 7: MCP configuration
   console.log(`${c.bold}Step 7: Add KINDX to Claude Desktop${c.reset}`);
@@ -2192,9 +2196,9 @@ function runDemo(): void {
   console.log(`${c.bold}${c.cyan}║  Demo complete!                                              ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║  Get started:                                                ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    1. kindx collection add my-docs ~/Documents               ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║    1. kindx collection add ~/Documents --name my-docs        ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║    2. kindx embed                                            ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here"                       ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here" -c my-docs            ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/ambicuity/KINDX                    ║${c.reset}`);
   console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
@@ -3056,7 +3060,7 @@ if (isMain) {
     }
 
     case "update": {
-      const collFilter = cli.values.collection as string | undefined;
+      const collFilter = cli.values.collection as string[] | undefined;
       await updateCollections(collFilter);
       break;
     }

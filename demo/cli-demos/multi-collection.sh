@@ -27,11 +27,11 @@ echo "=== Step 1: Register collections ==="
 echo ""
 
 echo "Adding 'docs' collection from ~/projects/docs..."
-kindx collection add docs ~/projects/docs
+kindx collection add ~/projects/docs --name docs
 echo ""
 
 echo "Adding 'notes' collection from ~/notes..."
-kindx collection add notes ~/notes
+kindx collection add ~/notes --name notes
 echo ""
 
 # ---------------------------------------------------------------------------

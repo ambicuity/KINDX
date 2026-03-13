@@ -12,6 +12,7 @@ set -euo pipefail
 COLLECTION="stress-test-large-corpus"
 FILE_COUNT=500
 TMPDIR=""
+KINDX_STATE_DIR=""
 
 # ---------------------------------------------------------------------------
 # Cleanup trap — always remove temp directory and deregister collection
@@ -26,6 +27,10 @@ cleanup() {
   if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
     rm -rf "$TMPDIR"
     echo "Removed temp directory: $TMPDIR"
+  fi
+  if [[ -n "$KINDX_STATE_DIR" && -d "$KINDX_STATE_DIR" ]]; then
+    rm -rf "$KINDX_STATE_DIR"
+    echo "Removed isolated KINDX state: $KINDX_STATE_DIR"
   fi
   if [[ $exit_code -ne 0 ]]; then
     echo "Script exited with error code $exit_code"
@@ -102,7 +107,13 @@ PARAGRAPHS=(
 # Step 1: Create temp directory
 # ---------------------------------------------------------------------------
 TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-stress-XXXXXX")
+KINDX_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/kindx-stress-state-XXXXXX")
+export INDEX_PATH="$KINDX_STATE_DIR/index.sqlite"
+export KINDX_CONFIG_DIR="$KINDX_STATE_DIR/config"
+export XDG_CACHE_HOME="$KINDX_STATE_DIR/cache"
+mkdir -p "$KINDX_CONFIG_DIR" "$XDG_CACHE_HOME"
 echo "Temp directory: $TMPDIR"
+echo "Isolated KINDX state: $KINDX_STATE_DIR"
 
 # ---------------------------------------------------------------------------
 # Step 2: Generate 500 markdown files with varied content
@@ -167,7 +178,7 @@ ls "$TMPDIR" | wc -l | xargs -I{} echo "  File count verified: {}"
 # ---------------------------------------------------------------------------
 echo ""
 echo "Registering collection '$COLLECTION'..."
-kindx collection add "$COLLECTION" "$TMPDIR"
+kindx collection add "$TMPDIR" --name "$COLLECTION"
 
 # ---------------------------------------------------------------------------
 # Step 4: Benchmark — update
@@ -179,7 +190,7 @@ bench "kindx update" kindx update -c "$COLLECTION"
 # ---------------------------------------------------------------------------
 echo ""
 echo "NOTE: Embedding 500 files may take several minutes depending on hardware."
-bench "kindx embed" kindx embed -c "$COLLECTION"
+bench "kindx embed" kindx embed
 
 # ---------------------------------------------------------------------------
 # Step 6: Benchmark — search

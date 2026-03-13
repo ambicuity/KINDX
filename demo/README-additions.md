@@ -18,27 +18,26 @@ See KINDX in action with a single command:
 kindx demo
 ```
 
-This spins up a local KINDX instance, ingests sample data (code files, meeting notes, and documentation), runs searches across all content, and tears everything down — all in under 30 seconds. No configuration needed.
+This prints a guided walkthrough of the main KINDX workflow. When the bundled `specs/eval-docs` corpus is available, the walkthrough references that local sample corpus; otherwise it falls back to simulated sample results.
 
 What the demo does:
-1. Starts KINDX with an in-memory database
-2. Ingests 12 sample documents (TypeScript source, markdown notes, architecture docs)
-3. Runs 5 search queries across different retrieval modes (BM25, vector, hybrid)
-4. Displays results with relevance scores and latency
-5. Cleans up automatically
+1. Shows the current CLI workflow for adding a collection and generating embeddings
+2. Walks through BM25, vector, and hybrid retrieval examples
+3. Shows agent-friendly output formats and MCP configuration
+4. Ends with copy-pasteable next steps for a real collection
 
 ---
 
 ## Benchmark Results
 
-Evaluated on a curated retrieval benchmark of 24 queries across code and document corpora. All latency numbers measured on an M2 MacBook Air with 16 GB RAM.
+Evaluated on the bundled `specs/eval-docs/` corpus with 24 hand-curated queries. The numbers below match [`demo/benchmarks/eval-results.json`](demo/benchmarks/eval-results.json).
 
 | Mode              | Hit@1  | MRR    | nDCG@5 | Median Latency |
 |-------------------|--------|--------|--------|----------------|
 | BM25              | 0.625  | 0.736  | 0.711  | 3ms            |
 | Vector            | 0.708  | 0.788  | 0.763  | 28ms           |
 | Hybrid (RRF)      | 0.792  | 0.849  | 0.822  | 45ms           |
-| Hybrid + Rerank   | 0.833  | 0.896  | 0.871  | 62ms           |
+| Hybrid + Rerank   | 0.833  | 0.896  | 0.871  | 112ms          |
 
 - **BM25** — Keyword search using Okapi BM25 scoring. Fastest mode, ideal for exact-match lookups.
 - **Vector** — Semantic search using locally-computed embeddings. Best for natural language queries.
@@ -67,13 +66,13 @@ KINDX is designed for local-first, low-latency retrieval:
 |------------------------|----------------|-------------|
 | BM25 search            | 3ms            | 8ms         |
 | Vector search          | 28ms           | 52ms        |
-| Hybrid search (RRF)    | 45ms           | 78ms        |
-| Hybrid + rerank        | 62ms           | 110ms       |
+| Hybrid search (RRF)    | 45ms           | 89ms        |
+| Hybrid + rerank        | 112ms          | 203ms       |
 | Document ingest (single)| 15ms          | 35ms        |
 | Batch ingest (100 docs) | 1.2s          | 2.1s        |
-| Cold start             | 180ms          | 320ms       |
+| Cold start             | 2295ms         | 2295ms      |
 
-All measurements on an M2 MacBook Air, 16 GB RAM, SSD storage. Performance scales linearly up to ~100k documents in the local index.
+The committed benchmark snapshot was captured on an Apple M2 Pro with 16 GB RAM running macOS 14.
 
 ---
 

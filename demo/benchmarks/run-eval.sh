@@ -1,74 +1,60 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------------
-# run-eval.sh — KINDX retrieval evaluation benchmark
+# run-eval.sh — public KINDX CLI evaluation benchmark
 #
-# Runs BM25, vector, and hybrid search evaluations against the eval corpus,
-# collects timing data, and generates eval-results.json.
-#
-# Usage:
-#   chmod +x run-eval.sh
-#   ./run-eval.sh
-#
-# Requirements:
-#   - kindx binary on PATH (or KINDX_BIN env var)
-#   - specs/eval-docs/ directory with evaluation markdown documents
-#   - jq (for JSON assembly)
+# Runs the public CLI commands (`search`, `vsearch`, `query`) against the
+# bundled eval corpus using an isolated KINDX home. By default it writes a
+# local results file so the committed benchmark snapshot is not overwritten.
 # ----------------------------------------------------------------------------
 set -euo pipefail
-
-# ── Configuration ───────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 EVAL_DOCS="${PROJECT_ROOT}/specs/eval-docs"
-RESULTS_FILE="${SCRIPT_DIR}/eval-results.json"
 KINDX_BIN="${KINDX_BIN:-kindx}"
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RESULTS_FILE="${RESULTS_FILE:-${SCRIPT_DIR}/eval-results.local.json}"
 TMPDIR_BASE="${TMPDIR:-/tmp}"
 WORK_DIR=""
+COLLECTION="kindx-eval"
+LATENCY_RUNS="${LATENCY_RUNS:-3}"
+QUERY_LIMIT="${QUERY_LIMIT:-0}"
 
-# Number of runs per query for latency averaging
-LATENCY_RUNS=5
-
-# ── Canned Evaluation Queries ──────────────────────────────────────────────
-# Format: "difficulty|query|expected_chunk_id"
-# 6 queries per difficulty level = 24 total
-
+# Format: "difficulty|query|expected_file_substring"
 QUERIES=(
-  # Easy — exact keyword matches
-  "easy|What is the default chunk size?|chunk-config-defaults"
-  "easy|How do I install kindx?|installation-guide"
-  "easy|What embedding model does kindx use?|embedding-model-spec"
-  "easy|What is the SQLite schema for documents?|sqlite-schema-docs"
-  "easy|How is BM25 scoring configured?|bm25-parameters"
-  "easy|What CLI flags does kindx search accept?|cli-search-flags"
+  "easy|API versioning|api-design-principles"
+  "easy|Series A fundraising|startup-fundraising-memo"
+  "easy|CAP theorem|distributed-systems-overview"
+  "easy|overfitting machine learning|machine-learning-primer"
+  "easy|remote work VPN|remote-work-policy"
+  "easy|Project Phoenix retrospective|product-launch-retrospective"
 
-  # Medium — paraphrased, synonym matching
-  "medium|How do I break documents into smaller pieces?|chunk-config-defaults"
-  "medium|What are the system requirements for running kindx?|installation-guide"
-  "medium|Which neural network converts text to vectors?|embedding-model-spec"
-  "medium|Describe the database table structure|sqlite-schema-docs"
-  "medium|How does term frequency ranking work?|bm25-parameters"
-  "medium|What options are available for querying?|cli-search-flags"
+  "medium|how to structure REST endpoints|api-design-principles"
+  "medium|raising money for startup|startup-fundraising-memo"
+  "medium|consistency vs availability tradeoffs|distributed-systems-overview"
+  "medium|how to prevent models from memorizing data|machine-learning-primer"
+  "medium|working from home guidelines|remote-work-policy"
+  "medium|what went wrong with the launch|product-launch-retrospective"
 
-  # Hard — semantic, no keyword overlap
-  "hard|How can I control granularity of indexed passages?|chunk-config-defaults"
-  "hard|What do I need before my first search works?|installation-guide"
-  "hard|Explain the dimensionality of the semantic representation|embedding-model-spec"
-  "hard|Where is the persistent state stored on disk?|sqlite-schema-docs"
-  "hard|Why might a rare term score higher than a common one?|bm25-parameters"
-  "hard|How do I narrow results to a specific folder?|cli-search-flags"
+  "hard|nouns not verbs|api-design-principles"
+  "hard|Sequoia investor pitch|startup-fundraising-memo"
+  "hard|Raft algorithm leader election|distributed-systems-overview"
+  "hard|F1 score precision recall|machine-learning-primer"
+  "hard|quarterly team gathering travel|remote-work-policy"
+  "hard|beta program 47 bugs|product-launch-retrospective"
 
-  # Fusion — multi-document reasoning
-  "fusion|How do BM25 and vector scores get combined?|hybrid-rrf-algorithm"
-  "fusion|What happens between chunking and the first search query?|embedding-pipeline"
-  "fusion|Compare the latency of keyword vs semantic search|search-latency-tradeoffs"
-  "fusion|How does the reranker improve on initial retrieval?|reranker-pipeline"
-  "fusion|What storage formats are used for text vs vectors?|storage-architecture"
-  "fusion|Trace a query from input to ranked results|end-to-end-search-flow"
+  "fusion|compare API versioning and error handling conventions|api-design-principles"
+  "fusion|what happened after the Project Phoenix launch|product-launch-retrospective"
+  "fusion|how should a startup prepare for Series A fundraising|startup-fundraising-memo"
+  "fusion|what consistency tradeoffs matter in distributed systems|distributed-systems-overview"
+  "fusion|how do teams balance remote work policy and travel|remote-work-policy"
+  "fusion|which techniques reduce overfitting in machine learning|machine-learning-primer"
 )
 
-# ── Helper Functions ────────────────────────────────────────────────────────
+MODES=(bm25 vector hybrid)
+
+if [[ "${QUERY_LIMIT}" -gt 0 ]]; then
+  QUERIES=("${QUERIES[@]:0:${QUERY_LIMIT}}")
+fi
 
 log() {
   echo "[eval] $(date +%H:%M:%S) $*"
@@ -81,289 +67,224 @@ die() {
 
 cleanup() {
   if [[ -n "${WORK_DIR}" && -d "${WORK_DIR}" ]]; then
-    log "Cleaning up temp directory: ${WORK_DIR}"
     rm -rf "${WORK_DIR}"
   fi
 }
 trap cleanup EXIT
 
-# Time a command in milliseconds; stores result in global ELAPSED_MS
 time_ms() {
   local start end
-  start=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
-  "$@" > /dev/null 2>&1
-  end=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
-  ELAPSED_MS=$(( (end - start) / 1000000 ))
+  start=$(python3 -c 'import time; print(int(time.time()*1000))')
+  "$@" >/dev/null 2>&1
+  end=$(python3 -c 'import time; print(int(time.time()*1000))')
+  ELAPSED_MS=$(( end - start ))
 }
 
-# Compute median from a space-separated list of numbers
 median() {
-  local sorted
-  sorted=$(echo "$@" | tr ' ' '\n' | sort -n)
-  local count
-  count=$(echo "$sorted" | wc -l | tr -d ' ')
-  local mid=$(( (count + 1) / 2 ))
-  echo "$sorted" | sed -n "${mid}p"
+  printf '%s\n' "$@" | awk 'NF' | sort -n | awk '
+    { a[NR] = $1 }
+    END {
+      if (NR == 0) exit 1;
+      mid = int((NR + 1) / 2);
+      print a[mid];
+    }
+  '
 }
 
-# Compute a percentile (p95, p99) from a space-separated list
 percentile() {
   local pct=$1
   shift
-  local sorted
-  sorted=$(echo "$@" | tr ' ' '\n' | sort -n)
-  local count
-  count=$(echo "$sorted" | wc -l | tr -d ' ')
-  local idx=$(( (count * pct + 99) / 100 ))
-  [[ $idx -lt 1 ]] && idx=1
-  echo "$sorted" | sed -n "${idx}p"
+  printf '%s\n' "$@" | awk 'NF' | sort -n | awk -v pct="$pct" '
+    { a[NR] = $1 }
+    END {
+      if (NR == 0) exit 1;
+      idx = int((NR * pct + 99) / 100);
+      if (idx < 1) idx = 1;
+      if (idx > NR) idx = NR;
+      print a[idx];
+    }
+  '
 }
 
-# ── Preflight Checks ───────────────────────────────────────────────────────
+float_div() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+num = float(sys.argv[1])
+den = float(sys.argv[2])
+print(f"{(num / den) if den else 0:.3f}")
+PY
+}
 
-log "KINDX Retrieval Evaluation Benchmark"
-log "====================================="
+ndcg_at_5() {
+  python3 - "$1" <<'PY'
+import math
+import sys
+rank = int(sys.argv[1])
+if 1 <= rank <= 5:
+    print(f"{1 / math.log2(rank + 1):.3f}")
+else:
+    print("0.000")
+PY
+}
 
-# Check for kindx binary
-if ! command -v "${KINDX_BIN}" &> /dev/null; then
+if ! command -v "${KINDX_BIN}" >/dev/null 2>&1; then
   die "kindx binary not found. Set KINDX_BIN or add kindx to PATH."
 fi
-log "Using kindx: $(command -v "${KINDX_BIN}")"
-log "Version: $(${KINDX_BIN} --version 2>/dev/null || echo 'unknown')"
 
-# Check for eval docs
 if [[ ! -d "${EVAL_DOCS}" ]]; then
-  die "Eval docs not found at ${EVAL_DOCS}. Run from project root."
-fi
-DOC_COUNT=$(find "${EVAL_DOCS}" -name '*.md' -type f | wc -l | tr -d ' ')
-log "Found ${DOC_COUNT} eval documents in ${EVAL_DOCS}"
-
-# Check for jq
-if ! command -v jq &> /dev/null; then
-  die "jq is required for JSON generation. Install with: brew install jq"
+  die "Eval docs not found at ${EVAL_DOCS}."
 fi
 
-# ── Create Temp Collection ──────────────────────────────────────────────────
+if ! command -v jq >/dev/null 2>&1; then
+  die "jq is required for JSON generation."
+fi
 
 WORK_DIR=$(mktemp -d "${TMPDIR_BASE}/kindx-eval.XXXXXX")
-log "Temp directory: ${WORK_DIR}"
+export KINDX_CONFIG_DIR="${WORK_DIR}/config"
+export XDG_CACHE_HOME="${WORK_DIR}/cache"
+export INDEX_PATH="${WORK_DIR}/index.sqlite"
+mkdir -p "${KINDX_CONFIG_DIR}" "${XDG_CACHE_HOME}"
 
-log "Creating eval collection..."
-${KINDX_BIN} collection add kindx-eval "${EVAL_DOCS}" 2>/dev/null || true
-
-# ── Index and Embed ─────────────────────────────────────────────────────────
+log "Using isolated KINDX state in ${WORK_DIR}"
+log "Adding eval collection..."
+"${KINDX_BIN}" collection add "${EVAL_DOCS}" --name "${COLLECTION}" >/dev/null
+"${KINDX_BIN}" update -c "${COLLECTION}" >/dev/null
 
 log "Generating embeddings..."
-time_ms ${KINDX_BIN} embed -c kindx-eval
+time_ms "${KINDX_BIN}" embed
 EMBED_TIME_MS=${ELAPSED_MS}
-log "Embedding completed in ${EMBED_TIME_MS}ms"
 
-# BM25 index is built automatically; no separate index step needed
-INDEX_TIME_MS=0
-
-# ── Run Evaluations ─────────────────────────────────────────────────────────
-
-declare -A MODE_HITS_1 MODE_HITS_3 MODE_HITS_5 MODE_TOTAL
-declare -A MODE_RR_SUM  # for MRR calculation
-declare -A LATENCY_SAMPLES
-
-for mode in bm25 vector hybrid hybrid_rerank; do
-  MODE_HITS_1[$mode]=0
-  MODE_HITS_3[$mode]=0
-  MODE_HITS_5[$mode]=0
-  MODE_TOTAL[$mode]=0
-  MODE_RR_SUM[$mode]=0
-  LATENCY_SAMPLES[$mode]=""
-done
+HIT1=(0 0 0)
+HIT3=(0 0 0)
+HIT5=(0 0 0)
+TOTAL=(0 0 0)
+RR_SUM=(0 0 0)
+NDCG_SUM=(0 0 0)
+LATENCY=("" "" "")
 
 run_search() {
   local mode=$1
   local query=$2
-
   case "${mode}" in
-    bm25)          ${KINDX_BIN} search "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
-    vector)        ${KINDX_BIN} vsearch "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
-    hybrid)        ${KINDX_BIN} query "${query}" --json -n 5 -c kindx-eval 2>/dev/null ;;
-    hybrid_rerank) ${KINDX_BIN} query "${query}" --json -n 5 --rerank -c kindx-eval 2>/dev/null ;;
+    bm25)   "${KINDX_BIN}" search "${query}" -c "${COLLECTION}" --json -n 5 2>/dev/null ;;
+    vector) "${KINDX_BIN}" vsearch "${query}" -c "${COLLECTION}" --json -n 5 2>/dev/null ;;
+    hybrid) "${KINDX_BIN}" query "${query}" -c "${COLLECTION}" --json -n 5 2>/dev/null ;;
+    *) die "Unknown mode: ${mode}" ;;
   esac
 }
 
-log ""
-log "Running search evaluations (${#QUERIES[@]} queries x 4 modes x ${LATENCY_RUNS} runs)..."
-log ""
+match_rank() {
+  local results=$1
+  local expected=$2
+  echo "${results}" | jq -r --arg expected "${expected}" '
+    [.[] | .file] | to_entries | map(select(.value | contains($expected))) |
+    if length > 0 then (.[0].key + 1) else 0 end
+  ' 2>/dev/null || echo "0"
+}
 
-query_num=0
+log "Running ${#QUERIES[@]} queries across ${#MODES[@]} public CLI modes..."
+
 for entry in "${QUERIES[@]}"; do
-  IFS='|' read -r difficulty query expected_id <<< "${entry}"
-  query_num=$((query_num + 1))
-
-  log "  Query ${query_num}/24 [${difficulty}]: ${query:0:50}..."
-
-  for mode in bm25 vector hybrid hybrid_rerank; do
-    # Accuracy evaluation (single run)
+  IFS='|' read -r difficulty query expected <<<"${entry}"
+  log "  [${difficulty}] ${query}"
+  for idx in "${!MODES[@]}"; do
+    mode="${MODES[$idx]}"
     results=$(run_search "${mode}" "${query}" || echo "[]")
+    rank=$(match_rank "${results}" "${expected}")
 
-    # Check hits at various k
-    for k in 1 3 5; do
-      hit=$(echo "${results}" | jq -r \
-        --arg eid "${expected_id}" \
-        --argjson k "${k}" \
-        '[.[:$k] | .[].chunk_id] | if any(. == $eid) then "1" else "0" end' \
-        2>/dev/null || echo "0")
-
-      case $k in
-        1) MODE_HITS_1[$mode]=$(( ${MODE_HITS_1[$mode]} + hit )) ;;
-        3) MODE_HITS_3[$mode]=$(( ${MODE_HITS_3[$mode]} + hit )) ;;
-        5) MODE_HITS_5[$mode]=$(( ${MODE_HITS_5[$mode]} + hit )) ;;
-      esac
-    done
-
-    # Reciprocal rank
-    rank=$(echo "${results}" | jq -r \
-      --arg eid "${expected_id}" \
-      '[.[] | .chunk_id] | to_entries | map(select(.value == $eid)) | if length > 0 then (.[0].key + 1) else 0 end' \
-      2>/dev/null || echo "0")
-
-    if [[ "${rank}" -gt 0 ]]; then
-      # Bash doesn't do float math; accumulate as fixed-point (x1000)
-      rr=$(( 1000 / rank ))
-      MODE_RR_SUM[$mode]=$(( ${MODE_RR_SUM[$mode]} + rr ))
+    TOTAL[$idx]=$(( ${TOTAL[$idx]} + 1 ))
+    if [[ "${rank}" -eq 1 ]]; then
+      HIT1[$idx]=$(( ${HIT1[$idx]} + 1 ))
+    fi
+    if [[ "${rank}" -ge 1 && "${rank}" -le 3 ]]; then
+      HIT3[$idx]=$(( ${HIT3[$idx]} + 1 ))
+    fi
+    if [[ "${rank}" -ge 1 && "${rank}" -le 5 ]]; then
+      HIT5[$idx]=$(( ${HIT5[$idx]} + 1 ))
     fi
 
-    MODE_TOTAL[$mode]=$(( ${MODE_TOTAL[$mode]} + 1 ))
+    rr_value=$(python3 - "${rank}" <<'PY'
+import sys
+rank = int(sys.argv[1])
+print(0 if rank <= 0 else 1 / rank)
+PY
+)
+    RR_SUM[$idx]=$(python3 - "${RR_SUM[$idx]}" "${rr_value}" <<'PY'
+import sys
+print(float(sys.argv[1]) + float(sys.argv[2]))
+PY
+)
+    NDCG_SUM[$idx]=$(python3 - "${NDCG_SUM[$idx]}" "$(ndcg_at_5 "${rank}")" <<'PY'
+import sys
+print(float(sys.argv[1]) + float(sys.argv[2]))
+PY
+)
 
-    # Latency measurement (multiple runs)
     for ((run=1; run<=LATENCY_RUNS; run++)); do
       time_ms run_search "${mode}" "${query}"
-      LATENCY_SAMPLES[$mode]="${LATENCY_SAMPLES[$mode]} ${ELAPSED_MS}"
+      LATENCY[$idx]="${LATENCY[$idx]} ${ELAPSED_MS}"
     done
   done
 done
 
-# ── Compute Metrics ─────────────────────────────────────────────────────────
-
-log ""
-log "Computing metrics..."
-
-compute_metric() {
-  local hits=$1
-  local total=$2
-  if [[ $total -eq 0 ]]; then
-    echo "0.000"
-  else
-    # Fixed-point division with 3 decimal places
-    printf "%.3f" "$(echo "scale=3; ${hits} / ${total}" | bc)"
-  fi
-}
-
-# ── Generate Results JSON ───────────────────────────────────────────────────
-
-log "Generating ${RESULTS_FILE}..."
-
-# Build latency stats per mode
-build_latency_json() {
-  local mode=$1
-  local samples="${LATENCY_SAMPLES[$mode]}"
-  local med p95 p99
-
-  med=$(median ${samples})
-  p95=$(percentile 95 ${samples})
-  p99=$(percentile 99 ${samples})
-
-  cat <<LATJSON
+mode_json() {
+  local idx=$1
+  local total=${TOTAL[$idx]}
+  local median_ms p95_ms p99_ms
+  median_ms=$(median ${LATENCY[$idx]})
+  p95_ms=$(percentile 95 ${LATENCY[$idx]})
+  p99_ms=$(percentile 99 ${LATENCY[$idx]})
+  cat <<JSON
 {
-      "median_ms": ${med},
-      "p95_ms": ${p95},
-      "p99_ms": ${p99}
-    }
-LATJSON
+  "hit_at_1": $(float_div "${HIT1[$idx]}" "${total}"),
+  "hit_at_3": $(float_div "${HIT3[$idx]}" "${total}"),
+  "hit_at_5": $(float_div "${HIT5[$idx]}" "${total}"),
+  "mrr": $(float_div "${RR_SUM[$idx]}" "${total}"),
+  "ndcg_at_5": $(float_div "${NDCG_SUM[$idx]}" "${total}"),
+  "latency": {
+    "median_ms": ${median_ms},
+    "p95_ms": ${p95_ms},
+    "p99_ms": ${p99_ms}
+  }
+}
+JSON
 }
 
-# Assemble final JSON using jq
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+DOC_COUNT=$(find "${EVAL_DOCS}" -name '*.md' -type f | wc -l | tr -d ' ')
+
 jq -n \
   --arg date "${TIMESTAMP}" \
   --arg version "$(${KINDX_BIN} --version 2>/dev/null || echo 'unknown')" \
-  --argjson doc_count "${DOC_COUNT}" \
-  --argjson query_count "${#QUERIES[@]}" \
-  --argjson index_time "${INDEX_TIME_MS}" \
+  --arg source "${EVAL_DOCS}" \
+  --argjson documents "${DOC_COUNT}" \
+  --argjson queries "${#QUERIES[@]}" \
   --argjson embed_time "${EMBED_TIME_MS}" \
-  --argjson bm25_h1 "${MODE_HITS_1[bm25]}" \
-  --argjson bm25_h3 "${MODE_HITS_3[bm25]}" \
-  --argjson bm25_h5 "${MODE_HITS_5[bm25]}" \
-  --argjson bm25_total "${MODE_TOTAL[bm25]}" \
-  --argjson vec_h1 "${MODE_HITS_1[vector]}" \
-  --argjson vec_h3 "${MODE_HITS_3[vector]}" \
-  --argjson vec_h5 "${MODE_HITS_5[vector]}" \
-  --argjson vec_total "${MODE_TOTAL[vector]}" \
-  --argjson hyb_h1 "${MODE_HITS_1[hybrid]}" \
-  --argjson hyb_h3 "${MODE_HITS_3[hybrid]}" \
-  --argjson hyb_h5 "${MODE_HITS_5[hybrid]}" \
-  --argjson hyb_total "${MODE_TOTAL[hybrid]}" \
-  --argjson rr_h1 "${MODE_HITS_1[hybrid_rerank]}" \
-  --argjson rr_h3 "${MODE_HITS_3[hybrid_rerank]}" \
-  --argjson rr_h5 "${MODE_HITS_5[hybrid_rerank]}" \
-  --argjson rr_total "${MODE_TOTAL[hybrid_rerank]}" \
+  --argjson bm25 "$(mode_json 0)" \
+  --argjson vector "$(mode_json 1)" \
+  --argjson hybrid "$(mode_json 2)" \
   '{
     meta: {
-      test_date: $date,
+      generated_at: $date,
       kindx_version: $version,
       generated_by: "run-eval.sh",
-      hardware: {
-        cpu: "detected at runtime",
-        ram_gb: "detected at runtime"
-      },
+      notes: "Public CLI smoke benchmark. Results file defaults to eval-results.local.json so the committed benchmark snapshot remains unchanged.",
       corpus: {
-        documents: $doc_count,
-        queries: $query_count
+        source: $source,
+        documents: $documents
       },
-      timing: {
-        index_ms: $index_time,
-        embed_ms: $embed_time
-      }
+      queries: {
+        total: $queries,
+        difficulty_levels: ["easy", "medium", "hard", "fusion"]
+      },
+      embed_time_ms: $embed_time
     },
     results: {
-      bm25: {
-        hit_at_1: ($bm25_h1 / $bm25_total),
-        hit_at_3: ($bm25_h3 / $bm25_total),
-        hit_at_5: ($bm25_h5 / $bm25_total)
-      },
-      vector: {
-        hit_at_1: ($vec_h1 / $vec_total),
-        hit_at_3: ($vec_h3 / $vec_total),
-        hit_at_5: ($vec_h5 / $vec_total)
-      },
-      hybrid_rrf: {
-        hit_at_1: ($hyb_h1 / $hyb_total),
-        hit_at_3: ($hyb_h3 / $hyb_total),
-        hit_at_5: ($hyb_h5 / $hyb_total)
-      },
-      hybrid_rerank: {
-        hit_at_1: ($rr_h1 / $rr_total),
-        hit_at_3: ($rr_h3 / $rr_total),
-        hit_at_5: ($rr_h5 / $rr_total)
-      }
+      bm25: $bm25,
+      vector: $vector,
+      hybrid: $hybrid
     }
   }' > "${RESULTS_FILE}"
 
-# ── Print Summary ───────────────────────────────────────────────────────────
-
-log ""
-log "====================================="
-log "Evaluation Complete"
-log "====================================="
-log ""
-log "Results written to: ${RESULTS_FILE}"
-log ""
-log "Quick Summary:"
-log "  BM25          Hit@1=$(compute_metric ${MODE_HITS_1[bm25]} ${MODE_TOTAL[bm25]})  Hit@3=$(compute_metric ${MODE_HITS_3[bm25]} ${MODE_TOTAL[bm25]})  Hit@5=$(compute_metric ${MODE_HITS_5[bm25]} ${MODE_TOTAL[bm25]})"
-log "  Vector        Hit@1=$(compute_metric ${MODE_HITS_1[vector]} ${MODE_TOTAL[vector]})  Hit@3=$(compute_metric ${MODE_HITS_3[vector]} ${MODE_TOTAL[vector]})  Hit@5=$(compute_metric ${MODE_HITS_5[vector]} ${MODE_TOTAL[vector]})"
-log "  Hybrid (RRF)  Hit@1=$(compute_metric ${MODE_HITS_1[hybrid]} ${MODE_TOTAL[hybrid]})  Hit@3=$(compute_metric ${MODE_HITS_3[hybrid]} ${MODE_TOTAL[hybrid]})  Hit@5=$(compute_metric ${MODE_HITS_5[hybrid]} ${MODE_TOTAL[hybrid]})"
-log "  Hybrid+Rerank Hit@1=$(compute_metric ${MODE_HITS_1[hybrid_rerank]} ${MODE_TOTAL[hybrid_rerank]})  Hit@3=$(compute_metric ${MODE_HITS_3[hybrid_rerank]} ${MODE_TOTAL[hybrid_rerank]})  Hit@5=$(compute_metric ${MODE_HITS_5[hybrid_rerank]} ${MODE_TOTAL[hybrid_rerank]})"
-log ""
-log "Latency (median):"
-log "  BM25:          $(median ${LATENCY_SAMPLES[bm25]})ms"
-log "  Vector:        $(median ${LATENCY_SAMPLES[vector]})ms"
-log "  Hybrid (RRF):  $(median ${LATENCY_SAMPLES[hybrid]})ms"
-log "  Hybrid+Rerank: $(median ${LATENCY_SAMPLES[hybrid_rerank]})ms"
-log ""
-log "Full reports: eval-report.md, latency-report.md"
+log "Wrote results to ${RESULTS_FILE}"
+jq '.' "${RESULTS_FILE}"

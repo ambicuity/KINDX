@@ -26,7 +26,7 @@ echo "=== Step 1: Register a collection ==="
 echo "Registering ~/notes as 'my-notes'..."
 echo ""
 
-kindx collection add my-notes ~/notes
+kindx collection add ~/notes --name my-notes
 
 echo ""
 echo "Collection 'my-notes' is now registered. KINDX will watch this directory"
@@ -56,13 +56,14 @@ echo ""
 # collection, enabling semantic (meaning-based) search.
 
 echo "=== Step 3: Embed documents ==="
-echo "Generating vector embeddings for 'my-notes'..."
+echo "Generating vector embeddings for all pending collections (including 'my-notes')..."
 echo ""
 
-kindx embed -c my-notes
+kindx embed
 
 echo ""
 echo "Embeddings are stored locally. Vector search is now available."
+echo "KINDX embeds every collection with pending changes, not just one collection."
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -91,7 +92,7 @@ echo "=== Step 5: Vector search ==="
 echo "Searching for 'decisions about deployment strategy' using vector search..."
 echo ""
 
-kindx vsearch "decisions about deployment strategy"
+kindx vsearch "decisions about deployment strategy" -c my-notes
 
 echo ""
 echo "Vector search returns results ranked by cosine similarity to the query."
@@ -107,7 +108,7 @@ echo "=== Step 6: Hybrid query ==="
 echo "Running hybrid query: 'what did we decide about the database migration'..."
 echo ""
 
-kindx query "what did we decide about the database migration"
+kindx query "what did we decide about the database migration" -c my-notes
 
 echo ""
 echo "Hybrid queries blend keyword precision with semantic understanding."

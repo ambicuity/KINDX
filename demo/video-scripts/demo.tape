@@ -15,6 +15,24 @@ Hide
 Type "export PS1='$ '"
 Enter
 Sleep 500ms
+Type "export KINDX_CONFIG_DIR=$(mktemp -d)"
+Enter
+Sleep 200ms
+Type "export XDG_CACHE_HOME=$(mktemp -d)"
+Enter
+Sleep 200ms
+Type "export INDEX_PATH=$(mktemp -u /tmp/kindx-demo.XXXXXX.sqlite)"
+Enter
+Sleep 200ms
+Type "kindx collection add specs/eval-docs --name kindx-demo"
+Enter
+Sleep 1s
+Type "kindx update -c kindx-demo"
+Enter
+Sleep 1s
+Type "kindx embed"
+Enter
+Sleep 3s
 Type "clear"
 Enter
 Sleep 500ms
@@ -29,13 +47,10 @@ Enter
 Sleep 8s
 
 # Expected output:
-# Setting up demo collection "kindx-demo"...
-#   Added 12 sample documents from built-in corpus
-#   Embedding documents... ████████████████████████ 12/12 (100%)
-#   BM25 index built (12 docs, 3,847 terms)
-#   Vector index ready (12 docs, 384 dimensions)
-#
-# Demo collection "kindx-demo" is ready!
+# KINDX - Interactive Demo
+# Step 1: Collection Setup
+# Step 2: Embedding
+# Step 3: BM25 Search
 
 Sleep 3s
 
@@ -46,40 +61,24 @@ Enter
 Sleep 3s
 
 # Expected output:
-# Hybrid Search: "raising money for startup" (3 results)
-#
-#   #1  [0.91] kindx://kindx-demo/fundraising-guide.md
-#       "Series A fundraising requires a clear narrative around traction,
-#        market size, and capital efficiency..."
-#
-#   #2  [0.84] kindx://kindx-demo/startup-finance.md
-#       "Early-stage startups typically raise through SAFEs or convertible
-#        notes before pricing a priced round..."
-#
-#   #3  [0.78] kindx://kindx-demo/investor-relations.md
-#       "Building investor relationships 6-12 months before you need
-#        capital gives you leverage in negotiations..."
+# kindx://kindx-demo/startup-fundraising-memo.md
+# kindx://kindx-demo/product-launch-retrospective.md
 
 Sleep 4s
 
 # --- Scene 3: JSON output ---
-Type "kindx search 'fundraising' -c kindx-demo --json | head -12"
+Type "kindx search 'fundraising' -c kindx-demo --json | jq '.[0]'"
 Sleep 500ms
 Enter
 Sleep 2s
 
 # Expected output:
 # {
-#   "query": "fundraising",
-#   "mode": "bm25",
-#   "results": [
-#     {
-#       "uri": "kindx://kindx-demo/fundraising-guide.md",
-#       "score": 14.2,
-#       "snippet": "Series A fundraising requires a clear narrative...",
-#       "metadata": {
-#         "path": "fundraising-guide.md",
-#         "modified": "2026-03-01T00:00:00Z"
+#   "docid": "#...",
+#   "file": "kindx://kindx-demo/startup-fundraising-memo.md",
+#   "title": "Series A Fundraising Strategy Memo",
+#   "score": ...,
+#   "snippet": "..."
 
 Sleep 4s
 
