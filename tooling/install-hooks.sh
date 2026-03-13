@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Self-installing git hooks for kindx
-# Called from package.json "prepare" script after bun install
+# Called from package.json "prepare" script after dependency install
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOKS_DIR="$REPO_ROOT/.git/hooks"
@@ -12,8 +12,13 @@ if [[ ! -d "$HOOKS_DIR" ]]; then
   exit 0
 fi
 
+if [[ ! -w "$HOOKS_DIR" ]]; then
+  echo "Git hooks directory is not writable, skipping hook install"
+  exit 0
+fi
+
 # Install pre-push hook
-cp "$REPO_ROOT/scripts/pre-push" "$HOOKS_DIR/pre-push"
+cp "$REPO_ROOT/tooling/pre-push" "$HOOKS_DIR/pre-push"
 chmod +x "$HOOKS_DIR/pre-push"
 
 echo "Installed git hooks: pre-push"

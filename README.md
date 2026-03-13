@@ -427,6 +427,54 @@ After any of the above, `kindx --version` should print the installed version.
 
 ## Usage Reference
 
+### Command Index
+
+Top-level commands:
+
+```bash
+kindx query <query>          # Hybrid search with expansion + reranking
+kindx search <query>         # BM25 full-text search
+kindx vsearch <query>        # Vector similarity search
+kindx get <file>             # Retrieve one document
+kindx multi-get <pattern>    # Retrieve many documents by glob/list/docid
+kindx embed                  # Generate or refresh embeddings
+kindx pull                   # Download/check the default local models
+kindx update                 # Re-index configured collections
+kindx watch                  # Keep the index fresh in the background
+kindx status                 # Report index, collection, and MCP health
+kindx cleanup                # Clear cache/orphaned rows and vacuum the DB
+kindx mcp                    # Start the MCP server (stdio by default)
+kindx migrate <target> <path> # Import from Chroma or OpenCLAW
+kindx skill install          # Install the packaged Claude skill locally
+kindx --skill                # Print the packaged skill markdown
+kindx --version              # Print the installed CLI version
+```
+
+Collection subcommands:
+
+```bash
+kindx collection add <path> [--name NAME]
+kindx collection list
+kindx collection show <name>
+kindx collection remove <name>
+kindx collection rename <old> <new>
+kindx collection update-cmd <name> [command]
+kindx collection include <name>
+kindx collection exclude <name>
+```
+
+Context and MCP subcommands:
+
+```bash
+kindx context add [path] "text"
+kindx context list
+kindx context rm <path>
+
+kindx mcp --http
+kindx mcp --http --daemon
+kindx mcp stop
+```
+
 ### collection Management
 
 ```bash
@@ -444,6 +492,16 @@ kindx collection remove myproject
 
 # Rename a collection
 kindx collection rename myproject my-project
+
+# Show collection details and current settings
+kindx collection show my-project
+
+# Configure a pre-refresh command
+kindx collection update-cmd my-project "git pull --ff-only"
+
+# Include or exclude a collection from default queries
+kindx collection include my-project
+kindx collection exclude archive
 
 # List documents within a domain
 kindx ls notes
@@ -548,6 +606,16 @@ kindx update
 # Re-index with upstream git pull (for remote corpus repos)
 kindx update --pull
 
+# Download/check the default local models
+kindx pull
+
+# Force re-download the default models
+kindx pull --refresh
+
+# Watch one or more collections for changes
+kindx watch
+kindx watch notes docs
+
 # Neural Extraction by filepath (with fuzzy matching fallback)
 kindx get notes/meeting.md
 
@@ -571,6 +639,20 @@ kindx multi-get "docs/*.md" --json
 
 # Purge cache and orphaned index data
 kindx cleanup
+
+# Import an existing Chroma or OpenCLAW corpus
+kindx migrate chroma /path/to/chroma.sqlite3
+kindx migrate openclaw /path/to/openclaw/repo
+```
+
+### Claude Skill Packaging
+
+```bash
+# Print the packaged skill markdown
+kindx --skill
+
+# Install the packaged skill into ~/.claude/commands/
+kindx skill install
 ```
 
 ---

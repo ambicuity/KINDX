@@ -7,12 +7,12 @@ set -euo pipefail
 # bumps package.json, commits, and creates a tag. The actual publish
 # happens via GitHub Actions when the tag is pushed.
 #
-# Usage: ./scripts/release.sh [patch|minor|major|<version>]
+# Usage: ./tooling/release.sh [patch|minor|major|<version>]
 # Examples:
-#   ./scripts/release.sh patch     # 0.9.0 -> 0.9.1
-#   ./scripts/release.sh minor     # 0.9.0 -> 0.10.0
-#   ./scripts/release.sh major     # 0.9.0 -> 1.0.0
-#   ./scripts/release.sh 1.0.0     # explicit version
+#   ./tooling/release.sh patch     # 0.9.0 -> 0.9.1
+#   ./tooling/release.sh minor     # 0.9.0 -> 0.10.0
+#   ./tooling/release.sh major     # 0.9.0 -> 1.0.0
+#   ./tooling/release.sh 1.0.0     # explicit version
 
 BUMP="${1:?Usage: release.sh [patch|minor|major|<version>]}"
 
@@ -73,7 +73,7 @@ fi
 # --- Preview release notes ---
 
 echo "--- Release notes (will appear on GitHub) ---"
-./scripts/extract-changelog.sh "$NEW"
+./tooling/extract-changelog.sh "$NEW"
 echo "--- End ---"
 echo ""
 

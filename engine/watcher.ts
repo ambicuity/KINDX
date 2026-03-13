@@ -1,5 +1,6 @@
 import chokidar from "chokidar";
-import { resolve } from "path";
+import { resolve, relative as pathRelative } from "path";
+import { realpathSync } from "fs";
 import { type Store } from "./repository.js";
 
 interface WatchEvent {
@@ -75,12 +76,16 @@ export class WatchDaemon {
     }
 
     console.log(`Starting watcher daemon for ${targetCollections.length} collections...`);
+    const readyPromises: Promise<void>[] = [];
     
     for (const coll of targetCollections) {
       // Build absolute watch path based on collection pwd and pattern
       // chokidar handles globs like /path/to/collection/**/*.md
       // We watch the whole directory and filter by pattern later to avoid chokidar glob complexity issues on some platforms
       const watchTarget = coll.path;
+      const usePolling = process.env.CHOKIDAR_USEPOLLING === "1"
+        || process.env.CHOKIDAR_USEPOLLING === "true";
+      const pollInterval = Number(process.env.CHOKIDAR_INTERVAL || 100);
       
       console.log(`- Watching [${c.bold}${coll.name}${c.reset}]: ${watchTarget} (pattern: ${coll.pattern})`);
       
@@ -88,6 +93,9 @@ export class WatchDaemon {
         persistent: true,
         ignoreInitial: true, // Don't trigger 'add' for existing files on startup
         ignored: [/(^|[\/\\])\../, "**/node_modules/**", "dist/**"], // ignore dotfiles and common dirs
+        usePolling,
+        interval: pollInterval,
+        binaryInterval: pollInterval,
         awaitWriteFinish: {
           stabilityThreshold: 300,
           pollInterval: 100
@@ -100,22 +108,22 @@ export class WatchDaemon {
       const isMatch = (picomatch as any)(coll.pattern);
 
       const processEvent = (type: WatchEvent["type"], absolutePath: string) => {
-        // Normalise path separators
-        const normalizedAbs = absolutePath.replace(/\\/g, "/");
-        const normalizedPwd = coll.path.replace(/\\/g, "/");
-        
-        // Extract relative path
-        const pwdWithSlash = normalizedPwd.endsWith("/") ? normalizedPwd : normalizedPwd + "/";
-        if (!normalizedAbs.startsWith(pwdWithSlash)) {
+        let canonicalPath = absolutePath;
+        try {
+          canonicalPath = realpathSync(absolutePath);
+        } catch {
+          // The file may already be gone for unlink events; fall back to chokidar's path.
+        }
+
+        const relativePath = pathRelative(coll.path, canonicalPath).replace(/\\/g, "/");
+        if (relativePath === "" || relativePath === "." || relativePath.startsWith("../")) {
           return;
         }
-        
-        const relativePath = normalizedAbs.slice(pwdWithSlash.length);
-        
+
         // Check pattern
         if (!isMatch(relativePath)) return;
 
-        this.enqueue(type, coll.name, relativePath, normalizedAbs);
+        this.enqueue(type, coll.name, relativePath, canonicalPath.replace(/\\/g, "/"));
       };
 
       watcher
@@ -124,8 +132,21 @@ export class WatchDaemon {
         .on("unlink", (path) => processEvent("unlink", path))
         .on("error", (error) => console.error(`Watcher error for [${coll.name}]:`, error));
 
+      readyPromises.push(new Promise<void>((resolve) => {
+        let settled = false;
+        watcher.once("ready", () => {
+          settled = true;
+          resolve();
+        });
+        watcher.once("error", () => {
+          if (!settled) resolve();
+        });
+      }));
+
       this.watchers.push(watcher);
     }
+
+    await Promise.all(readyPromises);
     
     console.log("Daemon active. Waiting for file system changes...");
   }

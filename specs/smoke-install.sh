@@ -90,17 +90,26 @@ run_smoke_tests() {
   smoke_test_output "kindx shows help" "Usage:" \
     "export PATH=$NODE_BIN:\$PATH; kindx"
 
+  smoke_test_output "kindx shows version" "kindx " \
+    "export PATH=$NODE_BIN:\$PATH; kindx --version"
+
   smoke_test "kindx collection list" \
     "export PATH=$NODE_BIN:\$PATH; kindx collection list"
 
   smoke_test "kindx status" \
     "export PATH=$NODE_BIN:\$PATH; kindx status"
 
+  smoke_test "kindx skill install" \
+    "export PATH=$NODE_BIN:\$PATH;
+     TMP_HOME=\$(mktemp -d);
+     MOCK_HOMEDIR=\$TMP_HOME kindx skill install;
+     test -f \"\$TMP_HOME/.claude/commands/kindx.md\""
+
   smoke_test "sqlite-vec loads" \
     "export PATH=$NODE_BIN:\$PATH;
      NPM_GLOBAL=\$(npm root -g);
      node -e \"
-      const {openDatabase, loadSqliteVec} = await import('\$NPM_GLOBAL/@ambicuity/kindx/dis./runtime.js');
+      const {openDatabase, loadSqliteVec} = await import('\$NPM_GLOBAL/@ambicuity/kindx/dist/runtime.js');
       const db = openDatabase(':memory:');
       loadSqliteVec(db);
       const r = db.prepare('SELECT vec_version() as v').get();
@@ -129,7 +138,7 @@ run_smoke_tests() {
 
   smoke_test "sqlite-vec loads (bun)" \
     "export PATH=$BUN_BIN:\$PATH; bun -e \"
-      const {openDatabase, loadSqliteVec} = await import('\$HOME/.bun/install/global/node_modules/@ambicuity/kindx/dis./runtime.js');
+      const {openDatabase, loadSqliteVec} = await import('\$HOME/.bun/install/global/node_modules/@ambicuity/kindx/dist/runtime.js');
       const db = openDatabase(':memory:');
       loadSqliteVec(db);
       const r = db.prepare('SELECT vec_version() as v').get();

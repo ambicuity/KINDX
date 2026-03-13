@@ -312,7 +312,11 @@ async function showStatus(): Promise<void> {
       process.kill(mcpPid, 0);
       console.log(`MCP:   ${c.green}running${c.reset} (PID ${mcpPid})`);
     } catch {
-      unlinkSync(mcpPidPath);
+      try {
+        unlinkSync(mcpPidPath);
+      } catch {
+        // Ignore stale PID cleanup failures in read-only or sandboxed environments.
+      }
       // Stale PID file cleaned up silently
     }
   }
@@ -325,7 +329,11 @@ async function showStatus(): Promise<void> {
       process.kill(watchPid, 0);
       console.log(`Watch: ${c.green}running${c.reset} (PID ${watchPid})`);
     } catch {
-      unlinkSync(watchPidPath);
+      try {
+        unlinkSync(watchPidPath);
+      } catch {
+        // Ignore stale PID cleanup failures in read-only or sandboxed environments.
+      }
     }
   }
   console.log("");
@@ -2389,7 +2397,7 @@ function parseCLI() {
 
 function showSkill(): void {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const relativePath = pathJoin("skills", "kindx", "SKILL.md");
+  const relativePath = pathJoin("capabilities", "kindx", "SKILL.md");
   const skillPath = pathJoin(scriptDir, "..", relativePath);
 
   console.log(`KINDX Skill (${relativePath})`);
@@ -2444,16 +2452,20 @@ function showHelp(): void {
   console.log("  kindx get <file>[:line] [-l N]  - Show a single document, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
+  console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
-  console.log("  kindx collection add/list/remove/rename/show   - Manage indexed folders");
-  console.log("  kindx context add/list/rm                      - Attach human-written summaries");
-  console.log("  kindx ls [collection[/path]]                   - Inspect indexed files");
+  console.log("  kindx collection add/list/remove/rename/show/update-cmd/include/exclude");
+  console.log("                                         - Manage indexed folders and default-query behavior");
+  console.log("  kindx context add/list/rm              - Attach human-written summaries");
+  console.log("  kindx ls [collection[/path]]           - Inspect indexed files");
   console.log("");
   console.log("Maintenance:");
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
+  console.log("  kindx mcp --http [--daemon]     - Run the shared MCP HTTP server");
+  console.log("  kindx mcp stop                  - Stop the MCP HTTP daemon");
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
@@ -2463,7 +2475,7 @@ function showHelp(): void {
   console.log("Query syntax (kindx query):");
   console.log("  KINDX queries are either a single expand query (no prefix) or a multi-line");
   console.log("  document where every line is typed with lex:, vec:, or hyde:. This grammar");
-  console.log("  matches the docs in docs/SYNTAX.md and is enforced in the CLI.");
+  console.log("  is enforced directly in the CLI and documented in the repository reference.");
   console.log("");
   const grammar = [
     `query          = expand_query | query_document ;`,
@@ -2499,6 +2511,7 @@ function showHelp(): void {
   console.log("  - Advanced: `kindx mcp --http ...` and `kindx mcp --http --daemon` are optional for custom transports.");
   console.log("");
   console.log("Global options:");
+  console.log("  --help | --version | --skill   - Show help, version, or the packaged skill file");
   console.log("  --index <name>             - Use a named index (default: index)");
   console.log("");
   console.log("Search options:");

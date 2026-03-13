@@ -26,15 +26,7 @@ let testCounter = 0; // Unique counter for each test run
 // Get the directory where this test file lives
 const thisDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(thisDir, "..");
-const qmdScript = join(projectRoot, "engine", "kindx.ts");
-// Resolve tsx binary from project's node_modules (not cwd-dependent)
-const tsxBin = (() => {
-  const candidate = join(projectRoot, "node_modules", ".bin", "tsx");
-  if (existsSync(candidate)) {
-    return candidate;
-  }
-  return join(process.cwd(), "node_modules", ".bin", "tsx");
-})();
+const kindxBin = join(projectRoot, "bin", "kindx");
 
 // Helper to run kindx command with test database
 async function runQmd(
@@ -44,12 +36,14 @@ async function runQmd(
   const workingDir = options.cwd || fixturesDir;
   const dbPath = options.dbPath || testDbPath;
   const configDir = options.configDir || testConfigDir;
-  const proc = spawn(tsxBin, [qmdScript, ...args], {
+  const cacheHome = testDir ? join(testDir, "cache") : undefined;
+  const proc = spawn(process.execPath, [kindxBin, ...args], {
     cwd: workingDir,
     env: {
       ...process.env,
       INDEX_PATH: dbPath,
       KINDX_CONFIG_DIR: configDir, // Use test config directory
+      ...(cacheHome ? { XDG_CACHE_HOME: cacheHome } : {}),
       PWD: workingDir, // Must explicitly set PWD since getPwd() checks this
       ...options.env,
     },
@@ -96,6 +90,13 @@ async function createIsolatedTestEnv(prefix: string): Promise<{ dbPath: string; 
 
 // Setup test fixtures
 beforeAll(async () => {
+  if (!existsSync(kindxBin)) {
+    throw new Error(`CLI entrypoint not found: ${kindxBin}`);
+  }
+  if (!existsSync(join(projectRoot, "dist", "kindx.js"))) {
+    throw new Error("dist/kindx.js not found. Run `npm run build` before running CLI integration tests.");
+  }
+
   // Create temp directory structure
   testDir = await mkdtemp(join(tmpdir(), "kindx-test-"));
   testDbPath = join(testDir, "test.sqlite");
@@ -1229,12 +1230,13 @@ describe("mcp http daemon", () => {
 
   /** Spawn a foreground HTTP server (non-blocking) and return the process */
   function spawnHttpServer(port: number): import("child_process").ChildProcess {
-    const proc = spawn(tsxBin, [qmdScript, "mcp", "--http", "--port", String(port)], {
+    const proc = spawn(process.execPath, [kindxBin, "mcp", "--http", "--port", String(port)], {
       cwd: fixturesDir,
       env: {
         ...process.env,
         INDEX_PATH: daemonDbPath,
         KINDX_CONFIG_DIR: daemonConfigDir,
+        PWD: fixturesDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1497,11 +1499,17 @@ describe("CLI Watch Command", () => {
   });
 
   test("watches for newly added and modified files", async () => {
-    const proc = spawn(tsxBin, [qmdScript, "watch", "--collection", "watch_test"], {
+    const watchCacheHome = join(dirname(localConfigDir), "cache");
+    const proc = spawn(process.execPath, [kindxBin, "watch", "watch_test"], {
+      cwd: watchDir,
       env: {
         ...process.env,
+        CHOKIDAR_USEPOLLING: "1",
+        CHOKIDAR_INTERVAL: "100",
         INDEX_PATH: localDbPath,
         KINDX_CONFIG_DIR: localConfigDir,
+        XDG_CACHE_HOME: watchCacheHome,
+        PWD: watchDir,
       },
       stdio: "pipe",
     });

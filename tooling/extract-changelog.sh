@@ -13,8 +13,8 @@ set -euo pipefail
 #
 # Fails if neither [Unreleased] nor [X.Y.Z] has content in the changelog.
 #
-# Usage: scripts/extract-changelog.sh <version>
-# Example: scripts/extract-changelog.sh 1.0.5
+# Usage: tooling/extract-changelog.sh <version>
+# Example: tooling/extract-changelog.sh 1.0.5
 #   -> extracts [Unreleased] + [1.0.5], [1.0.4], ..., [1.0.0]
 
 VERSION="${1:?Usage: extract-changelog.sh <version>}"

@@ -7,13 +7,16 @@
     "kindx": "bin/kindx"
   },
   "files": [
+    "bin/",
     "dist/",
+    "capabilities/kindx/",
     "LICENSE",
     "CHANGELOG.md"
   ],
   "scripts": {
     "prepare": "[ -d .git ] && ./tooling/install-hooks.sh || true",
     "build": "tsc -p tsconfig.build.json && printf '#!/usr/bin/env node\n' | cat - dist/kindx.js > dist/kindx.tmp && mv dist/kindx.tmp dist/kindx.js && chmod +x dist/kindx.js",
+    "pretest": "npm run build",
     "test": "vitest run --reporter=verbose specs/",
     "kindx": "tsx engine/kindx.ts",
     "index": "tsx engine/kindx.ts index",
@@ -26,7 +29,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/"
   },
   "repository": {
     "type": "git",
