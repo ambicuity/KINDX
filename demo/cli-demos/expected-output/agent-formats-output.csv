@@ -1,0 +1,6 @@
+docid,score,file,title,snippet
+#a1b2c3,4.87,kindx://docs/api-design.md,API Design Principles,"All public APIs must follow REST conventions with consistent resource naming, proper HTTP verb usage, and structured error responses."
+#d4e5f6,3.64,kindx://docs/api-versioning.md,API Versioning Strategy,"Use URL-based versioning (v1, v2) for breaking changes. Minor additions are backward-compatible and do not require a new version."
+#g7h8i9,2.91,kindx://docs/api-auth.md,API Authentication Guide,"All API endpoints require Bearer token authentication. Tokens are issued via the /auth/token endpoint with a 1-hour TTL."
+#j0k1l2,2.33,kindx://docs/api-pagination.md,API Pagination Patterns,"Use cursor-based pagination for list endpoints. Offset pagination is acceptable only for admin/internal APIs with small result sets."
+#m3n4o5,1.78,kindx://docs/api-errors.md,API Error Handling,"All errors return a JSON body with 'code', 'message', and optional 'details' array. HTTP status codes follow RFC 7231."

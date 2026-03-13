@@ -1,0 +1,62 @@
+=== Step 1: Start MCP server ===
+Starting KINDX MCP server on port 3100...
+
+✓ MCP server started (PID 48201)
+  Transport: HTTP
+  Endpoint:  http://localhost:3100/mcp
+  Tools:     search, vsearch, query, get, ls, status
+
+Server is running in the background.
+
+=== Step 2: Check MCP server status ===
+
+MCP Server Status
+─────────────────────────────────
+Status:       running
+PID:          48201
+Transport:    HTTP
+Port:         3100
+Endpoint:     http://localhost:3100/mcp
+Uptime:       2s
+Collections:  2 available (docs, notes)
+Tools:        search, vsearch, query, get, ls, status
+
+=== Step 3: Call MCP search tool via curl ===
+Sending a search request to the MCP server...
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Found 3 results for 'API design patterns':\n\nkindx://docs/api-design.md:1 #a1b2c3\nTitle: API Design Principles\nScore: 4.87\n\n--- api-design.md:1 ---\n# API Design Principles\n\nAll public APIs must follow REST conventions with consistent resource naming,\nproper HTTP verb usage, and structured error responses.\n---\n\nkindx://docs/api-versioning.md:12 #d4e5f6\nTitle: API Versioning Strategy\nScore: 3.64\n\n--- api-versioning.md:12 ---\n## Versioning Strategy\n\nUse URL-based versioning (v1, v2) for breaking changes. Minor additions\nare backward-compatible and do not require a new version.\n---\n\nkindx://docs/api-auth.md:5 #g7h8i9\nTitle: API Authentication Guide\nScore: 2.91\n\n--- api-auth.md:5 ---\n## Authentication Design\n\nAll API endpoints require Bearer token authentication. Tokens are issued\nvia the /auth/token endpoint with a 1-hour TTL.\n---"
+      }
+    ]
+  }
+}
+
+=== Step 4: Call MCP get tool via curl ===
+Retrieving a document through the MCP server...
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "# API Design Principles\n\nAll public APIs must follow REST conventions with consistent resource naming,\nproper HTTP verb usage, and structured error responses.\n\n## Resource Naming\n\n- Use plural nouns for collections: /users, /orders\n- Use kebab-case for multi-word resources: /order-items\n- Nest sub-resources under their parent: /users/{id}/orders\n\n## HTTP Verbs\n\n- GET: Read resources (must be idempotent)\n- POST: Create new resources\n- PUT: Full replacement of a resource\n- PATCH: Partial update of a resource\n- DELETE: Remove a resource\n\n## Error Responses\n\nAll errors return a consistent JSON structure with 'code', 'message',\nand optional 'details' array. See api-errors.md for the full spec."
+      }
+    ]
+  }
+}
+
+=== Step 5: Stop MCP server ===
+Shutting down the MCP server...
+
+✓ MCP server stopped (PID 48201)
+
+=== MCP demo complete ===
+The MCP server exposes KINDX tools to any MCP-compatible client.
