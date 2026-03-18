@@ -2456,12 +2456,15 @@ function showHelp(): void {
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
-  console.log("  kindx collection add/list/remove/rename/show/update-cmd/include/exclude");
+  console.log("  kindx collection add <path> [--name <name>] [--mask <glob>]");
+  console.log("                                         - Add collection. --mask sets glob pattern (default: **/*.md)");
+  console.log("  kindx collection list/remove/rename/show/update-cmd/include/exclude");
   console.log("                                         - Manage indexed folders and default-query behavior");
   console.log("  kindx context add/list/rm              - Attach human-written summaries");
   console.log("  kindx ls [collection[/path]]           - Inspect indexed files");
   console.log("");
   console.log("Maintenance:");
+  console.log("");
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
   console.log("  kindx mcp --http [--daemon]     - Run the shared MCP HTTP server");
