@@ -435,7 +435,7 @@ Top-level commands:
 kindx query <query>          # Hybrid search with expansion + reranking
 kindx search <query>         # BM25 full-text search
 kindx vsearch <query>        # Vector similarity search
-kindx get <file>             # Retrieve one document
+kindx get <file> [--from N]  # Retrieve one document (optionally from line offset)
 kindx multi-get <pattern>    # Retrieve many documents by glob/list/docid
 kindx embed                  # Generate or refresh embeddings
 kindx pull                   # Download/check the default local models
@@ -453,7 +453,7 @@ kindx --version              # Print the installed CLI version
 Collection subcommands:
 
 ```bash
-kindx collection add <path> [--name NAME]
+kindx collection add <path> [--name NAME] [--mask GLOB]
 kindx collection list
 kindx collection show <name>
 kindx collection remove <name>

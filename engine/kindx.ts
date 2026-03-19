@@ -2449,7 +2449,7 @@ function showHelp(): void {
   console.log("  kindx query 'lex:..\\nvec:...'   - Structured query document (you provide lex/vec/hyde lines)");
   console.log("  kindx search <query>            - Full-text BM25 keywords (no LLM)");
   console.log("  kindx vsearch <query>           - Vector similarity only");
- console.log("  kindx get <file>[:line] [-l N] [--from <line>]  - Show a single document from specific line, optional line slice");
+  console.log("  kindx get <file>[:line] [--from <line>] [-l N] [--line-numbers]  - Show a single document from specific line, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
@@ -2457,7 +2457,7 @@ function showHelp(): void {
   console.log("");
   console.log("Collections & context:");
   console.log("  kindx collection add <path> [--name <name>] [--mask <glob>]");
-  console.log("                                         - Add collection. --mask sets glob pattern (default: **/*.md)");
+  console.log(`                                         - Add collection. --mask sets glob pattern (default: ${DEFAULT_GLOB})`);
   console.log("  kindx collection list/remove/rename/show/update-cmd/include/exclude");
   console.log("                                         - Manage indexed folders and default-query behavior");
   console.log("  kindx context add/list/rm              - Attach human-written summaries");
