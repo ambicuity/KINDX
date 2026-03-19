@@ -234,6 +234,9 @@ describe("CLI Help", () => {
     expect(stdout).toContain("Usage:");
     expect(stdout).toContain("kindx collection add");
     expect(stdout).toContain("kindx search");
+    expect(stdout).toContain("--mask");
+    expect(stdout).toContain("--from");
+    expect(stdout).toContain("--line-numbers");
   });
 
   test("shows help with no arguments", async () => {
