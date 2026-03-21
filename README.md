@@ -507,6 +507,33 @@ kindx collection exclude archive
 kindx ls notes
 kindx ls notes/subfolder
 ```
+### YAML Configuration
+
+Collection settings are stored in `index.yml` inside `~/.config/kindx/`. You can edit this file directly to configure `ignore` patterns and glob rules for files that should be skipped during indexing and search.
+
+#### Example
+
+```yaml
+collections:
+  - name: docs
+    path: ~/work/docs
+    pattern: "**/*.md"
+    ignore:
+      - "archive/**"
+      - "sessions/**"
+      - "**/*.draft.md"
+      - "**/node_modules/**"
+```
+#### How it works
+- `pattern` defines which files are included
+- `ignore` excludes matching files and directories
+- A file must match `pattern` **and not match any `ignore` rule** to be indexed
+- Ignored files are skipped during indexing and will not appear in search results
+
+#### Notes
+- `ignore` is configured in YAML (no CLI support currently)
+- Patterns are evaluated relative to the collection `path`.
+- After editing `index.yml`, run `kindx update` to re-index with the updated rules.
 
 ### Vector Index Generation
 
