@@ -508,6 +508,37 @@ kindx ls notes
 kindx ls notes/subfolder
 ```
 
+### YAML Configuration
+
+By default, collection settings are stored in `~/.config/kindx/index.yml`. The config directory is resolved as `KINDX_CONFIG_DIR` (if set), then `XDG_CONFIG_HOME/kindx` (if set), then `~/.config/kindx`. Named indexes use `~/.config/kindx/{indexName}.yml` (default: `index.yml`). You can edit this file directly to configure `ignore` patterns and glob rules for files that should be skipped during indexing and search.
+
+#### Example
+
+```yaml
+collections:
+  docs:
+    path: ~/work/docs
+    pattern: "**/*.md"
+    ignore:
+      - "archive/**"
+      - "sessions/**"
+      - "**/*.draft.md"
+```
+
+#### How it works
+
+- `pattern` defines which files are included
+- `ignore` excludes matching files and directories
+- A file must match `pattern` **and not match any `ignore` rule** to be indexed
+- Ignored files are skipped during indexing and will not appear in search results
+
+#### Notes
+
+- `ignore` is configured in YAML (no CLI support currently)
+- Patterns are evaluated relative to the collection `path`.
+- By default, `node_modules`, `.git`, `.cache`, `vendor`, `dist`, and `build` are already ignored; `ignore` adds custom exclusions.
+- After editing `index.yml`, run `kindx update` to re-index with the updated rules.
+
 ### Vector Index Generation
 
 ```bash
