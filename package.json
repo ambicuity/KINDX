@@ -55,7 +55,7 @@
     "sqlite-vec-darwin-x64": "0.1.7-alpha.2",
     "sqlite-vec-linux-arm64": "0.1.7",
     "sqlite-vec-linux-x64": "0.1.7",
-    "sqlite-vec-windows-x64": "0.1.7-alpha.2"
+    "sqlite-vec-windows-x64": "0.1.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
