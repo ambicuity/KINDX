@@ -2108,6 +2108,7 @@ function runDemo(): void {
   console.log(`  ${c.dim}Chunking 6 documents → 42 chunks${c.reset}`);
   console.log(`  ${c.dim}████████████████████████████████████████ 42/42 chunks  2.1s${c.reset}`);
   console.log(`  ${c.green}✓${c.reset} Embedded 42 chunks from 6 documents\n`);
+  console.log(`  ${c.dim}Note: embed processes pending content across collections; it is not scoped by -c.${c.reset}\n`);
 
   // Step 3: BM25 search (real if eval-docs available)
   console.log(`${c.bold}Step 3: BM25 Search (Lexical)${c.reset}`);
