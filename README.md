@@ -749,6 +749,14 @@ erDiagram
 |----------|---------|-------------|
 | `KINDX_EMBED_MODEL` | `embeddinggemma-300M` | Override embedding model (HuggingFace URI) |
 | `KINDX_EXPAND_CONTEXT_SIZE` | `2048` | Context window for query expansion LLM |
+| `KINDX_RERANK_CONTEXT_SIZE` | `4096` | Context window for reranking contexts |
+| `KINDX_LOW_VRAM` | (auto) | Force low-VRAM policy on/off (`1`/`0`) |
+| `KINDX_VRAM_BUDGET_MB` | (unset) | Optional GPU budget in MB; constrains context + parallelism |
+| `KINDX_LOW_VRAM_THRESHOLD_MB` | `6144` | Auto low-VRAM threshold based on free GPU memory |
+| `KINDX_LOW_VRAM_EMBED_PARALLELISM` | `2` | Max embedding context parallelism in low-VRAM mode |
+| `KINDX_LOW_VRAM_RERANK_PARALLELISM` | `1` | Max rerank context parallelism in low-VRAM mode |
+| `KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE` | `1024` | Expansion context size cap in low-VRAM mode |
+| `KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE` | `1024` | Rerank context size cap in low-VRAM mode |
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
 | `XDG_CACHE_HOME` | `~/.cache` | Cache base directory |
 | `NO_COLOR` | (unset) | Disable ANSI terminal colors |
