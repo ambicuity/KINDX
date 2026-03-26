@@ -2502,6 +2502,11 @@ function parseCLI() {
       "line-numbers": { type: "boolean" },  // add line numbers to output
       // Query options
       "candidate-limit": { type: "string", short: "C" },
+      // Feedback options
+      query: { type: "string" },
+      chunk: { type: "string" },
+      relevant: { type: "boolean" },
+      irrelevant: { type: "boolean" },
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
@@ -2608,6 +2613,7 @@ function showHelp(): void {
   console.log("  kindx vsearch <query>           - Vector similarity only");
   console.log("  kindx get <file>[:line] [--from <line>] [-l N] [--line-numbers]  - Show a single document from specific line, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
+  console.log("  kindx feedback --irrelevant ... - Store corrective relevance feedback for retrieval");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
@@ -2631,6 +2637,11 @@ function showHelp(): void {
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
+  console.log("");
+  console.log("Corrective feedback:");
+  console.log("  kindx feedback --irrelevant --query \"deploy k8s\" --chunk \"#abc123:2\"");
+  console.log("  kindx feedback --relevant --query \"deploy k8s\" --chunk \"#def456:0\"");
+  console.log("  kindx feedback list --query \"deploy\"");
   console.log("");
   console.log("Query syntax (kindx query):");
   console.log("  KINDX queries are either a single expand query (no prefix) or a multi-line");
@@ -2684,6 +2695,9 @@ function showHelp(): void {
   console.log("  --explain                  - Include retrieval score traces (query --json/CLI)");
   console.log("  --files | --json | --csv | --md | --xml  - Output format");
   console.log("  -c, --collection <name>    - Filter by one or more collections");
+  console.log("  --query <text>             - Feedback query text (for kindx feedback)");
+  console.log("  --chunk <id>               - Feedback chunk id (#docid[:seq], hash[:seq], or hash_seq)");
+  console.log("  --relevant/--irrelevant    - Feedback signal for kindx feedback");
   console.log("");
   console.log("Multi-get options:");
   console.log("  -l <num>                   - Maximum lines per file");
@@ -2707,6 +2721,34 @@ async function showVersion(): Promise<void> {
 
   const versionStr = commit ? `${pkg.version} (${commit})` : pkg.version;
   console.log(`kindx ${versionStr}`);
+}
+
+function resolveFeedbackChunkToHashSeq(db: Database, chunkRaw: string): string {
+  const chunk = chunkRaw.trim().replace(/^#/, "");
+  if (!chunk) {
+    throw new Error("chunk is required");
+  }
+
+  const hashSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]*)_(\d+)$/i);
+  if (hashSeqMatch) {
+    return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
+  }
+
+  const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
+  if (docidWithSeqMatch) {
+    const doc = findDocumentByDocid(db, docidWithSeqMatch[1]);
+    if (!doc) {
+      throw new Error(`Unknown docid: #${docidWithSeqMatch[1]}`);
+    }
+    return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
+  }
+
+  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{8,})(?::(\d+))?$/i);
+  if (hashWithSeqMatch) {
+    return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
+  }
+
+  throw new Error("Invalid chunk format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
 }
 
 // Main CLI - only run if this is the main module
@@ -2808,6 +2850,63 @@ if (isMain) {
           console.error(`Unknown subcommand: ${subcommand}`);
           console.error("Available: add, list, rm");
           process.exit(1);
+      }
+      break;
+    }
+
+    case "feedback": {
+      const subcommand = cli.args[0];
+      const db = getDb();
+      const store = getStore();
+
+      if (subcommand === "list") {
+        const queryFilter = ((cli.values.query as string | undefined) ?? cli.args.slice(1).join(" ")).trim();
+        const rows = store.listFeedback(queryFilter || undefined);
+
+        if (cli.opts.format === "json") {
+          console.log(JSON.stringify({ count: rows.length, feedback: rows }, null, 2));
+        } else if (rows.length === 0) {
+          console.log("No feedback records found.");
+        } else {
+          console.log(`${c.bold}Feedback records${c.reset} (${rows.length})`);
+          for (const row of rows) {
+            const signal = row.signal < 0 ? "irrelevant" : "relevant";
+            const when = new Date(row.created * 1000).toISOString();
+            console.log(`- [${signal}] query="${row.query}" chunk="${row.hashSeq}" at ${when}`);
+          }
+        }
+        break;
+      }
+
+      const relevant = !!cli.values.relevant;
+      const irrelevant = !!cli.values.irrelevant;
+      if (relevant === irrelevant) {
+        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
+        process.exit(1);
+      }
+
+      const queryText = ((cli.values.query as string | undefined) ?? "").trim();
+      const chunkArg = ((cli.values.chunk as string | undefined) ?? "").trim();
+      if (!queryText || !chunkArg) {
+        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
+        process.exit(1);
+      }
+
+      let hashSeq: string;
+      try {
+        hashSeq = resolveFeedbackChunkToHashSeq(db, chunkArg);
+      } catch (err) {
+        console.error(String(err instanceof Error ? err.message : err));
+        process.exit(1);
+      }
+
+      const signal: -1 | 1 = relevant ? 1 : -1;
+      store.insertFeedback(queryText, hashSeq, signal);
+      const signalText = signal > 0 ? "relevant" : "irrelevant";
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify({ stored: true, query: queryText, chunk: hashSeq, signal: signalText }, null, 2));
+      } else {
+        console.log(`${c.green}✓${c.reset} Stored ${signalText} feedback for ${hashSeq}`);
       }
       break;
     }

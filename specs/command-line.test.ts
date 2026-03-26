@@ -570,6 +570,39 @@ describe("CLI Error Handling", () => {
   });
 });
 
+describe("CLI Feedback Command", () => {
+  test("stores and lists feedback as JSON", async () => {
+    const put = await runQmd([
+      "feedback",
+      "--irrelevant",
+      "--query", "deploy k8s",
+      "--chunk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+      "--json",
+    ]);
+    expect(put.exitCode).toBe(0);
+    const putJson = JSON.parse(put.stdout);
+    expect(putJson.stored).toBe(true);
+    expect(putJson.signal).toBe("irrelevant");
+
+    const list = await runQmd(["feedback", "list", "--query", "deploy", "--json"]);
+    expect(list.exitCode).toBe(0);
+    const listJson = JSON.parse(list.stdout);
+    expect(Array.isArray(listJson.feedback)).toBe(true);
+    expect(listJson.feedback.length).toBeGreaterThan(0);
+    expect(listJson.feedback[0].query).toContain("deploy");
+  });
+
+  test("rejects invalid usage when signal flag is missing", async () => {
+    const res = await runQmd([
+      "feedback",
+      "--query", "deploy k8s",
+      "--chunk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+    ]);
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("Usage: kindx feedback");
+  });
+});
+
 describe("CLI Output Formats", () => {
   beforeEach(async () => {
     await runQmd(["collection", "add", "."]);

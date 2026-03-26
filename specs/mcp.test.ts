@@ -1020,6 +1020,7 @@ describe("MCP HTTP Transport", () => {
     expect(toolNames).toContain("query");
     expect(toolNames).toContain("get");
     expect(toolNames).toContain("status");
+    expect(toolNames).toContain("kindx_feedback");
   });
 
   test("POST /mcp tools/call query returns results", async () => {
@@ -1054,6 +1055,31 @@ describe("MCP HTTP Transport", () => {
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
+  });
+
+  test("POST /mcp tools/call kindx_feedback stores feedback", async () => {
+    await mcpRequest({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+
+    const { status, json } = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "kindx_feedback",
+        arguments: {
+          query: "readme",
+          chunkId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+          signal: "irrelevant",
+        },
+      },
+    });
+    expect(status).toBe(200);
+    expect(json.result.isError).not.toBe(true);
+    expect(json.result.structuredContent.stored).toBe(true);
+    expect(json.result.structuredContent.signal).toBe("irrelevant");
   });
 
   test("server uses dbPath instead of default index.sqlite", async () => {

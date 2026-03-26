@@ -695,6 +695,18 @@ function initializeDatabase(db: Database): void {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      hash_seq TEXT NOT NULL,
+      signal INTEGER NOT NULL,
+      created INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(query, hash_seq)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_feedback_query ON feedback(query)`);
+
   // FTS - index filepath (collection/path), title, and content
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -838,6 +850,10 @@ export type Store = {
   clearAllEmbeddings: () => void;
   insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => void;
 
+  // Corrective feedback
+  insertFeedback: (query: string, hashSeq: string, signal: -1 | 1) => void;
+  listFeedback: (query?: string) => FeedbackRecord[];
+
   // Watcher integrations
   indexSingleFile: (collectionName: string, relativePath: string, absolutePath: string) => Promise<"embedded" | "unchanged" | "failed">;
   unlinkSingleFile: (collectionName: string, relativePath: string) => Promise<boolean>;
@@ -928,6 +944,8 @@ export function createStore(dbPath?: string): Store {
     getHashesForEmbedding: () => getHashesForEmbedding(db),
     clearAllEmbeddings: () => clearAllEmbeddings(db),
     insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
+    insertFeedback: (query: string, hashSeq: string, signal: -1 | 1) => insertFeedback(db, query, hashSeq, signal),
+    listFeedback: (query?: string) => listFeedback(db, query),
   };
 }
 
@@ -1048,6 +1066,7 @@ export type RankedResult = {
   title: string;
   body: string;
   score: number;
+  hash?: string;
 };
 
 export type RRFContributionTrace = {
@@ -1083,6 +1102,15 @@ export type HybridQueryExplain = {
   };
   rerankScore: number;
   blendedScore: number;
+  feedbackPenalty?: number;
+};
+
+export type FeedbackRecord = {
+  id: number;
+  query: string;
+  hashSeq: string;
+  signal: -1 | 1;
+  created: number;
 };
 
 /**
@@ -2470,6 +2498,100 @@ export async function rerank(query: string, documents: { file: string; text: str
     .sort((a, b) => b.score - a.score);
 }
 
+function normalizeFeedbackQuery(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+function normalizeHashSeq(hashSeq: string): string {
+  return hashSeq.trim().replace(/^#/, "");
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function insertFeedback(
+  db: Database,
+  query: string,
+  hashSeq: string,
+  signal: -1 | 1,
+): void {
+  const normalizedQuery = normalizeFeedbackQuery(query);
+  const normalizedHashSeq = normalizeHashSeq(hashSeq);
+  if (!normalizedQuery) throw new Error("query is required");
+  if (!normalizedHashSeq) throw new Error("hash_seq is required");
+  if (signal !== -1 && signal !== 1) throw new Error("signal must be -1 or 1");
+
+  db.prepare(`
+    INSERT INTO feedback (query, hash_seq, signal, created)
+    VALUES (?, ?, ?, unixepoch())
+    ON CONFLICT(query, hash_seq)
+    DO UPDATE SET signal = excluded.signal, created = unixepoch()
+  `).run(normalizedQuery, normalizedHashSeq, signal);
+}
+
+export function listFeedback(db: Database, query?: string): FeedbackRecord[] {
+  const normalized = query ? normalizeFeedbackQuery(query) : "";
+  const rows = normalized
+    ? db.prepare(`
+        SELECT id, query, hash_seq, signal, created
+        FROM feedback
+        WHERE query LIKE ?
+        ORDER BY created DESC, id DESC
+      `).all(`%${normalized}%`)
+    : db.prepare(`
+        SELECT id, query, hash_seq, signal, created
+        FROM feedback
+        ORDER BY created DESC, id DESC
+      `).all();
+
+  return (rows as any[]).map((row) => ({
+    id: Number(row.id),
+    query: String(row.query),
+    hashSeq: String(row.hash_seq),
+    signal: Number(row.signal) < 0 ? -1 : 1,
+    created: Number(row.created),
+  }));
+}
+
+export function getFeedbackPenalties(db: Database, query: string, hashes: string[]): Map<string, number> {
+  const normalizedQuery = normalizeFeedbackQuery(query);
+  if (!normalizedQuery || hashes.length === 0) return new Map();
+  const uniqueHashes = Array.from(new Set(hashes.filter(Boolean)));
+  if (uniqueHashes.length === 0) return new Map();
+
+  const rows = db.prepare(`
+    SELECT hash_seq, signal
+    FROM feedback
+    WHERE query = ?
+  `).all(normalizedQuery) as { hash_seq: string; signal: number }[];
+
+  if (rows.length === 0) return new Map();
+
+  const penalties = new Map<string, number>();
+  for (const hash of uniqueHashes) penalties.set(hash, 0);
+  for (const row of rows) {
+    const hashSeq = String(row.hash_seq || "");
+    const splitAt = hashSeq.lastIndexOf("_");
+    if (splitAt <= 0) continue;
+    const hash = hashSeq.slice(0, splitAt);
+    if (!penalties.has(hash)) continue;
+
+    const current = penalties.get(hash) ?? 0;
+    // Phase 1 behavior: only demote negatively marked chunks.
+    penalties.set(hash, current + (row.signal < 0 ? -0.15 : 0));
+  }
+  for (const [hash, penalty] of penalties) {
+    penalties.set(hash, clamp(penalty, -0.30, 0));
+  }
+  return penalties;
+}
+
+export function getFeedbackPenalty(db: Database, query: string, hash?: string): number {
+  if (!hash) return 0;
+  return getFeedbackPenalties(db, query, [hash]).get(hash) ?? 0;
+}
+
 // =============================================================================
 // Reciprocal Rank Fusion
 // =============================================================================
@@ -3140,7 +3262,7 @@ export async function hybridQuery(
     for (const r of initialFts) docidMap.set(r.filepath, r.docid);
     rankedLists.push(initialFts.map(r => ({
       file: r.filepath, displayPath: r.displayPath,
-      title: r.title, body: r.body || "", score: r.score,
+      title: r.title, body: r.body || "", score: r.score, hash: r.hash,
     })));
     rankedListMeta.push({ source: "fts", queryType: "original", query });
   }
@@ -3159,7 +3281,7 @@ export async function hybridQuery(
         for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
         rankedLists.push(ftsResults.map(r => ({
           file: r.filepath, displayPath: r.displayPath,
-          title: r.title, body: r.body || "", score: r.score,
+          title: r.title, body: r.body || "", score: r.score, hash: r.hash,
         })));
         rankedListMeta.push({ source: "fts", queryType: "lex", query: q.text });
       }
@@ -3206,7 +3328,7 @@ export async function hybridQuery(
         for (const r of vecResults) docidMap.set(r.filepath, r.docid);
         rankedLists.push(vecResults.map(r => ({
           file: r.filepath, displayPath: r.displayPath,
-          title: r.title, body: r.body || "", score: r.score,
+          title: r.title, body: r.body || "", score: r.score, hash: r.hash,
         })));
         rankedListMeta.push({
           source: "vec",
@@ -3257,9 +3379,14 @@ export async function hybridQuery(
   // Step 7: Blend RRF position score with reranker score
   // Position-aware weights: top retrieval results get more protection from reranker disagreement
   const candidateMap = new Map(candidates.map(c => [c.file, {
-    displayPath: c.displayPath, title: c.title, body: c.body,
+    displayPath: c.displayPath, title: c.title, body: c.body, hash: c.hash,
   }]));
   const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
+  const feedbackPenaltyByHash = getFeedbackPenalties(
+    store.db,
+    query,
+    candidates.map(c => c.hash).filter((h): h is string => !!h),
+  );
 
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
@@ -3271,9 +3398,9 @@ export async function hybridQuery(
     // Replace severe 1/rank penalty with a softer exponential decay.
     // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
     const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
-    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
-
     const candidate = candidateMap.get(r.file);
+    const feedbackPenalty = candidate?.hash ? (feedbackPenaltyByHash.get(candidate.hash) ?? 0) : 0;
+    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score + feedbackPenalty;
     const chunkInfo = docChunkMap.get(r.file);
     const bestIdx = chunkInfo?.bestIdx ?? 0;
     const bestChunk = chunkInfo?.chunks[bestIdx]?.text || candidate?.body || "";
@@ -3293,6 +3420,7 @@ export async function hybridQuery(
       },
       rerankScore: r.score,
       blendedScore,
+      feedbackPenalty,
     } : undefined;
 
     return {
@@ -3493,7 +3621,7 @@ export async function structuredSearch(
           for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
           rankedLists.push(ftsResults.map(r => ({
             file: r.filepath, displayPath: r.displayPath,
-            title: r.title, body: r.body || "", score: r.score,
+            title: r.title, body: r.body || "", score: r.score, hash: r.hash,
           })));
           rankedListMeta.push({
             source: "fts",
@@ -3540,7 +3668,7 @@ export async function structuredSearch(
             for (const r of vecResults) docidMap.set(r.filepath, r.docid);
             rankedLists.push(vecResults.map(r => ({
               file: r.filepath, displayPath: r.displayPath,
-              title: r.title, body: r.body || "", score: r.score,
+              title: r.title, body: r.body || "", score: r.score, hash: r.hash,
             })));
             rankedListMeta.push({
               source: "vec",
@@ -3599,9 +3727,14 @@ export async function structuredSearch(
 
   // Step 6: Blend RRF position score with reranker score
   const candidateMap = new Map(candidates.map(c => [c.file, {
-    displayPath: c.displayPath, title: c.title, body: c.body,
+    displayPath: c.displayPath, title: c.title, body: c.body, hash: c.hash,
   }]));
   const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
+  const feedbackPenaltyByHash = getFeedbackPenalties(
+    store.db,
+    primaryQuery,
+    candidates.map(c => c.hash).filter((h): h is string => !!h),
+  );
 
   const blended = reranked.map(r => {
     const rrfRank = rrfRankMap.get(r.file) || candidateLimit;
@@ -3613,9 +3746,9 @@ export async function structuredSearch(
     // Replace severe 1/rank penalty with a softer exponential decay.
     // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
     const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
-    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score;
-
     const candidate = candidateMap.get(r.file);
+    const feedbackPenalty = candidate?.hash ? (feedbackPenaltyByHash.get(candidate.hash) ?? 0) : 0;
+    const blendedScore = rrfWeight * rrfScore + (1 - rrfWeight) * r.score + feedbackPenalty;
     const chunkInfo = docChunkMap.get(r.file);
     const bestIdx = chunkInfo?.bestIdx ?? 0;
     const bestChunk = chunkInfo?.chunks[bestIdx]?.text || candidate?.body || "";
@@ -3635,6 +3768,7 @@ export async function structuredSearch(
       },
       rerankScore: r.score,
       blendedScore,
+      feedbackPenalty,
     } : undefined;
 
     return {
