@@ -88,15 +88,15 @@ function resolveChunkToHashSeq(store: Store, rawChunkId: string): string {
   const hashSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]*)_(\d+)$/i);
   if (hashSeqMatch) return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
 
-  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{7,})(?::(\d+))?$/i);
-  if (hashWithSeqMatch) return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
-
   const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
   if (docidWithSeqMatch) {
     const doc = store.findDocumentByDocid(docidWithSeqMatch[1]);
     if (!doc) throw new Error(`unknown docid: #${docidWithSeqMatch[1]}`);
     return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
   }
+
+  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{8,})(?::(\d+))?$/i);
+  if (hashWithSeqMatch) return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
 
   throw new Error("invalid chunkId format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
 }
@@ -390,10 +390,9 @@ Intent-aware lex (C++ performance, not sports):
         query: z.string().describe("Original user query text"),
         chunkId: z.string().describe("Chunk id (#docid[:seq], full-hash[:seq], or hash_seq)"),
         signal: z.enum(["relevant", "irrelevant"]).describe("Feedback signal"),
-        session: z.string().optional().describe("Optional session identifier"),
       },
     },
-    async ({ query, chunkId, signal, session }: any) => {
+    async ({ query, chunkId, signal }: any) => {
       const normalizedQuery = String(query || "").trim();
       const normalizedChunk = String(chunkId || "").trim();
       if (!normalizedQuery || !normalizedChunk) {
@@ -406,7 +405,7 @@ Intent-aware lex (C++ performance, not sports):
       try {
         const hashSeq = resolveChunkToHashSeq(store, normalizedChunk);
         const numericSignal: -1 | 1 = signal === "relevant" ? 1 : -1;
-        store.insertFeedback(normalizedQuery, hashSeq, numericSignal, session ?? null);
+        store.insertFeedback(normalizedQuery, hashSeq, numericSignal);
         return {
           content: [{ type: "text", text: `stored ${signal} feedback for ${hashSeq}` }],
           structuredContent: {
@@ -414,7 +413,6 @@ Intent-aware lex (C++ performance, not sports):
             query: normalizedQuery,
             chunkId: hashSeq,
             signal,
-            ...(session ? { session } : {}),
           },
         };
       } catch (err) {

@@ -134,7 +134,7 @@ try {
   console.log(`  ${c.green}✓${c.reset} Triggers updated`);
 
   // Step 9: Corrective feedback table for Phase 1
-  console.log(`\n${c.yellow}8. Creating corrective feedback table...${c.reset}`);
+  console.log(`\n${c.yellow}9. Creating corrective feedback table...${c.reset}`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS feedback (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,7 +142,6 @@ try {
       hash_seq TEXT NOT NULL,
       signal INTEGER NOT NULL,
       created INTEGER NOT NULL DEFAULT (unixepoch()),
-      session TEXT,
       UNIQUE(query, hash_seq)
     )
   `);

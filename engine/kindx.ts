@@ -2505,7 +2505,6 @@ function parseCLI() {
       // Feedback options
       query: { type: "string" },
       chunk: { type: "string" },
-      session: { type: "string" },
       relevant: { type: "boolean" },
       irrelevant: { type: "boolean" },
       // MCP HTTP transport options
@@ -2735,11 +2734,6 @@ function resolveFeedbackChunkToHashSeq(db: Database, chunkRaw: string): string {
     return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
   }
 
-  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{7,})(?::(\d+))?$/i);
-  if (hashWithSeqMatch) {
-    return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
-  }
-
   const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
   if (docidWithSeqMatch) {
     const doc = findDocumentByDocid(db, docidWithSeqMatch[1]);
@@ -2747,6 +2741,11 @@ function resolveFeedbackChunkToHashSeq(db: Database, chunkRaw: string): string {
       throw new Error(`Unknown docid: #${docidWithSeqMatch[1]}`);
     }
     return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
+  }
+
+  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{8,})(?::(\d+))?$/i);
+  if (hashWithSeqMatch) {
+    return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
   }
 
   throw new Error("Invalid chunk format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
@@ -2873,8 +2872,7 @@ if (isMain) {
           for (const row of rows) {
             const signal = row.signal < 0 ? "irrelevant" : "relevant";
             const when = new Date(row.created * 1000).toISOString();
-            const session = row.session ? ` session=${row.session}` : "";
-            console.log(`- [${signal}] query="${row.query}" chunk="${row.hashSeq}" at ${when}${session}`);
+            console.log(`- [${signal}] query="${row.query}" chunk="${row.hashSeq}" at ${when}`);
           }
         }
         break;
@@ -2883,15 +2881,14 @@ if (isMain) {
       const relevant = !!cli.values.relevant;
       const irrelevant = !!cli.values.irrelevant;
       if (relevant === irrelevant) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id> [--session <id>]");
+        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
         process.exit(1);
       }
 
       const queryText = ((cli.values.query as string | undefined) ?? "").trim();
       const chunkArg = ((cli.values.chunk as string | undefined) ?? "").trim();
-      const session = ((cli.values.session as string | undefined) ?? "").trim() || null;
       if (!queryText || !chunkArg) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id> [--session <id>]");
+        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
         process.exit(1);
       }
 
@@ -2904,10 +2901,10 @@ if (isMain) {
       }
 
       const signal: -1 | 1 = relevant ? 1 : -1;
-      store.insertFeedback(queryText, hashSeq, signal, session);
+      store.insertFeedback(queryText, hashSeq, signal);
       const signalText = signal > 0 ? "relevant" : "irrelevant";
       if (cli.opts.format === "json") {
-        console.log(JSON.stringify({ stored: true, query: queryText, chunk: hashSeq, signal: signalText, session }, null, 2));
+        console.log(JSON.stringify({ stored: true, query: queryText, chunk: hashSeq, signal: signalText }, null, 2));
       } else {
         console.log(`${c.green}✓${c.reset} Stored ${signalText} feedback for ${hashSeq}`);
       }

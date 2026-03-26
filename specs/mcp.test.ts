@@ -1071,7 +1071,7 @@ describe("MCP HTTP Transport", () => {
         name: "kindx_feedback",
         arguments: {
           query: "readme",
-          chunkId: "#hash1:0",
+          chunkId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
           signal: "irrelevant",
         },
       },
