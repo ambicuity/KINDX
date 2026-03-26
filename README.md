@@ -450,6 +450,9 @@ kindx --skill                # Print the packaged skill markdown
 kindx --version              # Print the installed CLI version
 ```
 
+KINDX opens SQLite indexes with `journal_mode=WAL` and `busy_timeout=5000`, so background writers
+(for example `kindx watch`) and MCP readers can run concurrently with fewer lock conflicts.
+
 Collection subcommands:
 
 ```bash
