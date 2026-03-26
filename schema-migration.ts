@@ -133,6 +133,22 @@ try {
   `);
   console.log(`  ${c.green}✓${c.reset} Triggers updated`);
 
+  // Step 9: Corrective feedback table for Phase 1
+  console.log(`\n${c.yellow}8. Creating corrective feedback table...${c.reset}`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      hash_seq TEXT NOT NULL,
+      signal INTEGER NOT NULL,
+      created INTEGER NOT NULL DEFAULT (unixepoch()),
+      session TEXT,
+      UNIQUE(query, hash_seq)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_feedback_query ON feedback(query)`);
+  console.log(`  ${c.green}✓${c.reset} Feedback table ready`);
+
   // Commit transaction
   db.exec("COMMIT");
 

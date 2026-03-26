@@ -81,6 +81,26 @@ function formatSearchSummary(results: SearchResultItem[], query: string): string
   return lines.join('\n');
 }
 
+function resolveChunkToHashSeq(store: Store, rawChunkId: string): string {
+  const chunk = rawChunkId.trim().replace(/^#/, "");
+  if (!chunk) throw new Error("chunkId is required");
+
+  const hashSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]*)_(\d+)$/i);
+  if (hashSeqMatch) return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
+
+  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{7,})(?::(\d+))?$/i);
+  if (hashWithSeqMatch) return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
+
+  const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
+  if (docidWithSeqMatch) {
+    const doc = store.findDocumentByDocid(docidWithSeqMatch[1]);
+    if (!doc) throw new Error(`unknown docid: #${docidWithSeqMatch[1]}`);
+    return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
+  }
+
+  throw new Error("invalid chunkId format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
+}
+
 // =============================================================================
 // MCP Server
 // =============================================================================
@@ -353,6 +373,56 @@ Intent-aware lex (C++ performance, not sports):
         content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
         structuredContent: { results: filtered },
       };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: kindx_feedback (Corrective feedback loop)
+  // ---------------------------------------------------------------------------
+
+  server.registerTool(
+    "kindx_feedback",
+    {
+      title: "Corrective Feedback",
+      description: "Store retrieval feedback for a query+chunk pair. Use this when a retrieved chunk was relevant or irrelevant.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        query: z.string().describe("Original user query text"),
+        chunkId: z.string().describe("Chunk id (#docid[:seq], full-hash[:seq], or hash_seq)"),
+        signal: z.enum(["relevant", "irrelevant"]).describe("Feedback signal"),
+        session: z.string().optional().describe("Optional session identifier"),
+      },
+    },
+    async ({ query, chunkId, signal, session }: any) => {
+      const normalizedQuery = String(query || "").trim();
+      const normalizedChunk = String(chunkId || "").trim();
+      if (!normalizedQuery || !normalizedChunk) {
+        return {
+          content: [{ type: "text", text: "query and chunkId are required" }],
+          isError: true,
+        };
+      }
+
+      try {
+        const hashSeq = resolveChunkToHashSeq(store, normalizedChunk);
+        const numericSignal: -1 | 1 = signal === "relevant" ? 1 : -1;
+        store.insertFeedback(normalizedQuery, hashSeq, numericSignal, session ?? null);
+        return {
+          content: [{ type: "text", text: `stored ${signal} feedback for ${hashSeq}` }],
+          structuredContent: {
+            stored: true,
+            query: normalizedQuery,
+            chunkId: hashSeq,
+            signal,
+            ...(session ? { session } : {}),
+          },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: err instanceof Error ? err.message : "feedback storage failed" }],
+          isError: true,
+        };
+      }
     }
   );
 

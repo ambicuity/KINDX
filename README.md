@@ -98,6 +98,11 @@ kindx multi-get "journals/2025-05*.md"
 # Scoped Contextual Retrieval within a collection
 kindx search "API" -c notes
 
+# Corrective feedback (Phase 1)
+kindx feedback --irrelevant --query "deploy k8s" --chunk "#abc123:2"
+kindx feedback --relevant --query "deploy k8s" --chunk "#abc123:2"
+kindx feedback list --query "deploy"
+
 # Export full match set for agent pipeline
 kindx search "API" --all --files --min-score 0.3
 
@@ -138,6 +143,7 @@ KINDX exposes a Model Context Protocol (MCP) server for tool-call integration wi
 - `kindx_get` — Neural Extraction by path or docid (with fuzzy matching fallback)
 - `kindx_multi_get` — Bulk Neural Extraction by glob pattern, list, or docids
 - `kindx_status` — Index health and collection inventory
+- `kindx_feedback` — Store relevance feedback (`relevant` / `irrelevant`) for query+chunk pairs
 
 **Claude Desktop configuration** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
