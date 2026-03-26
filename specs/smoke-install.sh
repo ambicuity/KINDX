@@ -147,7 +147,7 @@ run_smoke_tests() {
     \""
 
   smoke_test "bun test store" \
-    "export PATH=$BUN_BIN:\$PATH; cd /opt/kindx && bun test --preload ./engine/preloader.ts --timeout 30000 specs/store.test.ts 2>&1 | tail -10"
+    "set -o pipefail; export PATH=$BUN_BIN:\$PATH; cd /opt/kindx && bun test --preload ./engine/preloader.ts --timeout 30000 specs/store.test.ts 2>&1 | tail -10"
 
   # ------------------------------------------------------------------
   echo ""
