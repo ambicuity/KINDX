@@ -408,6 +408,42 @@ export type LlamaCppConfig = {
    * memory reclaim.
    */
   disposeModelsOnInactivity?: boolean;
+  /**
+   * Force low-VRAM mode on/off.
+   * When undefined, KINDX auto-detects low VRAM from free GPU memory.
+   * Can also be set via KINDX_LOW_VRAM=1|0.
+   */
+  lowVram?: boolean;
+  /**
+   * Optional VRAM budget in MB. When set, KINDX constrains context sizing and
+   * parallelism to fit this budget. Can also be set via KINDX_VRAM_BUDGET_MB.
+   */
+  vramBudgetMB?: number;
+  /**
+   * Free VRAM threshold in MB for auto low-VRAM mode (default: 6144 MB).
+   * Can also be set via KINDX_LOW_VRAM_THRESHOLD_MB.
+   */
+  lowVramThresholdMB?: number;
+  /**
+   * Parallelism cap for embedding contexts when low-VRAM mode is active (default: 2).
+   * Can also be set via KINDX_LOW_VRAM_EMBED_PARALLELISM.
+   */
+  lowVramEmbedParallelism?: number;
+  /**
+   * Parallelism cap for reranker contexts when low-VRAM mode is active (default: 1).
+   * Can also be set via KINDX_LOW_VRAM_RERANK_PARALLELISM.
+   */
+  lowVramRerankParallelism?: number;
+  /**
+   * Expansion context size used when low-VRAM mode is active (default: 1024).
+   * Can also be set via KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE.
+   */
+  lowVramExpandContextSize?: number;
+  /**
+   * Rerank context size used when low-VRAM mode is active (default: 1024).
+   * Can also be set via KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE.
+   */
+  lowVramRerankContextSize?: number;
 };
 
 /**
@@ -417,6 +453,53 @@ export type LlamaCppConfig = {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_EXPAND_CONTEXT_SIZE = 2048;
 const DEFAULT_RERANK_CONTEXT_SIZE = 4096;
+const DEFAULT_LOW_VRAM_THRESHOLD_MB = 6144;
+const DEFAULT_LOW_VRAM_EMBED_PARALLELISM = 2;
+const DEFAULT_LOW_VRAM_RERANK_PARALLELISM = 1;
+const DEFAULT_LOW_VRAM_EXPAND_CONTEXT_SIZE = 1024;
+const DEFAULT_LOW_VRAM_RERANK_CONTEXT_SIZE = 1024;
+
+type MemoryPolicy = {
+  lowVram: boolean;
+  freeMB: number | null;
+  budgetMB: number | null;
+  reason: string;
+};
+
+function parseOptionalBoolean(raw: string | undefined, envName: string): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
+  if (value === "0" || value === "false" || value === "no" || value === "off") return false;
+  process.stderr.write(`KINDX Warning: invalid ${envName}="${raw}", ignoring.\n`);
+  return undefined;
+}
+
+function parsePositiveIntOrWarn(
+  raw: string | undefined,
+  envName: string,
+  fallback: number
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  process.stderr.write(`KINDX Warning: invalid ${envName}="${raw}", using ${fallback}.\n`);
+  return fallback;
+}
+
+function resolvePositiveIntWithEnv(
+  configValue: number | undefined,
+  envName: string,
+  fallback: number
+): number {
+  if (configValue !== undefined) {
+    if (!Number.isInteger(configValue) || configValue <= 0) {
+      throw new Error(`Invalid ${envName}: ${configValue}. Must be a positive integer.`);
+    }
+    return configValue;
+  }
+  return parsePositiveIntOrWarn(process.env[envName], envName, fallback);
+}
 
 function resolveExpandContextSize(configValue?: number): number {
   if (configValue !== undefined) {
@@ -474,6 +557,15 @@ export class LlamaCpp implements LLM {
   private modelCacheDir: string;
   private rerankContextSize: number;
   private expandContextSize: number;
+  private lowVramOverride: boolean | undefined;
+  private vramBudgetMB: number | null;
+  private lowVramThresholdMB: number;
+  private lowVramEmbedParallelism: number;
+  private lowVramRerankParallelism: number;
+  private lowVramExpandContextSize: number;
+  private lowVramRerankContextSize: number;
+  private memoryPolicyPromise: Promise<MemoryPolicy> | null = null;
+  private lowVramWarningShown = false;
 
   // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
@@ -496,6 +588,33 @@ export class LlamaCpp implements LLM {
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
     this.rerankContextSize = resolveRerankContextSize(config.rerankContextSize);
+    this.lowVramOverride = config.lowVram ?? parseOptionalBoolean(process.env.KINDX_LOW_VRAM, "KINDX_LOW_VRAM");
+    this.vramBudgetMB = resolvePositiveIntWithEnv(config.vramBudgetMB, "KINDX_VRAM_BUDGET_MB", 0) || null;
+    this.lowVramThresholdMB = resolvePositiveIntWithEnv(
+      config.lowVramThresholdMB,
+      "KINDX_LOW_VRAM_THRESHOLD_MB",
+      DEFAULT_LOW_VRAM_THRESHOLD_MB
+    );
+    this.lowVramEmbedParallelism = resolvePositiveIntWithEnv(
+      config.lowVramEmbedParallelism,
+      "KINDX_LOW_VRAM_EMBED_PARALLELISM",
+      DEFAULT_LOW_VRAM_EMBED_PARALLELISM
+    );
+    this.lowVramRerankParallelism = resolvePositiveIntWithEnv(
+      config.lowVramRerankParallelism,
+      "KINDX_LOW_VRAM_RERANK_PARALLELISM",
+      DEFAULT_LOW_VRAM_RERANK_PARALLELISM
+    );
+    this.lowVramExpandContextSize = resolvePositiveIntWithEnv(
+      config.lowVramExpandContextSize,
+      "KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE",
+      DEFAULT_LOW_VRAM_EXPAND_CONTEXT_SIZE
+    );
+    this.lowVramRerankContextSize = resolvePositiveIntWithEnv(
+      config.lowVramRerankContextSize,
+      "KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE",
+      DEFAULT_LOW_VRAM_RERANK_CONTEXT_SIZE
+    );
     this.inactivityTimeoutMs = config.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.disposeModelsOnInactivity = config.disposeModelsOnInactivity ?? false;
   }
@@ -672,26 +791,112 @@ export class LlamaCpp implements LLM {
     }
   }
 
+  private showLowVramWarning(policy: MemoryPolicy): void {
+    if (!policy.lowVram || this.lowVramWarningShown) return;
+    const freeText = policy.freeMB === null ? "unknown free VRAM" : `${Math.round(policy.freeMB)} MB free VRAM`;
+    const budgetText = policy.budgetMB === null ? "auto budget" : `${Math.round(policy.budgetMB)} MB budget`;
+    process.stderr.write(`KINDX Warning: low VRAM mode enabled (${freeText}, ${budgetText}, ${policy.reason}).\n`);
+    this.lowVramWarningShown = true;
+  }
+
+  private async resolveMemoryPolicy(): Promise<MemoryPolicy> {
+    if (this.memoryPolicyPromise) return await this.memoryPolicyPromise;
+
+    this.memoryPolicyPromise = (async () => {
+      const llama = await this.ensureLlama();
+
+      if (!llama.gpu) {
+        return { lowVram: false, freeMB: null, budgetMB: this.vramBudgetMB, reason: "cpu_or_no_gpu" };
+      }
+
+      let freeMB: number | null = null;
+      try {
+        const vram = await llama.getVramState();
+        freeMB = vram.free / (1024 * 1024);
+      } catch {
+        freeMB = null;
+      }
+
+      if (this.lowVramOverride !== undefined) {
+        const policy = {
+          lowVram: this.lowVramOverride,
+          freeMB,
+          budgetMB: this.vramBudgetMB,
+          reason: "forced_by_KINDX_LOW_VRAM_or_config",
+        };
+        this.showLowVramWarning(policy);
+        return policy;
+      }
+
+      if (this.vramBudgetMB !== null) {
+        const policy = {
+          lowVram: true,
+          freeMB,
+          budgetMB: this.vramBudgetMB,
+          reason: "budget_set_by_KINDX_VRAM_BUDGET_MB_or_config",
+        };
+        this.showLowVramWarning(policy);
+        return policy;
+      }
+
+      if (freeMB !== null && freeMB < this.lowVramThresholdMB) {
+        const policy = {
+          lowVram: true,
+          freeMB,
+          budgetMB: null,
+          reason: `auto_detected_below_${this.lowVramThresholdMB}MB_threshold`,
+        };
+        this.showLowVramWarning(policy);
+        return policy;
+      }
+
+      return { lowVram: false, freeMB, budgetMB: null, reason: "auto_high_vram" };
+    })();
+
+    return await this.memoryPolicyPromise;
+  }
+
+  private async effectiveExpandContextSize(): Promise<number> {
+    const policy = await this.resolveMemoryPolicy();
+    if (!policy.lowVram) return this.expandContextSize;
+    return Math.min(this.expandContextSize, this.lowVramExpandContextSize);
+  }
+
+  private async effectiveRerankContextSize(): Promise<number> {
+    const policy = await this.resolveMemoryPolicy();
+    if (!policy.lowVram) return this.rerankContextSize;
+    return Math.min(this.rerankContextSize, this.lowVramRerankContextSize);
+  }
+
   /**
    * Compute how many parallel contexts to create.
    *
-   * GPU: constrained by VRAM (25% of free, capped at 8).
+   * GPU: constrained by free VRAM / budget and low-VRAM policy caps.
    * CPU: constrained by cores. Splitting threads across contexts enables
    *      true parallelism (each context runs on its own cores). Use at most
    *      half the math cores, with at least 4 threads per context.
    */
-  private async computeParallelism(perContextMB: number): Promise<number> {
+  private async computeParallelism(perContextMB: number, kind: "embed" | "rerank"): Promise<number> {
     const llama = await this.ensureLlama();
+    const policy = await this.resolveMemoryPolicy();
 
     if (llama.gpu) {
-      try {
-        const vram = await llama.getVramState();
-        const freeMB = vram.free / (1024 * 1024);
-        const maxByVram = Math.floor((freeMB * 0.25) / perContextMB);
-        return Math.max(1, Math.min(8, maxByVram));
-      } catch {
-        return 2;
+      if (policy.freeMB === null) {
+        const fallback = kind === "embed" ? 2 : 1;
+        const cap = policy.lowVram
+          ? (kind === "embed" ? this.lowVramEmbedParallelism : this.lowVramRerankParallelism)
+          : 8;
+        return Math.max(1, Math.min(cap, fallback));
       }
+
+      const availableMB = policy.budgetMB === null
+        ? policy.freeMB
+        : Math.min(policy.budgetMB, policy.freeMB);
+      const maxByVram = Math.floor((availableMB * 0.25) / perContextMB);
+      const base = Math.max(1, Math.min(8, maxByVram));
+      if (!policy.lowVram) return base;
+      const cap = kind === "embed" ? this.lowVramEmbedParallelism : this.lowVramRerankParallelism;
+      return Math.max(1, Math.min(base, cap));
     }
 
     // CPU: split cores across contexts. At least 4 threads per context.
@@ -730,7 +935,7 @@ export class LlamaCpp implements LLM {
     this.embedContextsCreatePromise = (async () => {
       const model = await this.ensureEmbedModel();
       // Embed contexts are ~143 MB each (nomic-embed 2048 ctx)
-      const n = await this.computeParallelism(150);
+      const n = await this.computeParallelism(150, "embed");
       const threads = await this.threadsPerContext(n);
       for (let i = 0; i < n; i++) {
         try {
@@ -835,12 +1040,13 @@ export class LlamaCpp implements LLM {
     if (this.rerankContexts.length === 0) {
       const model = await this.ensureRerankModel();
       // ~960 MB per context with flash attention at default contextSize 4096
-      const n = Math.min(await this.computeParallelism(1000), 4);
+      const n = Math.min(await this.computeParallelism(1000, "rerank"), 4);
+      const rerankContextSize = await this.effectiveRerankContextSize();
       const threads = await this.threadsPerContext(n);
       for (let i = 0; i < n; i++) {
         try {
           this.rerankContexts.push(await model.createRankingContext({
-            contextSize: this.rerankContextSize,
+            contextSize: rerankContextSize,
             flashAttention: true,
             ...(threads > 0 ? { threads } : {}),
           } as any));
@@ -849,7 +1055,7 @@ export class LlamaCpp implements LLM {
             // Flash attention might not be supported — retry without it
             try {
               this.rerankContexts.push(await model.createRankingContext({
-                contextSize: this.rerankContextSize,
+                contextSize: rerankContextSize,
                 ...(threads > 0 ? { threads } : {}),
               }));
             } catch {
@@ -1114,8 +1320,9 @@ export class LlamaCpp implements LLM {
     // on top of expandContextSize to prevent native llama.cpp from aborting on context
     // overflow when the combined system prompt + user query exceeds the window.
     const SYSTEM_PROMPT_TOKEN_OVERHEAD = 512;
+    const effectiveExpandContextSize = await this.effectiveExpandContextSize();
     const genContext = await this.generateModel!.createContext({
-      contextSize: this.expandContextSize + SYSTEM_PROMPT_TOKEN_OVERHEAD,
+      contextSize: effectiveExpandContextSize + SYSTEM_PROMPT_TOKEN_OVERHEAD,
     });
     const sequence = genContext.getSequence();
     const session = new LlamaChatSession({ contextSequence: sequence, systemPrompt });
@@ -1195,7 +1402,8 @@ export class LlamaCpp implements LLM {
     // Truncate documents that would exceed the rerank context size.
     // Budget = contextSize - template overhead - query tokens
     const queryTokens = model.tokenize(query).length;
-    const rawMaxDocTokens = this.rerankContextSize - LlamaCpp.RERANK_TEMPLATE_OVERHEAD - queryTokens;
+    const effectiveRerankContextSize = await this.effectiveRerankContextSize();
+    const rawMaxDocTokens = effectiveRerankContextSize - LlamaCpp.RERANK_TEMPLATE_OVERHEAD - queryTokens;
     // Guard against non-positive budget (e.g., very long queries or CJK content with
     // high token density). Allow at minimum 128 tokens per document to avoid crashes.
     const maxDocTokens = Math.max(128, rawMaxDocTokens);

@@ -117,6 +117,137 @@ describe("LlamaCpp expand context size config", () => {
   });
 });
 
+describe("LlamaCpp low VRAM policy", () => {
+  const ENV_KEYS = [
+    "KINDX_LOW_VRAM",
+    "KINDX_VRAM_BUDGET_MB",
+    "KINDX_LOW_VRAM_THRESHOLD_MB",
+    "KINDX_LOW_VRAM_EMBED_PARALLELISM",
+    "KINDX_LOW_VRAM_RERANK_PARALLELISM",
+    "KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE",
+    "KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE",
+  ] as const;
+
+  const snapshotEnv = () => {
+    const snapshot: Record<string, string | undefined> = {};
+    for (const key of ENV_KEYS) snapshot[key] = process.env[key];
+    return snapshot;
+  };
+
+  const restoreEnv = (snapshot: Record<string, string | undefined>) => {
+    for (const key of ENV_KEYS) {
+      const value = snapshot[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+
+  test("auto-detects low VRAM when free memory is below threshold", async () => {
+    const llm = new LlamaCpp({ lowVramThresholdMB: 6000 }) as any;
+    llm.ensureLlama = vi.fn().mockResolvedValue({
+      gpu: "vulkan",
+      cpuMathCores: 8,
+      getVramState: vi.fn().mockResolvedValue({ free: 3500 * 1024 * 1024 }),
+    });
+
+    const policy = await llm.resolveMemoryPolicy();
+    expect(policy.lowVram).toBe(true);
+    expect(Math.round(policy.freeMB)).toBe(3500);
+  });
+
+  test("respects forced low-VRAM mode via KINDX_LOW_VRAM", async () => {
+    const prevEnv = snapshotEnv();
+    process.env.KINDX_LOW_VRAM = "1";
+    try {
+      const llm = new LlamaCpp({}) as any;
+      llm.ensureLlama = vi.fn().mockResolvedValue({
+        gpu: "vulkan",
+        cpuMathCores: 8,
+        getVramState: vi.fn().mockResolvedValue({ free: 32000 * 1024 * 1024 }),
+      });
+      const policy = await llm.resolveMemoryPolicy();
+      expect(policy.lowVram).toBe(true);
+      expect(policy.reason).toContain("forced_by_KINDX_LOW_VRAM_or_config");
+    } finally {
+      restoreEnv(prevEnv);
+    }
+  });
+
+  test("caps embed/rerank parallelism under low-VRAM policy", async () => {
+    const llm = new LlamaCpp({
+      lowVram: true,
+      vramBudgetMB: 3500,
+      lowVramEmbedParallelism: 2,
+      lowVramRerankParallelism: 1,
+    }) as any;
+    llm.ensureLlama = vi.fn().mockResolvedValue({
+      gpu: "vulkan",
+      cpuMathCores: 8,
+      getVramState: vi.fn().mockResolvedValue({ free: 4096 * 1024 * 1024 }),
+    });
+
+    const embedParallelism = await llm.computeParallelism(150, "embed");
+    const rerankParallelism = await llm.computeParallelism(1000, "rerank");
+    expect(embedParallelism).toBe(2);
+    expect(rerankParallelism).toBe(1);
+  });
+
+  test("narrows context sizes in low-VRAM mode", async () => {
+    const llm = new LlamaCpp({
+      lowVram: true,
+      expandContextSize: 2048,
+      rerankContextSize: 4096,
+      lowVramExpandContextSize: 1024,
+      lowVramRerankContextSize: 1024,
+    }) as any;
+    llm.ensureLlama = vi.fn().mockResolvedValue({
+      gpu: "vulkan",
+      cpuMathCores: 8,
+      getVramState: vi.fn().mockResolvedValue({ free: 4096 * 1024 * 1024 }),
+    });
+
+    expect(await llm.effectiveExpandContextSize()).toBe(1024);
+    expect(await llm.effectiveRerankContextSize()).toBe(1024);
+  });
+
+  test("falls back gracefully when VRAM state cannot be read", async () => {
+    const llm = new LlamaCpp({
+      lowVram: true,
+      lowVramEmbedParallelism: 2,
+      lowVramRerankParallelism: 1,
+    }) as any;
+    llm.ensureLlama = vi.fn().mockResolvedValue({
+      gpu: "vulkan",
+      cpuMathCores: 8,
+      getVramState: vi.fn().mockRejectedValue(new Error("probe failed")),
+    });
+
+    expect(await llm.computeParallelism(150, "embed")).toBe(2);
+    expect(await llm.computeParallelism(1000, "rerank")).toBe(1);
+  });
+
+  test("warns and ignores invalid KINDX_LOW_VRAM value", async () => {
+    const prevEnv = snapshotEnv();
+    process.env.KINDX_LOW_VRAM = "maybe";
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const llm = new LlamaCpp({}) as any;
+      llm.ensureLlama = vi.fn().mockResolvedValue({
+        gpu: "vulkan",
+        cpuMathCores: 8,
+        getVramState: vi.fn().mockResolvedValue({ free: 32000 * 1024 * 1024 }),
+      });
+      const policy = await llm.resolveMemoryPolicy();
+      expect(policy.lowVram).toBe(false);
+      expect(stderrSpy).toHaveBeenCalled();
+      expect(String(stderrSpy.mock.calls[0]?.[0] || "")).toContain("KINDX_LOW_VRAM");
+    } finally {
+      stderrSpy.mockRestore();
+      restoreEnv(prevEnv);
+    }
+  });
+});
+
 describe("LlamaCpp rerank deduping", () => {
   test("deduplicates identical document texts before scoring", async () => {
     const llm = new LlamaCpp({}) as any;
