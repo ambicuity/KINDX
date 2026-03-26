@@ -462,6 +462,13 @@ describe("Store Creation", () => {
     await cleanupTestDb(store);
   });
 
+  test("createStore sets SQLite busy timeout", async () => {
+    const store = await createTestStore();
+    const result = store.db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+    expect(result.timeout).toBe(5000);
+    await cleanupTestDb(store);
+  });
+
   test("verifySqliteVecLoaded throws when sqlite-vec is not loaded", () => {
     const db = openDatabase(":memory:");
     try {

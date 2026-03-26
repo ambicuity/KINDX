@@ -35,6 +35,7 @@ afterAll(async () => {
 function initTestDatabase(db: Database): void {
   loadSqliteVec(db);
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
 
   // Content-addressable storage - the source of truth for document content
   db.exec(`
@@ -257,6 +258,13 @@ describe("MCP Server", () => {
   // ===========================================================================
   // Tool: qmd_search (BM25)
   // ===========================================================================
+
+  test("test DB setup enables SQLite concurrency pragmas", () => {
+    const journal = testDb.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
+    const timeout = testDb.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+    expect(journal.journal_mode).toBe("wal");
+    expect(timeout.timeout).toBe(5000);
+  });
 
   describe("searchFTS (BM25 keyword search)", () => {
     test("returns results for matching query", () => {
