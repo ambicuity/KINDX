@@ -1,0 +1,81 @@
+=== Step 1: Start MCP server ===
+Starting KINDX MCP server on port 8181...
+
+✓ MCP server started (PID 48201)
+  Transport: HTTP
+  Endpoint:  http://localhost:8181/mcp
+
+Server is running in the background.
+
+=== Step 2: Wait for HTTP health check ===
+Polling http://localhost:8181/health until the server is ready...
+
+{
+  "ok": true
+}
+
+=== Step 3: Initialize MCP session ===
+Creating MCP session...
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2025-06-18",
+    "serverInfo": {
+      "name": "kindx",
+      "version": "0.9.9"
+    }
+  }
+}
+
+mcp-session-id: 9f9c0c1b-3db5-4b6c-9f08-0dc8ab54f1c8
+
+=== Step 4: Call MCP query tool via curl ===
+Sending a query request to the MCP server...
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "structuredContent": {
+      "results": [
+        {
+          "docid": "#a1b2c3",
+          "file": "kindx://docs/api-design.md",
+          "title": "API Design Principles",
+          "score": 0.82,
+          "snippet": "All public APIs must follow REST conventions with consistent resource naming..."
+        }
+      ]
+    }
+  }
+}
+
+=== Step 5: Call MCP get tool via curl ===
+Retrieving the top result through the MCP server...
+
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      {
+        "type": "resource",
+        "resource": {
+          "uri": "kindx://docs/api-design.md",
+          "name": "docs/api-design.md",
+          "mimeType": "text/markdown"
+        }
+      }
+    ]
+  }
+}
+
+=== Step 6: Stop MCP server ===
+Shutting down the MCP server...
+
+✓ MCP server stopped (PID 48201)
+
+=== MCP demo complete ===
+The MCP server exposes KINDX tools to any MCP-compatible client.

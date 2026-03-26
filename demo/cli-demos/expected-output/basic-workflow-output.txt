@@ -1,0 +1,188 @@
+=== Step 1: Register a collection ===
+Registering ~/notes as 'my-notes'...
+
+✓ Collection 'my-notes' added → ~/notes (14 files detected)
+
+Collection 'my-notes' is now registered. KINDX will watch this directory
+for changes and keep its index up to date.
+
+=== Step 2: Scan and index ===
+Scanning and indexing 'my-notes'...
+
+Scanning my-notes... 14 files found
+Indexing ████████████████████████████████████████ 14/14
+✓ Indexed 14 documents in 0.34s (BM25 terms: 8,412)
+
+All documents in ~/notes are now indexed for keyword search.
+
+=== Step 3: Embed documents ===
+Generating vector embeddings for 'my-notes'...
+
+Embedding my-notes... 14 documents
+Embedding ████████████████████████████████████████ 14/14
+✓ Embedded 14 documents in 2.1s (model: all-MiniLM-L6-v2)
+
+Embeddings are stored locally. Vector search is now available.
+
+=== Step 4: BM25 keyword search ===
+Searching for 'meeting action items' using BM25...
+
+kindx://my-notes/standup.md:15 #a1b2c3
+Title: Weekly Standup Notes
+Score: 4.87
+
+--- standup.md:15 ---
+## Action Items
+- Complete database migration by Friday
+- Review PR #42 for auth service
+- Schedule follow-up with platform team
+---
+
+kindx://my-notes/retro-2026-03.md:8 #d4e5f6
+Title: March Retrospective
+Score: 3.92
+
+--- retro-2026-03.md:8 ---
+## Action Items from Retro
+- Improve CI pipeline caching (owner: Sarah)
+- Add integration tests for payment flow (owner: James)
+---
+
+kindx://my-notes/planning-q2.md:22 #g7h8i9
+Title: Q2 Planning Session
+Score: 3.15
+
+--- planning-q2.md:22 ---
+## Meeting Outcomes
+- Agreed on API-first approach for new services
+- Action: draft RFC for service mesh by April 1
+---
+
+3 results (0.02s)
+
+BM25 results are ranked by term frequency and document relevance.
+
+=== Step 5: Vector search ===
+Searching for 'decisions about deployment strategy' using vector search...
+
+kindx://my-notes/infra-decisions.md:3 #j0k1l2
+Title: Infrastructure Decision Log
+Score: 0.91
+
+--- infra-decisions.md:3 ---
+## ADR-007: Deployment Strategy
+Decision: Adopt blue-green deployments with automated canary analysis.
+Context: Current rolling updates cause 2-3 minute partial outages.
+---
+
+kindx://my-notes/planning-q2.md:45 #m3n4o5
+Title: Q2 Planning Session
+Score: 0.84
+
+--- planning-q2.md:45 ---
+## Deployment & Release Process
+- Move to weekly release trains starting April
+- Canary deployments mandatory for user-facing services
+---
+
+kindx://my-notes/standup.md:32 #p6q7r8
+Title: Weekly Standup Notes
+Score: 0.76
+
+--- standup.md:32 ---
+## Deployment Update
+- Staging environment migrated to new cluster
+- Production cutover scheduled for next Tuesday
+---
+
+3 results (0.08s)
+
+Vector search returns results ranked by cosine similarity to the query.
+
+=== Step 6: Hybrid query ===
+Running hybrid query: 'what did we decide about the database migration'...
+
+kindx://my-notes/infra-decisions.md:28 #s9t0u1
+Title: Infrastructure Decision Log
+Score: 7.24 (hybrid)
+
+--- infra-decisions.md:28 ---
+## ADR-012: Database Migration Strategy
+Decision: Use pgloader for zero-downtime migration from MySQL to PostgreSQL.
+Status: Accepted (2026-02-15)
+Consequences: Requires dual-write period of approximately 48 hours.
+---
+
+kindx://my-notes/standup.md:15 #a1b2c3
+Title: Weekly Standup Notes
+Score: 5.63 (hybrid)
+
+--- standup.md:15 ---
+## Action Items
+- Complete database migration by Friday
+- Run validation queries against both databases before cutover
+---
+
+kindx://my-notes/retro-2026-03.md:24 #v2w3x4
+Title: March Retrospective
+Score: 4.18 (hybrid)
+
+--- retro-2026-03.md:24 ---
+## Database Migration Postmortem
+- Migration completed with zero downtime as planned
+- Dual-write period ran 36 hours (under the 48h estimate)
+- One index missed during migration — caught by integration tests
+---
+
+3 results (0.09s)
+
+Hybrid queries blend keyword precision with semantic understanding.
+
+=== Step 7: Get a specific document ===
+Retrieving kindx://my-notes/standup.md...
+
+# Weekly Standup Notes
+
+Date: 2026-03-10
+Attendees: Alice, Bob, Carol, Dave
+
+## Status Updates
+
+**Alice** — Auth service refactor on track. PR ready for review.
+**Bob** — Finished load testing. P95 latency under 200ms.
+**Carol** — Database migration scripts validated in staging.
+**Dave** — CI pipeline caching improved; build time down 40%.
+
+## Action Items
+- Complete database migration by Friday
+- Review PR #42 for auth service
+- Schedule follow-up with platform team
+- Run validation queries against both databases before cutover
+
+## Blockers
+- Waiting on DNS changes from infrastructure team
+
+## Deployment Update
+- Staging environment migrated to new cluster
+- Production cutover scheduled for next Tuesday
+
+=== Step 8: System status ===
+Checking KINDX status...
+
+KINDX Status
+─────────────────────────────────────────────
+Collections:    1 registered
+Documents:      14 indexed
+Embeddings:     14 / 14 (100%)
+Index size:     1.2 MB
+Embedding size: 4.8 MB
+Storage total:  6.0 MB
+
+Collection         Path          Files  Indexed  Embedded  Last Updated
+─────────────────────────────────────────────────────────────────────────
+my-notes           ~/notes       14     14       14        2026-03-13 09:14:22
+
+✓ All collections up to date.
+
+=== Demo complete ===
+You now know the core KINDX workflow: register, index, embed, search.

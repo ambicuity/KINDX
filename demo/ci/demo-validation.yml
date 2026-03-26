@@ -1,0 +1,148 @@
+name: Demo Content Validation
+
+on:
+  pull_request:
+    paths:
+      - "demo/**"
+
+jobs:
+  validate-scripts:
+    name: Validate shell script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell scripts with bash -n
+        run: |
+          status=0
+          while IFS= read -r -d '' script; do
+            echo "Checking: $script"
+            if ! bash -n "$script"; then
+              echo "FAIL: $script has syntax errors"
+              status=1
+            fi
+          done < <(find demo -name '*.sh' -print0)
+          if [ "$status" -eq 0 ]; then
+            echo "All shell scripts passed syntax check."
+          fi
+          exit $status
+
+  validate-json:
+    name: Validate JSON files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check eval-results.json with jq
+        run: |
+          if [ -f demo/benchmarks/eval-results.json ]; then
+            echo "Validating demo/benchmarks/eval-results.json"
+            jq empty demo/benchmarks/eval-results.json
+            echo "JSON is valid."
+          else
+            echo "demo/benchmarks/eval-results.json not found — skipping."
+          fi
+
+  validate-markdown:
+    name: Validate markdown files exist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that all expected markdown files exist
+        run: |
+          status=0
+          expected_files=(
+            "demo/README-additions.md"
+            "demo/sample-data/codebase-sample/README.md"
+            "demo/sample-data/codebase-sample/docs/architecture.md"
+            "demo/sample-data/codebase-sample/docs/deployment.md"
+            "demo/sample-data/notes-sample/2025-01-meeting-standup.md"
+            "demo/sample-data/notes-sample/2025-02-project-kickoff.md"
+            "demo/sample-data/notes-sample/2025-03-retrospective.md"
+            "demo/sample-data/notes-sample/ideas/product-features.md"
+            "demo/sample-data/notes-sample/ideas/tech-debt.md"
+          )
+          for f in "${expected_files[@]}"; do
+            if [ -f "$f" ]; then
+              echo "OK: $f"
+            else
+              echo "MISSING: $f"
+              status=1
+            fi
+          done
+          exit $status
+
+  validate-structure:
+    name: Validate directory structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check expected directories and files exist
+        run: |
+          status=0
+          expected_dirs=(
+            "demo"
+            "demo/sample-data"
+            "demo/sample-data/codebase-sample"
+            "demo/sample-data/codebase-sample/src"
+            "demo/sample-data/codebase-sample/docs"
+            "demo/sample-data/notes-sample"
+            "demo/sample-data/notes-sample/ideas"
+            "demo/ci"
+          )
+          expected_files=(
+            "demo/sample-data/codebase-sample/src/auth.ts"
+            "demo/sample-data/codebase-sample/src/api.ts"
+            "demo/sample-data/codebase-sample/src/db.ts"
+            "demo/sample-data/codebase-sample/src/utils.ts"
+            "demo/ci/demo-validation.yml"
+          )
+          for d in "${expected_dirs[@]}"; do
+            if [ -d "$d" ]; then
+              echo "DIR OK: $d"
+            else
+              echo "DIR MISSING: $d"
+              status=1
+            fi
+          done
+          for f in "${expected_files[@]}"; do
+            if [ -f "$f" ]; then
+              echo "FILE OK: $f"
+            else
+              echo "FILE MISSING: $f"
+              status=1
+            fi
+          done
+          exit $status
+
+  validate-permissions:
+    name: Validate shell script permissions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell scripts are executable or have shebang
+        run: |
+          status=0
+          while IFS= read -r -d '' script; do
+            has_shebang=false
+            is_executable=false
+            if head -1 "$script" | grep -q '^#!'; then
+              has_shebang=true
+            fi
+            if [ -x "$script" ]; then
+              is_executable=true
+            fi
+            if [ "$has_shebang" = true ] || [ "$is_executable" = true ]; then
+              echo "OK: $script (shebang=$has_shebang, executable=$is_executable)"
+            else
+              echo "WARN: $script has no shebang and is not executable"
+              status=1
+            fi
+          done < <(find demo -name '*.sh' -print0)
+          if [ "$status" -eq 0 ]; then
+            echo "All shell scripts have shebang or executable permission."
+          fi
+          exit $status

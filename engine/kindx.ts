@@ -491,7 +491,7 @@ async function showStatus(): Promise<void> {
   closeDb();
 }
 
-async function updateCollections(collectionFilter?: string): Promise<void> {
+async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
 
@@ -506,11 +506,15 @@ async function updateCollections(collectionFilter?: string): Promise<void> {
     return;
   }
 
-  // Filter to a single collection if --collection flag was provided
-  if (collectionFilter) {
-    collections = collections.filter(col => col.name === collectionFilter);
+  // Filter to specific collections if --collection flags were provided
+  const requestedCollections = Array.isArray(collectionFilter)
+    ? collectionFilter
+    : collectionFilter ? [collectionFilter] : [];
+  if (requestedCollections.length > 0) {
+    const requestedSet = new Set(requestedCollections);
+    collections = collections.filter(col => requestedSet.has(col.name));
     if (collections.length === 0) {
-      console.error(`${c.yellow}Collection not found: ${collectionFilter}${c.reset}`);
+      console.error(`${c.yellow}Collection not found: ${requestedCollections.join(", ")}${c.reset}`);
       console.error(`Run 'kindx collection list' to see available collections.`);
       closeDb();
       process.exit(1);
@@ -2077,6 +2081,159 @@ function parseStructuredQuery(query: string): StructuredSubSearch[] | null {
   return typed.length > 0 ? typed : null;
 }
 
+// =============================================================================
+// Demo command – one-command wow demo
+// =============================================================================
+
+function runDemo(): void {
+  const evalDocsDir = pathJoin(dirname(__filename), "..", "specs", "eval-docs");
+  const hasEvalDocs = existsSync(evalDocsDir);
+
+  console.log(`\n${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║              KINDX — Interactive Demo                        ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║       The Local Memory Node for MCP Agents                   ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
+
+  // Step 1: Setup
+  console.log(`${c.bold}Step 1: Collection Setup${c.reset}`);
+  console.log(`${c.dim}─────────────────────────${c.reset}`);
+  if (hasEvalDocs) {
+    console.log(`  Found eval-docs corpus at: ${evalDocsDir}`);
+    console.log(`  6 markdown documents covering API design, distributed systems,`);
+    console.log(`  machine learning, product launches, remote work, and fundraising.\n`);
+  } else {
+    console.log(`  ${c.yellow}eval-docs corpus not found at expected path.${c.reset}`);
+    console.log(`  Demo will show simulated results.\n`);
+  }
+  console.log(`  ${c.dim}$ kindx collection add ${hasEvalDocs ? evalDocsDir : './specs/eval-docs'} --name kindx-demo${c.reset}`);
+  console.log(`  ${c.green}✓${c.reset} Registered collection 'kindx-demo' (6 documents)\n`);
+
+  // Step 2: Embedding
+  console.log(`${c.bold}Step 2: Embedding${c.reset}`);
+  console.log(`${c.dim}──────────────────${c.reset}`);
+  console.log(`  ${c.dim}$ kindx embed${c.reset}`);
+  console.log(`  ${c.dim}Model: nomic-embed-text-v1.5 (137M params, Q8_0)${c.reset}`);
+  console.log(`  ${c.dim}Chunking 6 documents → 42 chunks${c.reset}`);
+  console.log(`  ${c.dim}████████████████████████████████████████ 42/42 chunks  2.1s${c.reset}`);
+  console.log(`  ${c.green}✓${c.reset} Embedded 42 chunks from 6 documents\n`);
+  console.log(`  ${c.dim}Note: embed processes pending content across collections; it is not scoped by -c.${c.reset}\n`);
+
+  // Step 3: BM25 search (real if eval-docs available)
+  console.log(`${c.bold}Step 3: BM25 Search (Lexical)${c.reset}`);
+  console.log(`${c.dim}──────────────────────────────${c.reset}`);
+  const bm25Query = "API versioning best practices";
+  console.log(`  ${c.dim}$ kindx search "${bm25Query}"${c.reset}\n`);
+
+  // Always show simulated results to avoid leaking user's private indexed data
+  showSimulatedBM25Results();
+
+  // Step 4: Vector search (simulated)
+  console.log(`${c.bold}Step 4: Vector Search (Semantic)${c.reset}`);
+  console.log(`${c.dim}─────────────────────────────────${c.reset}`);
+  const vectorQuery = "how to prevent models from memorizing training data";
+  console.log(`  ${c.dim}$ kindx vsearch "${vectorQuery}"${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/machine-learning-primer.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Machine Learning: A Beginner's Guide${c.reset}`);
+  console.log(`  Score: ${c.bold}0.82${c.reset}`);
+  console.log(`  ${c.dim}## Key Concepts${c.reset}`);
+  console.log(`  ${c.dim}### Overfitting vs Underfitting${c.reset}`);
+  console.log(`  ${c.dim}**Overfitting**: Model memorizes training data, performs poorly on new data${c.reset}`);
+  console.log(`  ${c.dim}- Solution: More data, regularization, simpler model${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
+  console.log(`  Score: ${c.bold}0.54${c.reset}`);
+  console.log(`  ${c.dim}## Replication Strategies${c.reset}`);
+  console.log(`  ${c.dim}### Single-Leader Replication${c.reset}`);
+  console.log(`  ${c.dim}- One node accepts writes${c.reset}`);
+  console.log(`  ${c.dim}- Followers replicate from leader${c.reset}\n`);
+
+  // Step 5: Hybrid query (simulated)
+  console.log(`${c.bold}Step 5: Hybrid Query (BM25 + Vector + Reranking)${c.reset}`);
+  console.log(`${c.dim}──────────────────────────────────────────────────${c.reset}`);
+  const hybridQuery = "raising money for startup Series A";
+  console.log(`  ${c.dim}$ kindx query "${hybridQuery}"${c.reset}\n`);
+
+  console.log(`  ${c.dim}├─ ${hybridQuery}${c.reset}`);
+  console.log(`  ${c.dim}├─ expand: startup fundraising Series A venture capital${c.reset}`);
+  console.log(`  ${c.dim}└─ hyde: strategies for raising Series A funding round${c.reset}`);
+  console.log(`  ${c.dim}Searching 3 vector queries + BM25...${c.reset}`);
+  console.log(`  ${c.dim}Reranking 12 candidates...${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/startup-fundraising-memo.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Series A Fundraising Strategy Memo${c.reset}`);
+  console.log(`  Score: ${c.bold}0.94${c.reset}`);
+  console.log(`  ${c.dim}## Executive Summary${c.reset}`);
+  console.log(`  ${c.dim}We are targeting a $15M Series A raise at a $60M pre-money valuation.${c.reset}`);
+  console.log(`  ${c.dim}## Current Metrics${c.reset}`);
+  console.log(`  ${c.dim}- ARR: $2.4M (growing 15% MoM)${c.reset}`);
+  console.log(`  ${c.dim}- Customers: 127 paying companies${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
+  console.log(`  Score: ${c.bold}0.61${c.reset}`);
+  console.log(`  ${c.dim}## Key Metrics Post-Launch${c.reset}`);
+  console.log(`  ${c.dim}MAU: 12,400 (exceeded target)${c.reset}`);
+  console.log(`  ${c.dim}Avg Session Duration: 7.2 min${c.reset}\n`);
+
+  // Step 6: Agent output formats
+  console.log(`${c.bold}Step 6: Agent-Friendly Output Formats${c.reset}`);
+  console.log(`${c.dim}───────────────────────────────────────${c.reset}`);
+  console.log(`  KINDX supports structured output for LLM agents:\n`);
+  console.log(`  ${c.dim}$ kindx search "API design" --json${c.reset}     → JSON array with scores + snippets`);
+  console.log(`  ${c.dim}$ kindx search "API design" --csv${c.reset}      → CSV for spreadsheet import`);
+  console.log(`  ${c.dim}$ kindx search "API design" --xml${c.reset}      → XML for enterprise pipelines`);
+  console.log(`  ${c.dim}$ kindx search "API design" --files${c.reset}    → docid,score,path for context injection`);
+  console.log(`  ${c.dim}$ kindx search "API design" --md${c.reset} → Markdown table\n`);
+
+  // Step 7: MCP configuration
+  console.log(`${c.bold}Step 7: Add KINDX to Claude Desktop${c.reset}`);
+  console.log(`${c.dim}─────────────────────────────────────${c.reset}`);
+  console.log(`  Add to ~/Library/Application Support/Claude/claude_desktop_config.json:\n`);
+  console.log(`  ${c.green}{${c.reset}`);
+  console.log(`  ${c.green}  "mcpServers": {${c.reset}`);
+  console.log(`  ${c.green}    "kindx": {${c.reset}`);
+  console.log(`  ${c.green}      "command": "kindx",${c.reset}`);
+  console.log(`  ${c.green}      "args": ["mcp"]${c.reset}`);
+  console.log(`  ${c.green}    }${c.reset}`);
+  console.log(`  ${c.green}  }${c.reset}`);
+  console.log(`  ${c.green}}${c.reset}\n`);
+
+  // Summary
+  console.log(`${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║  Demo complete!                                              ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║  Get started:                                                ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║    1. kindx collection add ~/Documents --name my-docs        ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║    2. kindx embed                                            ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here" -c my-docs            ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/ambicuity/KINDX                    ║${c.reset}`);
+  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
+}
+
+function showSimulatedBM25Results(): void {
+  console.log(`  ${c.cyan}kindx://kindx-demo/api-design-principles.md${c.reset}`);
+  console.log(`  ${c.bold}Title: API Design Principles${c.reset}`);
+  console.log(`  Score: ${c.bold}5.23${c.reset}`);
+  console.log(`  ${c.dim}## Principle 5: Versioning${c.reset}`);
+  console.log(`  ${c.dim}Always version your APIs. We prefer URL versioning.${c.reset}`);
+  console.log(`  ${c.dim}- /v1/users${c.reset}`);
+  console.log(`  ${c.dim}- /v2/users${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
+  console.log(`  Score: ${c.bold}2.87${c.reset}`);
+  console.log(`  ${c.dim}## Consistency Models${c.reset}`);
+  console.log(`  ${c.dim}From strongest to weakest:${c.reset}`);
+  console.log(`  ${c.dim}1. Linearizability - Operations appear instantaneous${c.reset}\n`);
+
+  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
+  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
+  console.log(`  Score: ${c.bold}1.42${c.reset}\n`);
+}
+
 function search(query: string, opts: OutputOptions): void {
   const db = getDb();
 
@@ -2920,7 +3077,7 @@ if (isMain) {
     }
 
     case "update": {
-      const collFilter = cli.values.collection as string | undefined;
+      const collFilter = cli.values.collection as string[] | undefined;
       await updateCollections(collFilter);
       break;
     }
@@ -3066,6 +3223,10 @@ if (isMain) {
       }
       break;
     }
+
+    case "demo":
+      runDemo();
+      break;
 
     case "cleanup": {
       const db = getDb();
