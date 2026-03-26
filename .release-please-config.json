@@ -1,14 +1,56 @@
 {
-    "packages": {
-        ".": {
-            "release-type": "node",
-            "package-name": "@ambicuity/kindx",
-            "changelog-path": "CHANGELOG.md",
-            "bump-minor-pre-major": true,
-            "bump-patch-for-minor-pre-major": true,
-            "draft": false,
-            "prerelease": false
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "package-name": "@ambicuity/kindx",
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "draft": false,
+      "prerelease": false,
+      "changelog-sections": [
+        {
+          "type": "feat",
+          "section": "Features"
+        },
+        {
+          "type": "fix",
+          "section": "Bug Fixes"
+        },
+        {
+          "type": "perf",
+          "section": "Performance"
+        },
+        {
+          "type": "refactor",
+          "section": "Refactoring"
+        },
+        {
+          "type": "docs",
+          "section": "Documentation"
+        },
+        {
+          "type": "test",
+          "section": "Tests"
+        },
+        {
+          "type": "chore",
+          "section": "Chores"
+        },
+        {
+          "type": "ci",
+          "section": "CI"
+        },
+        {
+          "type": "build",
+          "section": "Build System"
+        },
+        {
+          "type": "revert",
+          "section": "Reverts"
         }
-    },
-    "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
+      ]
+    }
+  },
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
 }
