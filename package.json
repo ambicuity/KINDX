@@ -3,6 +3,9 @@
   "version": "1.0.1",
   "description": "KINDX - On-device hybrid search engine for markdown documents with BM25, vector embeddings, and LLM reranking",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "kindx": "bin/kindx"
   },
@@ -16,8 +19,14 @@
   "scripts": {
     "prepare": "[ -d .git ] && ./tooling/install-hooks.sh || true",
     "build": "tsc -p tsconfig.build.json && printf '#!/usr/bin/env node\n' | cat - dist/kindx.js > dist/kindx.tmp && mv dist/kindx.tmp dist/kindx.js && chmod +x dist/kindx.js",
+    "build:packages": "npm run build -w @ambicuity/kindx-schemas && npm run build -w @ambicuity/kindx-client",
+    "build:all": "npm run build && npm run build:packages",
     "pretest": "npm run build",
+    "pretest:all": "npm run build:all",
     "test": "vitest run --reporter=verbose specs/",
+    "test:packages": "npm run test -w @ambicuity/kindx-schemas && npm run test -w @ambicuity/kindx-client",
+    "test:python": "python3 -m unittest discover -s python/kindx-langchain/tests -v",
+    "test:all": "npm run pretest:all && npm run test && npm run test:packages && npm run test:python",
     "kindx": "tsx engine/kindx.ts",
     "index": "tsx engine/kindx.ts index",
     "vector": "tsx engine/kindx.ts vector",
@@ -63,6 +72,7 @@
     "@types/picomatch": "^4.0.2",
     "@types/yaml": "^1.9.6",
     "tsx": "^4.0.0",
+    "typescript": "^5.9.3",
     "vitest": "^3.0.0"
   },
   "peerDependencies": {

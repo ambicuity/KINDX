@@ -130,6 +130,15 @@ kindx get "docs/api-reference.md" --full
 
 > **Pro-tip (Context Window Budgeting):** Use `--min-score 0.4` with `--files` to produce a ranked manifest, then `multi-get` only the top-k assets. This two-phase pattern prevents context window overflow while preserving retrieval precision.
 
+### Typed SDK Packages
+
+KINDX now includes typed client packages and integration scaffolding:
+
+- `@ambicuity/kindx-schemas` — shared Zod schemas for KINDX MCP/HTTP request and response contracts.
+- `@ambicuity/kindx-client` — TypeScript client for `/query` and MCP tool calls (`get`, `multi_get`, `status`, `kindx_feedback`, and memory tools).
+- `python/kindx-langchain` — installable Python retriever wrapper for LangChain-style document retrieval.
+- [`reference/integrations/agent-templates.md`](reference/integrations/agent-templates.md) — tested MCP configuration templates for OpenDevin, Goose, and Claude Code.
+
 ---
 
 ## MCP Server
