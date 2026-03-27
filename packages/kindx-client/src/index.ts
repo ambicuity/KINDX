@@ -57,6 +57,7 @@ export class KindxClient {
   private readonly timeoutMs: number;
   private readonly token?: string;
   private mcpSessionId?: string;
+  private rpcIdCounter = 0;
 
   constructor(options: KindxClientOptions) {
     this.baseUrl = trimTrailingSlashes(options.baseUrl);
@@ -109,9 +110,9 @@ export class KindxClient {
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<KindxMcpToolResult> {
     const sessionId = await this.ensureSession();
-    const rpc = await this.postJson(`${this.baseUrl}/mcp`, {
+    const rpc = await this.postJson<JsonRpcResponse>(`${this.baseUrl}/mcp`, {
       jsonrpc: "2.0",
-      id: Date.now(),
+      id: this.nextRpcId(),
       method: "tools/call",
       params: {
         name,
@@ -128,11 +129,11 @@ export class KindxClient {
   private async ensureSession(): Promise<string> {
     if (this.mcpSessionId) return this.mcpSessionId;
 
-    const response = await this.postJson(
+    const response = await this.postJson<JsonRpcResponse>(
       `${this.baseUrl}/mcp`,
       {
         jsonrpc: "2.0",
-        id: Date.now(),
+        id: this.nextRpcId(),
         method: "initialize",
         params: {
           protocolVersion: "2025-03-26",
@@ -155,6 +156,11 @@ export class KindxClient {
     return response.sessionId;
   }
 
+  private nextRpcId(): number {
+    this.rpcIdCounter += 1;
+    return this.rpcIdCounter;
+  }
+
   private parseJsonRpc(body: unknown): JsonRpcResponse {
     const rpc = body as JsonRpcResponse;
     if (rpc?.error) {
@@ -165,12 +171,24 @@ export class KindxClient {
     return rpc;
   }
 
-  private async postJson(
+  private async postJson<T>(
+    url: string,
+    body: unknown,
+    headers?: Record<string, string>,
+    includeResponseHeaders?: false,
+  ): Promise<T>;
+  private async postJson<T>(
+    url: string,
+    body: unknown,
+    headers: Record<string, string> | undefined,
+    includeResponseHeaders: true,
+  ): Promise<{ body: T; sessionId?: string }>;
+  private async postJson<T>(
     url: string,
     body: unknown,
     headers?: Record<string, string>,
     includeResponseHeaders: boolean = false,
-  ): Promise<any> {
+  ): Promise<T | { body: T; sessionId?: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -192,9 +210,9 @@ export class KindxClient {
       });
 
       const text = await res.text();
-      let parsed: unknown;
+      let parsed: T;
       try {
-        parsed = text ? JSON.parse(text) : {};
+        parsed = (text ? JSON.parse(text) : {}) as T;
       } catch {
         throw new KindxClientError("Invalid JSON response from KINDX server", {
           status: res.status,

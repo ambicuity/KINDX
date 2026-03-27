@@ -83,6 +83,3 @@ class KindxRetriever(BaseRetriever):
     def _get_relevant_documents(self, query: str, **_: Any) -> List[Document]:
         results = self._search(query)
         return [self._to_document(item) for item in results]
-
-    def invoke(self, query: str) -> List[Document]:
-        return self._get_relevant_documents(query)

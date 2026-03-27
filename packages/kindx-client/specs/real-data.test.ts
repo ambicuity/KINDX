@@ -167,8 +167,13 @@ describe("KindxClient real data", () => {
 
     const file = target?.file || result.results[0]!.file;
     const doc = await client.get({ file });
-    const textContent = doc.content?.find((item) => item.type === "resource");
+    const textContent = doc.content?.find(
+      (
+        item
+      ): item is Extract<NonNullable<typeof doc.content>[number], { type: "resource" }> =>
+        item.type === "resource"
+    );
     expect(textContent).toBeTruthy();
-    expect((textContent as any).resource.text).toContain("Rate Limiting");
+    expect(textContent?.resource.text).toContain("Rate Limiting");
   });
 });
