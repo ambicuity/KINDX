@@ -160,3 +160,13 @@ If you find a bug or have a feature idea, please use our [Issue Templates](https
 ## Thank You!
 
 When your PR is merged, we will happily add you to our [Contributors Hall of Fame](./CONTRIBUTORS.md). Thanks again for dedicating your time and energy to KINDX!
+
+## Release Recovery: Publish From Existing Tag
+
+If a GitHub release/tag exists but npm publish was skipped or failed, use the `Publish From Tag` workflow:
+
+1. Open **Actions** -> **Publish From Tag** -> **Run workflow**
+2. Set `tag` (for example `v1.1.0`)
+3. Run once with `dry_run=true`, then run with `dry_run=false`
+
+The workflow fails fast if that package version is already present on npm.

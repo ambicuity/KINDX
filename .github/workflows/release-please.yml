@@ -25,7 +25,6 @@ jobs:
         id: release
         with:
           release-type: node
-          package-name: "@ambicuity/kindx"
 
       - name: Checkout repository
         if: ${{ steps.release.outputs.release_created }}
