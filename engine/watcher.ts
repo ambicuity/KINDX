@@ -1,4 +1,4 @@
-import chokidar from "chokidar";
+import chokidar, { type FSWatcher } from "chokidar";
 import { resolve, relative as pathRelative } from "path";
 import { realpathSync } from "fs";
 import { type Store } from "./repository.js";
@@ -27,7 +27,7 @@ function formatMs(ms: number): string {
 
 export class WatchDaemon {
   private store: Store;
-  private watchers: chokidar.FSWatcher[] = [];
+  private watchers: FSWatcher[] = [];
   private eventQueue: WatchEvent[] = [];
   private isProcessing = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
