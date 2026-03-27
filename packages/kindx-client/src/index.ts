@@ -59,7 +59,7 @@ export class KindxClient {
   private mcpSessionId?: string;
 
   constructor(options: KindxClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = trimTrailingSlashes(options.baseUrl);
     this.token = options.token;
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
@@ -227,4 +227,12 @@ export class KindxClient {
       clearTimeout(timer);
     }
   }
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
