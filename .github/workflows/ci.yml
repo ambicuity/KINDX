@@ -12,6 +12,8 @@ on:
       - 'tsconfig*.json'
       - 'vitest.config.ts'
       - 'schema-migration.ts'
+      - 'packages/**'
+      - 'python/kindx-langchain/**'
       - '.github/workflows/ci.yml'
   push:
     branches: [main]
@@ -24,6 +26,8 @@ on:
       - 'tsconfig*.json'
       - 'vitest.config.ts'
       - 'schema-migration.ts'
+      - 'packages/**'
+      - 'python/kindx-langchain/**'
       - '.github/workflows/ci.yml'
 
 concurrency:
@@ -60,10 +64,26 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+      - name: Build SDK packages
+        run: npm run build:packages
+
       - name: Run unit and integration tests
         run: npm test
         env:
           CI: 'true'
+
+      - name: Run SDK package tests
+        run: npm run test:packages
+        env:
+          CI: 'true'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run kindx-langchain tests
+        run: python -m unittest discover -s python/kindx-langchain/tests -v
 
       - name: Verify publishable package contents
         run: npm pack --dry-run
