@@ -72,11 +72,11 @@
     "@types/picomatch": "^4.0.2",
     "@types/yaml": "^1.9.6",
     "tsx": "^4.0.0",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.2",
     "vitest": "^4.1.2"
   },
   "peerDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.2"
   },
   "engines": {
     "node": ">=22.0.0"
