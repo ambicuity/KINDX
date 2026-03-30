@@ -56,6 +56,6 @@ jobs:
 
       - name: Sign release artifacts
         if: ${{ steps.release.outputs.release_created }}
-        uses: sigstore/gh-action-sigstore-python@v3.2.0
+        uses: sigstore/gh-action-sigstore-python@v3.3.0
         with:
           inputs: ./dist/**/*.js
