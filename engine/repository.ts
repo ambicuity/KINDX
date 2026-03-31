@@ -593,6 +593,127 @@ export function toVirtualPath(db: Database, absolutePath: string): string | null
 // Database initialization
 // =============================================================================
 
+const CJK_CHAR_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+function hasCjk(text: string): boolean {
+  return CJK_CHAR_RE.test(text);
+}
+
+function countScriptChars(text: string): { han: number; kana: number; hangul: number } {
+  let han = 0;
+  let kana = 0;
+  let hangul = 0;
+  for (const ch of text) {
+    if (/\p{Script=Han}/u.test(ch)) han++;
+    if (/\p{Script=Hiragana}|\p{Script=Katakana}/u.test(ch)) kana++;
+    if (/\p{Script=Hangul}/u.test(ch)) hangul++;
+  }
+  return { han, kana, hangul };
+}
+
+function detectCjkLanguage(text: string): 'zh' | 'ja' | 'ko' | null {
+  const counts = countScriptChars(text);
+  if (counts.hangul > 0) return 'ko';
+  if (counts.kana > 0) return 'ja';
+  if (counts.han > 0) return 'zh';
+  return null;
+}
+
+const segmenterCache = new Map<string, Intl.Segmenter>();
+
+function getWordSegmenter(lang: 'zh' | 'ja' | 'ko'): Intl.Segmenter {
+  const cached = segmenterCache.get(lang);
+  if (cached) return cached;
+  const seg = new Intl.Segmenter(lang, { granularity: 'word' });
+  segmenterCache.set(lang, seg);
+  return seg;
+}
+
+function sanitizeLexToken(term: string): string {
+  return term.replace(/[^\p{L}\p{N}'_]/gu, '').toLowerCase();
+}
+
+function cjkBigrams(token: string): string[] {
+  const chars = Array.from(token);
+  if (chars.length < 2) return [];
+  const grams: string[] = [];
+  for (let i = 0; i < chars.length - 1; i++) {
+    const gram = `${chars[i]}${chars[i + 1]}`;
+    if (gram.trim().length > 0) grams.push(gram);
+  }
+  return grams;
+}
+
+function shouldEmitCjkBigrams(token: string): boolean {
+  const cjkChars = Array.from(token).filter(ch => CJK_CHAR_RE.test(ch)).length;
+  return cjkChars >= 4;
+}
+
+function normalizeTextForFts(input: string): string {
+  if (!input) return '';
+  if (!hasCjk(input)) return input;
+
+  const lang = detectCjkLanguage(input);
+  if (!lang) return input;
+
+  const segmenter = getWordSegmenter(lang);
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const segment of segmenter.segment(input)) {
+    if (!segment.isWordLike) continue;
+    const token = sanitizeLexToken(segment.segment);
+    if (!token) continue;
+    if (shouldEmitCjkBigrams(token)) {
+      let emitted = false;
+      for (const gram of cjkBigrams(token)) {
+        if (gram && !seen.has(gram)) {
+          tokens.push(gram);
+          seen.add(gram);
+          emitted = true;
+        }
+      }
+      if (emitted) continue;
+    }
+    if (!seen.has(token)) {
+      tokens.push(token);
+      seen.add(token);
+    }
+  }
+
+  // Fallback for runtimes where segmentation yields no word-like CJK tokens.
+  if (tokens.length === 0) {
+    const fallback = sanitizeLexToken(input);
+    if (fallback) return fallback;
+  }
+
+  return tokens.join(' ');
+}
+
+function normalizeLexTermTokens(input: string): string[] {
+  const normalized = normalizeTextForFts(input);
+  if (!normalized) return [];
+  return normalized
+    .split(/\s+/)
+    .map(token => sanitizeLexToken(token))
+    .filter(token => token.length > 0);
+}
+
+function registerFtsNormalizerFunction(db: Database): boolean {
+  const dbWithFn = db as Database & {
+    function?: (name: string, fn: (...args: unknown[]) => unknown) => void;
+  };
+  if (typeof dbWithFn.function !== 'function') return false;
+
+  try {
+    dbWithFn.function("kindx_fts_normalize", (value: unknown) => {
+      if (typeof value !== "string") return "";
+      return normalizeTextForFts(value);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function createSqliteVecUnavailableError(reason: string): Error {
   return new Error(
@@ -622,6 +743,8 @@ export function verifySqliteVecLoaded(db: Database): void {
 let _sqliteVecAvailable: boolean | null = null;
 
 function initializeDatabase(db: Database): void {
+  const hasFtsNormalizer = registerFtsNormalizerFunction(db);
+
   try {
     loadSqliteVec(db);
     verifySqliteVecLoaded(db);
@@ -707,6 +830,17 @@ function initializeDatabase(db: Database): void {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_feedback_query ON feedback(query)`);
 
+  // Upgrade legacy test/runtime schemas that created different FTS column layouts.
+  const ftsInfo = db.prepare(`PRAGMA table_info(documents_fts)`).all() as { name: string }[];
+  if (ftsInfo.length > 0) {
+    const requiredCols = new Set(["filepath", "title", "body"]);
+    const existingCols = new Set(ftsInfo.map(col => col.name));
+    const hasExpectedSchema = Array.from(requiredCols).every(col => existingCols.has(col));
+    if (!hasExpectedSchema) {
+      db.exec(`DROP TABLE IF EXISTS documents_fts`);
+    }
+  }
+
   // FTS - index filepath (collection/path), title, and content
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
@@ -715,29 +849,38 @@ function initializeDatabase(db: Database): void {
     )
   `);
 
+  const ftsTitleExpr = hasFtsNormalizer ? `kindx_fts_normalize(new.title)` : `new.title`;
+  const ftsBodyExpr = hasFtsNormalizer
+    ? `(SELECT kindx_fts_normalize(doc) FROM content WHERE hash = new.hash)`
+    : `(SELECT doc FROM content WHERE hash = new.hash)`;
+
   // Triggers to keep FTS in sync
+  db.exec(`DROP TRIGGER IF EXISTS documents_ai`);
+  db.exec(`DROP TRIGGER IF EXISTS documents_ad`);
+  db.exec(`DROP TRIGGER IF EXISTS documents_au`);
+
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents
+    CREATE TRIGGER documents_ai AFTER INSERT ON documents
     WHEN new.active = 1
     BEGIN
       INSERT INTO documents_fts(rowid, filepath, title, body)
       SELECT
         new.id,
         new.collection || '/' || new.path,
-        new.title,
-        (SELECT doc FROM content WHERE hash = new.hash)
+        ${ftsTitleExpr},
+        ${ftsBodyExpr}
       WHERE new.active = 1;
     END
   `);
 
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+    CREATE TRIGGER documents_ad AFTER DELETE ON documents BEGIN
       DELETE FROM documents_fts WHERE rowid = old.id;
     END
   `);
 
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents
+    CREATE TRIGGER documents_au AFTER UPDATE ON documents
     BEGIN
       -- Delete from FTS if no longer active
       DELETE FROM documents_fts WHERE rowid = old.id AND new.active = 0;
@@ -747,11 +890,47 @@ function initializeDatabase(db: Database): void {
       SELECT
         new.id,
         new.collection || '/' || new.path,
-        new.title,
-        (SELECT doc FROM content WHERE hash = new.hash)
+        ${ftsTitleExpr},
+        ${ftsBodyExpr}
       WHERE new.active = 1;
     END
   `);
+
+  migrateFtsNormalization(db, hasFtsNormalizer);
+}
+
+const FTS_CJK_MIGRATION_VERSION = 1;
+
+function getUserVersion(db: Database): number {
+  const row = db.prepare(`PRAGMA user_version`).get() as { user_version?: number } | undefined;
+  return typeof row?.user_version === "number" ? row.user_version : 0;
+}
+
+function setUserVersion(db: Database, version: number): void {
+  db.exec(`PRAGMA user_version = ${version}`);
+}
+
+function migrateFtsNormalization(db: Database, hasFtsNormalizer: boolean): void {
+  const currentVersion = getUserVersion(db);
+  if (currentVersion >= FTS_CJK_MIGRATION_VERSION) return;
+
+  const titleExpr = hasFtsNormalizer ? `kindx_fts_normalize(d.title)` : `d.title`;
+  const bodyExpr = hasFtsNormalizer ? `kindx_fts_normalize(content.doc)` : `content.doc`;
+
+  db.exec(`DELETE FROM documents_fts`);
+  db.exec(`
+    INSERT INTO documents_fts(rowid, filepath, title, body)
+    SELECT
+      d.id,
+      d.collection || '/' || d.path,
+      ${titleExpr},
+      ${bodyExpr}
+    FROM documents d
+    JOIN content ON content.hash = d.hash
+    WHERE d.active = 1
+  `);
+
+  setUserVersion(db, FTS_CJK_MIGRATION_VERSION);
 }
 
 
@@ -2106,12 +2285,6 @@ export function getTopLevelPathsWithoutContext(db: Database, collectionName: str
 // FTS Search
 // =============================================================================
 
-function sanitizeFTS5Term(term: string): string {
-  // Preserve underscores so snake_case identifiers (e.g., my_function_name)
-  // are treated as single terms rather than being split into separate words.
-  return term.replace(/[^\p{L}\p{N}'_]/gu, '').toLowerCase();
-}
-
 /**
  * Parse lex query syntax into FTS5 query.
  *
@@ -2151,7 +2324,7 @@ function buildFTS5Query(query: string): string | null {
       const phrase = s.slice(start, i).trim();
       i++; // skip closing quote
       if (phrase.length > 0) {
-        const sanitized = phrase.split(/\s+/).map(t => sanitizeFTS5Term(t)).filter(t => t).join(' ');
+        const sanitized = normalizeLexTermTokens(phrase).join(' ');
         if (sanitized) {
           const ftsPhrase = `"${sanitized}"`;  // Exact phrase, no prefix match
           if (negated) {
@@ -2167,13 +2340,14 @@ function buildFTS5Query(query: string): string | null {
       while (i < s.length && !/[\s"]/.test(s[i]!)) i++;
       const term = s.slice(start, i);
 
-      const sanitized = sanitizeFTS5Term(term);
-      if (sanitized) {
-        const ftsTerm = `"${sanitized}"*`;  // Prefix match
+      const tokens = normalizeLexTermTokens(term);
+      if (tokens.length > 0) {
+        const ftsToken = tokens.map(token => `"${token}"*`).join(' AND ');
+        const wrapped = tokens.length > 1 ? `(${ftsToken})` : ftsToken;
         if (negated) {
-          negative.push(ftsTerm);
+          negative.push(wrapped);
         } else {
-          positive.push(ftsTerm);
+          positive.push(wrapped);
         }
       }
     }

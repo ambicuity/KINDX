@@ -365,6 +365,8 @@ Models are downloaded from HuggingFace and cached in `~/.cache/kindx/models/`.
 
 Override the default embedding model via the `KINDX_EMBED_MODEL` environment variable. Required for multilingual corpora (CJK, Arabic, etc.) where `embeddinggemma-300M` has limited coverage.
 
+BM25 keyword search now normalizes CJK text at both index and query time (with `Intl.Segmenter` plus CJK bigram fallback), so `kindx search` remains effective even for contiguous Chinese/Japanese/Korean text without whitespace.
+
 ```bash
 # Use Qwen3-Embedding-0.6B for multilingual corpus (CJK) support
 export KINDX_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-Q8_0.gguf"

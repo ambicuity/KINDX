@@ -301,6 +301,67 @@ describe("MCP Server", () => {
       expect(filtered[0]).toHaveProperty("score");
       expect(filtered[0]).toHaveProperty("snippet");
     });
+
+    test("matches contiguous CJK keywords through real store indexing path", async () => {
+      const cjkConfigDir = await mkdtemp(join(tmpdir(), "kindx-mcp-cjk-config-"));
+      const cjkDbPath = join(tmpdir(), `kindx-mcp-cjk-${Date.now()}.sqlite`);
+      const prevConfigDir = process.env.KINDX_CONFIG_DIR;
+      const prevIndexName = process.env.KINDX_CONFIG_INDEX_NAME;
+
+      const cjkConfig: CollectionConfig = {
+        collections: {
+          cjk: {
+            path: "/tmp/cjk-docs",
+            pattern: "**/*.md",
+          },
+        },
+      };
+
+      try {
+        process.env.KINDX_CONFIG_DIR = cjkConfigDir;
+        setConfigIndexName(`mcp-cjk-${Date.now()}`);
+        await writeFile(join(cjkConfigDir, "index.yml"), YAML.stringify(cjkConfig));
+
+        const store = createStore(cjkDbPath);
+        const now = new Date().toISOString();
+        const hash = "cjkhash1";
+        const body = "数据库性能优化需要索引设计和事务管理";
+        store.insertContent(hash, body, now);
+        store.insertDocument("cjk", "docs/zh.md", "中文检索示例", hash, now, now);
+
+        const direct = searchFTS(store.db, "索引", 10, "cjk");
+        expect(direct.some(r => r.displayPath === "cjk/docs/zh.md")).toBe(true);
+
+        // Parity with MCP result shaping path (search + snippet extraction).
+        const structured = direct.map(r => ({
+          file: r.displayPath,
+          title: r.title,
+          score: Math.round(r.score * 100) / 100,
+          context: getContextForFile(store.db, r.filepath),
+          snippet: extractSnippet(r.body || "", "索引", 300, r.chunkPos).snippet,
+        }));
+        expect(structured.length).toBeGreaterThan(0);
+        expect(structured[0]!.file).toBe("cjk/docs/zh.md");
+
+        store.close();
+      } finally {
+        if (prevConfigDir === undefined) {
+          delete process.env.KINDX_CONFIG_DIR;
+        } else {
+          process.env.KINDX_CONFIG_DIR = prevConfigDir;
+        }
+        if (prevIndexName === undefined) {
+          delete process.env.KINDX_CONFIG_INDEX_NAME;
+        } else {
+          process.env.KINDX_CONFIG_INDEX_NAME = prevIndexName;
+        }
+        setConfigIndexName(prevIndexName || "index");
+
+        try { await unlink(cjkDbPath); } catch { }
+        try { await unlink(join(cjkConfigDir, "index.yml")); } catch { }
+        try { await rmdir(cjkConfigDir); } catch { }
+      }
+    });
   });
 
   // ===========================================================================
