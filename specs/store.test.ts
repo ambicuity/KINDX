@@ -35,6 +35,9 @@ import {
   isInsideCodeFence,
   findBestCutoff,
   getDocumentsForEmbedding,
+  getDocumentSummary,
+  setDocumentSummary,
+  deleteDocumentSummary,
   getExistingEmbeddingChunksForHash,
   updateEmbeddingChunkMetadata,
   deleteEmbeddingsForHashSeqs,
@@ -457,6 +460,7 @@ describe("Store Creation", () => {
     expect(tableNames).toContain("documents_fts");
     expect(tableNames).toContain("content_vectors");
     expect(tableNames).toContain("llm_cache");
+    expect(tableNames).toContain("document_summaries");
     // Note: path_contexts table removed in favor of YAML-based context storage
 
     await cleanupTestDb(store);
@@ -569,6 +573,16 @@ describe("Embedding Formatting", () => {
   test("formatDocForEmbedding handles missing title", () => {
     const formatted = formatDocForEmbedding("Some content");
     expect(formatted).toBe("title: none | text: Some content");
+  });
+
+  test("formatDocForEmbedding prepends summary for non-Qwen models", () => {
+    const formatted = formatDocForEmbedding("Some content", "My Title", "embeddinggemma", "Quick summary.");
+    expect(formatted).toBe("summary: Quick summary. | title: My Title | text: Some content");
+  });
+
+  test("formatDocForEmbedding keeps raw style for Qwen while including summary", () => {
+    const formatted = formatDocForEmbedding("Some content", "My Title", "qwen3-embedding", "Quick summary.");
+    expect(formatted).toBe("My Title\nQuick summary.\nSome content");
   });
 });
 
@@ -2425,6 +2439,24 @@ describe("Embedding Delta Utilities", () => {
     expect(docs).toHaveLength(1);
     expect(docs[0]!.hash).toBe(hash);
     expect(docs[0]!.path).toBe("active-2.md");
+
+    await cleanupTestDb(store);
+  });
+
+  test("document summary helpers upsert, read, and delete summaries", async () => {
+    const store = await createTestStore();
+    const hash = "summary_hash_1";
+    const now = new Date().toISOString();
+
+    store.insertContent(hash, "body", now);
+    setDocumentSummary(store.db, hash, "Two sentence summary.", now);
+    expect(getDocumentSummary(store.db, hash)).toBe("Two sentence summary.");
+
+    setDocumentSummary(store.db, hash, "Updated summary.", now);
+    expect(getDocumentSummary(store.db, hash)).toBe("Updated summary.");
+
+    deleteDocumentSummary(store.db, hash);
+    expect(getDocumentSummary(store.db, hash)).toBeNull();
 
     await cleanupTestDb(store);
   });

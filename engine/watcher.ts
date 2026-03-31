@@ -43,6 +43,28 @@ export class WatchDaemon {
     this.store = store;
   }
 
+  private fallbackDocumentSummary(body: string): string {
+    const preview = body.slice(0, 2000).replace(/\s+/g, " ").trim();
+    if (!preview) return "No content summary available.";
+    const segments = preview
+      .split(/(?<=[.!?])\s+/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const first = segments[0] ?? preview;
+    const second = segments[1] ?? "";
+    return [first, second].filter(Boolean).join(" ").slice(0, 500);
+  }
+
+  private normalizeGeneratedSummary(text: string): string {
+    const cleaned = text.replace(/\s+/g, " ").trim();
+    if (!cleaned) return "";
+    const segments = cleaned
+      .split(/(?<=[.!?])\s+/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    return (segments.slice(0, 2).join(" ") || cleaned).slice(0, 500);
+  }
+
   /**
    * Start watching specified collections (or all active if none specified)
    */
@@ -298,9 +320,29 @@ export class WatchDaemon {
 
     if (docByHash.size === 0) return;
 
-    const chunks: { hash: string; seq: number; pos: number; title: string; text: string }[] = [];
+    const llm = getDefaultLLM();
+    const chunks: { hash: string; seq: number; pos: number; title: string; text: string; summary: string }[] = [];
     for (const [hash, payload] of docByHash.entries()) {
       const title = extractTitle(payload.body, payload.relativePath);
+      let summary = store.getDocumentSummary(hash);
+      if (!summary) {
+        if (process.env.KINDX_SUMMARY_GENERATOR === "llm") {
+          try {
+            const generated = await llm.generate(
+              `Summarize this document in exactly two concise sentences.\n\nDocument:\n${payload.body.slice(0, 2000)}`,
+              { temperature: 0.1, maxTokens: 140 }
+            );
+            summary = this.normalizeGeneratedSummary(generated?.text ?? "");
+          } catch {
+            // Fall back to deterministic extraction when generation fails.
+          }
+        }
+        if (!summary) {
+          summary = this.fallbackDocumentSummary(payload.body);
+        }
+        store.setDocumentSummary(hash, summary, new Date().toISOString());
+      }
+
       const tokenChunks = await chunkDocumentByTokens(payload.body);
       for (let i = 0; i < tokenChunks.length; i++) {
         const chunk = tokenChunks[i]!;
@@ -310,15 +352,15 @@ export class WatchDaemon {
           pos: chunk.pos,
           title,
           text: chunk.text,
+          summary,
         });
       }
     }
 
     if (chunks.length === 0) return;
 
-    const llm = getDefaultLLM();
     const first = chunks[0]!;
-    const firstEmbedding = await llm.embed(formatDocForEmbedding(first.text, first.title));
+    const firstEmbedding = await llm.embed(formatDocForEmbedding(first.text, first.title, DEFAULT_EMBED_MODEL, first.summary));
     if (!firstEmbedding) return;
     store.ensureVecTable(firstEmbedding.embedding.length);
 
@@ -328,7 +370,9 @@ export class WatchDaemon {
 
     for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
       const batch = chunks.slice(i, i + BATCH_SIZE);
-      const texts = batch.map((chunk) => formatDocForEmbedding(chunk.text, chunk.title));
+      const texts = batch.map((chunk) =>
+        formatDocForEmbedding(chunk.text, chunk.title, DEFAULT_EMBED_MODEL, chunk.summary)
+      );
       let embeddings = await llm.embedBatch(texts);
 
       // Fallback per-item only for failed positions.

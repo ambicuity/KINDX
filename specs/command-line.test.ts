@@ -1530,7 +1530,11 @@ describe("CLI Migrate Chroma Command", () => {
     expect(lsResult.stdout).toContain("doc1");
 
     // Re-embed it
-    const embedResult = await runQmd(["embed"], { dbPath: localDbPath, configDir: localConfigDir });
+    const embedResult = await runQmd(["embed"], {
+      dbPath: localDbPath,
+      configDir: localConfigDir,
+      env: { KINDX_DETERMINISTIC_EMBEDDINGS: "1" },
+    });
     expect(embedResult.exitCode).toBe(0);
 
     // Search it

@@ -51,11 +51,16 @@ export function formatQueryForEmbedding(query: string, modelUri?: string): strin
  * Uses nomic-style format with title and text fields (default).
  * Qwen3-Embedding encodes documents as raw text without special prefixes.
  */
-export function formatDocForEmbedding(text: string, title?: string, modelUri?: string): string {
+export function formatDocForEmbedding(text: string, title?: string, modelUri?: string, summary?: string): string {
   const uri = modelUri ?? process.env.KINDX_EMBED_MODEL ?? DEFAULT_EMBED_MODEL;
+  const normalizedSummary = summary?.trim();
   if (isQwen3EmbeddingModel(uri)) {
     // Qwen3-Embedding: documents are raw text, no task prefix
-    return title ? `${title}\n${text}` : text;
+    const sections = [title, normalizedSummary, text].filter((part): part is string => !!part && part.length > 0);
+    return sections.join("\n");
+  }
+  if (normalizedSummary) {
+    return `summary: ${normalizedSummary} | title: ${title || "none"} | text: ${text}`;
   }
   return `title: ${title || "none"} | text: ${text}`;
 }

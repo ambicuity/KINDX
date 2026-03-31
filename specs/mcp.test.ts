@@ -75,6 +75,16 @@ function initTestDatabase(db: Database): void {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS document_summaries (
+      doc_hash TEXT PRIMARY KEY,
+      summary TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (doc_hash) REFERENCES content(hash) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_document_summaries_created_at ON document_summaries(created_at)`);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
       hash TEXT NOT NULL,
       seq INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +169,13 @@ function seedTestData(db: Database): void {
       INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
       VALUES ('docs', ?, ?, ?, ?, ?, 1)
     `).run(doc.path, doc.title, doc.hash, now, now);
+
+    if (doc.hash === "hash1" || doc.hash === "hash2") {
+      db.prepare(`
+        INSERT INTO document_summaries (doc_hash, summary, created_at)
+        VALUES (?, ?, ?)
+      `).run(doc.hash, `Summary for ${doc.title}.`, now);
+    }
   }
 
   // Add embeddings for vector search
@@ -1125,6 +1142,24 @@ describe("MCP HTTP Transport", () => {
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
+    expect(json.result.structuredContent).toBeDefined();
+    expect(json.result.structuredContent.summary).toContain("Summary for Project README.");
+  });
+
+  test("POST /mcp tools/call multi_get includes summary metadata", async () => {
+    await mcpRequest({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+
+    const { status, json } = await mcpRequest({
+      jsonrpc: "2.0", id: 6, method: "tools/call",
+      params: { name: "multi_get", arguments: { pattern: "readme.md, api.md" } },
+    });
+    expect(status).toBe(200);
+    expect(Array.isArray(json.result.structuredContent.documents)).toBe(true);
+    const readme = json.result.structuredContent.documents.find((doc: any) => doc.file === "docs/readme.md");
+    expect(readme?.summary).toContain("Summary for Project README.");
   });
 
   test("POST /mcp tools/call kindx_feedback stores feedback", async () => {
