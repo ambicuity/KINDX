@@ -1006,6 +1006,7 @@ export type Store = {
   setCachedResult: (cacheKey: string, result: string) => void;
   clearCache: () => void;
   getDocumentSummary: (docHash: string) => string | null;
+  getDocumentSummaries: (docHashes: string[]) => Map<string, string>;
   setDocumentSummary: (docHash: string, summary: string, createdAt: string) => void;
   deleteDocumentSummary: (docHash: string) => void;
 
@@ -1100,6 +1101,7 @@ export function createStore(dbPath?: string): Store {
     setCachedResult: (cacheKey: string, result: string) => setCachedResult(db, cacheKey, result),
     clearCache: () => clearCache(db),
     getDocumentSummary: (docHash: string) => getDocumentSummary(db, docHash),
+    getDocumentSummaries: (docHashes: string[]) => getDocumentSummaries(db, docHashes),
     setDocumentSummary: (docHash: string, summary: string, createdAt: string) => setDocumentSummary(db, docHash, summary, createdAt),
     deleteDocumentSummary: (docHash: string) => deleteDocumentSummary(db, docHash),
 
@@ -2637,6 +2639,17 @@ export function getDocumentSummary(db: Database, docHash: string): string | null
     LIMIT 1
   `).get(docHash) as { summary: string } | undefined;
   return row?.summary ?? null;
+}
+
+export function getDocumentSummaries(db: Database, docHashes: string[]): Map<string, string> {
+  if (docHashes.length === 0) return new Map();
+  const placeholders = docHashes.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT doc_hash, summary
+    FROM document_summaries
+    WHERE doc_hash IN (${placeholders})
+  `).all(...docHashes) as { doc_hash: string; summary: string }[];
+  return new Map(rows.map((row) => [row.doc_hash, row.summary]));
 }
 
 export function setDocumentSummary(db: Database, docHash: string, summary: string, createdAt: string): void {

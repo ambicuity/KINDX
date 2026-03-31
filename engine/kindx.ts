@@ -1565,7 +1565,6 @@ function isLikelyTestRuntime(): boolean {
   return !!(
     process.env.VITEST ||
     process.env.BUN_TEST ||
-    process.env.NODE_ENV === "test" ||
     process.env.CODEX_CI === "1"
   );
 }
@@ -1674,7 +1673,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   let multiChunkDocs = 0;
   let staleDeleted = 0;
 
-  const useTokenChunking = process.env.KINDX_EMBED_TOKEN_CHUNKING === "1";
+  const useTokenChunking = process.env.KINDX_EMBED_TOKEN_CHUNKING !== "0";
   process.stderr.write(`Chunking ${docsForEmbedding.length} documents by ${useTokenChunking ? "token" : "character"} boundaries...\n`);
 
   for (const item of docsForEmbedding) {

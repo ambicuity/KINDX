@@ -542,11 +542,17 @@ Intent-aware lex (C++ performance, not sports):
         skipped: boolean;
         skipReason: string | null;
       }[] = [];
+      const summaryMap = store.getDocumentSummaries(
+        docs
+          .map((result) => result.doc)
+          .filter((doc): doc is typeof doc & { hash: string } => "hash" in doc)
+          .map((doc) => doc.hash)
+      );
 
       for (const result of docs) {
         const docMeta = result.doc;
         const hasFullMeta = "hash" in docMeta;
-        const summary = hasFullMeta ? store.getDocumentSummary(docMeta.hash) : null;
+        const summary = hasFullMeta ? (summaryMap.get(docMeta.hash) ?? null) : null;
         structuredDocuments.push({
           file: docMeta.displayPath,
           title: hasFullMeta ? docMeta.title : null,
