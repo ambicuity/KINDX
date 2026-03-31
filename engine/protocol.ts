@@ -654,8 +654,14 @@ export type HttpServerHandle = {
  * Start MCP server over Streamable HTTP (JSON responses, no SSE).
  * Binds to localhost only. Returns a handle for shutdown and port discovery.
  */
-export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string }): Promise<HttpServerHandle> {
+export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string; watch?: boolean }): Promise<HttpServerHandle> {
   const store = createStore(options?.dbPath);
+  let watchDaemon: { start: (collections?: string[]) => Promise<void>; stop: () => Promise<void> } | null = null;
+  if (options?.watch) {
+    const { WatchDaemon } = await import("./watcher.js");
+    watchDaemon = new WatchDaemon(store);
+    await watchDaemon.start();
+  }
   startDaemonPreload();
 
   // Read token once at startup. Undefined / empty = auth disabled (single-user local mode).
@@ -911,6 +917,10 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    if (watchDaemon) {
+      await watchDaemon.stop();
+      watchDaemon = null;
+    }
     for (const transport of sessions.values()) {
       await transport.close();
     }
