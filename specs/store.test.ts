@@ -2302,12 +2302,42 @@ describe("Integration", () => {
 });
 
 describe("Embedding Delta Utilities", () => {
+  test("legacy content_vectors rebuild path does not duplicate chunk_hash migration", async () => {
+    const store = await createTestStore();
+
+    store.db.exec(`DROP TABLE IF EXISTS content_vectors`);
+    store.db.exec(`
+      CREATE TABLE content_vectors (
+        hash TEXT PRIMARY KEY,
+        pos INTEGER NOT NULL DEFAULT 0,
+        model TEXT NOT NULL,
+        embedded_at TEXT NOT NULL
+      )
+    `);
+    store.close();
+
+    const reopened = createStore(store.dbPath);
+    const tableInfo = reopened.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
+    const columnNames = tableInfo.map((col) => col.name);
+    expect(columnNames).toContain("seq");
+    expect(columnNames).toContain("chunk_hash");
+
+    await cleanupTestDb(reopened);
+  });
+
   test("schema includes chunk_hash in content_vectors", async () => {
     const store = await createTestStore();
     const tableInfo = store.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
     const columnNames = tableInfo.map((col) => col.name);
     expect(columnNames).toContain("chunk_hash");
     await cleanupTestDb(store);
+  });
+
+  test("chunk hashes can include formatted embedding payload context", () => {
+    const body = "Shared body text";
+    const hashWithTitleA = hashChunkContent(formatDocForEmbedding(body, "Title A", "embeddinggemma"));
+    const hashWithTitleB = hashChunkContent(formatDocForEmbedding(body, "Title B", "embeddinggemma"));
+    expect(hashWithTitleA).not.toBe(hashWithTitleB);
   });
 
   test("hashChunkContent is stable and content-sensitive", () => {

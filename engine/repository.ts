@@ -834,7 +834,7 @@ function initializeDatabase(db: Database): void {
       PRIMARY KEY (hash, seq)
     )
   `);
-  if (cvInfo.length > 0 && !hasChunkHashColumn) {
+  if (cvInfo.length > 0 && hasSeqColumn && !hasChunkHashColumn) {
     db.exec(`ALTER TABLE content_vectors ADD COLUMN chunk_hash TEXT`);
   }
 
