@@ -78,9 +78,11 @@ function initTestDatabase(db: Database): void {
     CREATE TABLE IF NOT EXISTS document_summaries (
       doc_hash TEXT PRIMARY KEY,
       summary TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (doc_hash) REFERENCES content(hash) ON DELETE CASCADE
     )
   `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_document_summaries_created_at ON document_summaries(created_at)`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (

@@ -1565,7 +1565,7 @@ function isLikelyTestRuntime(): boolean {
   return !!(
     process.env.VITEST ||
     process.env.BUN_TEST ||
-    process.env.CODEX_CI === "1"
+    process.env.KINDX_DETERMINISTIC_EMBEDDINGS === "1"
   );
 }
 
