@@ -73,6 +73,7 @@ import {
   getDefaultDbPath,
 } from "./repository.js";
 import { disposeDefaultLLM, getDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
+import { preloadModels } from "./preloader.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -2616,6 +2617,7 @@ function showHelp(): void {
   console.log("  kindx feedback --irrelevant ... - Store corrective relevance feedback for retrieval");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
+  console.log("  kindx preload                   - Warm local GGUF models + context pools");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
@@ -3201,6 +3203,23 @@ if (isMain) {
         const size = formatBytes(result.sizeBytes);
         const note = result.refreshed ? "refreshed" : "cached/checked";
         console.log(`- ${result.model} -> ${result.path} (${size}, ${note})`);
+      }
+      break;
+    }
+
+    case "preload": {
+      const result = await preloadModels({ origin: "cli", force: true });
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        const state = result.warmed ? `${c.green}warmed${c.reset}` : `${c.yellow}not warmed${c.reset}`;
+        console.log(`Preload status: ${state}`);
+        console.log(`- embed: ${result.models.embed}`);
+        console.log(`- rerank: ${result.models.rerank}`);
+        console.log(`- expand: ${result.models.expand}`);
+        if (result.lastError) {
+          console.log(`${c.yellow}Last error:${c.reset} ${result.lastError}`);
+        }
       }
       break;
     }
