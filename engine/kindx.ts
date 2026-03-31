@@ -1548,6 +1548,16 @@ function renderProgressBar(percent: number, width: number = 30): string {
   return bar;
 }
 
+function isVecTableCompatible(db: Database, dimensions: number): boolean {
+  const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql?: string } | undefined;
+  if (!tableInfo?.sql) return false;
+  const match = tableInfo.sql.match(/float\[(\d+)\]/);
+  const hasHashSeq = tableInfo.sql.includes("hash_seq");
+  const hasCosine = tableInfo.sql.includes("distance_metric=cosine");
+  const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
+  return existingDims === dimensions && hasHashSeq && hasCosine;
+}
+
 async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
@@ -1569,6 +1579,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     hash: string;
     title: string;
     text: string;
+    embeddingInput: string;
     seq: number;
     pos: number;
     tokens: number;
@@ -1578,6 +1589,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   };
 
   const encoder = new TextEncoder();
+  const allChunks: ChunkCandidate[] = [];
   const changedChunks: ChunkCandidate[] = [];
   let totalChunks = 0;
   let multiChunkDocs = 0;
@@ -1600,27 +1612,31 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       const chunk = chunks[seq]!;
       keepSeqs.add(seq);
       totalChunks++;
-      const chunkHash = hashChunkContent(chunk.text);
+      const embeddingInput = formatDocForEmbedding(chunk.text, title, model);
+      const chunkHash = hashChunkContent(embeddingInput);
+      const candidate: ChunkCandidate = {
+        hash: item.hash,
+        title,
+        text: chunk.text,
+        embeddingInput,
+        seq,
+        pos: chunk.pos,
+        tokens: chunk.tokens,
+        bytes: encoder.encode(embeddingInput).length,
+        displayName: item.path,
+        chunkHash,
+      };
+      allChunks.push(candidate);
       const existingChunk = existingBySeq.get(seq);
 
-      if (existingChunk && existingChunk.chunkHash === chunkHash) {
+      if (existingChunk && existingChunk.model === model && existingChunk.chunkHash === chunkHash) {
         if (existingChunk.pos !== chunk.pos) {
           updateEmbeddingChunkMetadata(db, item.hash, seq, chunk.pos, chunkHash);
         }
         continue;
       }
 
-      changedChunks.push({
-        hash: item.hash,
-        title,
-        text: chunk.text,
-        seq,
-        pos: chunk.pos,
-        tokens: chunk.tokens,
-        bytes: encoder.encode(chunk.text).length,
-        displayName: item.path,
-        chunkHash,
-      });
+      changedChunks.push(candidate);
     }
 
     const staleSeqs = existing
@@ -1631,7 +1647,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     }
   }
 
-  const changedChunkCount = changedChunks.length;
+  let changedChunkCount = changedChunks.length;
   if (changedChunkCount === 0) {
     if (staleDeleted > 0) {
       console.log(`${c.green}✓ No changed chunks. Removed ${staleDeleted} stale chunk embeddings.${c.reset}`);
@@ -1642,11 +1658,38 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     return;
   }
 
+  let vectorTableReset = false;
+  const firstChangedChunk = changedChunks[0];
+  if (firstChangedChunk) {
+    await withLLMSession(async (session) => {
+      const probeResult = await session.embed(firstChangedChunk.embeddingInput, { model, isQuery: false });
+      if (!probeResult) {
+        throw new Error("Failed to determine embedding dimensions");
+      }
+      const wasCompatible = isVecTableCompatible(db, probeResult.embedding.length);
+      ensureVecTable(db, probeResult.embedding.length);
+      if (!wasCompatible) {
+        clearAllEmbeddings(db);
+        vectorTableReset = true;
+      }
+    }, { maxDuration: 2 * 60 * 1000, name: "embed-dimension-probe" });
+  }
+
+  if (vectorTableReset) {
+    changedChunks.splice(0, changedChunks.length, ...allChunks);
+    changedChunkCount = changedChunks.length;
+    staleDeleted = 0;
+  }
+
   const totalChangedBytes = changedChunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
   const totalDocs = docsForEmbedding.length;
-  console.log(`${c.bold}Embedding delta for ${totalDocs} documents${c.reset} ${c.dim}(${changedChunkCount} changed / ${totalChunks} total chunks, ${formatBytes(totalChangedBytes)})${c.reset}`);
+  const modeLabel = vectorTableReset ? "Embedding full rebuild" : "Embedding delta";
+  console.log(`${c.bold}${modeLabel} for ${totalDocs} documents${c.reset} ${c.dim}(${changedChunkCount} changed / ${totalChunks} total chunks, ${formatBytes(totalChangedBytes)})${c.reset}`);
   if (multiChunkDocs > 0) {
     console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
+  }
+  if (vectorTableReset) {
+    console.log(`${c.dim}Vector table was reset due to schema/dimension mismatch; re-embedding all chunks.${c.reset}`);
   }
   console.log(`${c.dim}Model: ${model}${c.reset}\n`);
 
@@ -1656,17 +1699,19 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   const chunksToEmbed: ChunkCandidate[] = [];
 
   for (const chunk of changedChunks) {
-    const reusable = findReusableEmbeddingByChunkHash(db, chunk.chunkHash, model);
-    if (reusable?.embedding) {
-      const source = reusable.embedding;
-      const view = new Float32Array(source.buffer, source.byteOffset, Math.floor(source.byteLength / Float32Array.BYTES_PER_ELEMENT));
-      const copied = new Float32Array(view);
-      insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, copied, model, now, chunk.chunkHash);
-      chunksReused++;
-      bytesProcessed += chunk.bytes;
-    } else {
-      chunksToEmbed.push(chunk);
+    if (!vectorTableReset) {
+      const reusable = findReusableEmbeddingByChunkHash(db, chunk.chunkHash, model);
+      if (reusable?.embedding) {
+        const source = reusable.embedding;
+        const view = new Float32Array(source.buffer, source.byteOffset, Math.floor(source.byteLength / Float32Array.BYTES_PER_ELEMENT));
+        const copied = new Float32Array(view);
+        insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, copied, model, now, chunk.chunkHash);
+        chunksReused++;
+        bytesProcessed += chunk.bytes;
+        continue;
+      }
     }
+    chunksToEmbed.push(chunk);
   }
 
   // Hide cursor during embedding
@@ -1679,8 +1724,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       if (!firstChunk) {
         throw new Error("No chunks available to embed");
       }
-      const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
-      const firstResult = await session.embed(firstText);
+      const firstResult = await session.embed(firstChunk.embeddingInput, { model, isQuery: false });
       if (!firstResult) {
         throw new Error("Failed to get embedding dimensions from first chunk");
       }
@@ -1693,7 +1737,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       for (let batchStart = 0; batchStart < chunksToEmbed.length; batchStart += BATCH_SIZE) {
         const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksToEmbed.length);
         const batch = chunksToEmbed.slice(batchStart, batchEnd);
-        const texts = batch.map((chunk) => formatDocForEmbedding(chunk.text, chunk.title));
+        const texts = batch.map((chunk) => chunk.embeddingInput);
 
         try {
           const embeddings = await session.embedBatch(texts);
@@ -1712,8 +1756,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
         } catch (err) {
           for (const chunk of batch) {
             try {
-              const text = formatDocForEmbedding(chunk.text, chunk.title);
-              const result = await session.embed(text);
+              const result = await session.embed(chunk.embeddingInput, { model, isQuery: false });
               if (result) {
                 insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now, chunk.chunkHash);
                 chunksEmbedded++;
