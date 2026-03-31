@@ -815,6 +815,16 @@ function initializeDatabase(db: Database): void {
     )
   `);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS document_summaries (
+      doc_hash TEXT PRIMARY KEY,
+      summary TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (doc_hash) REFERENCES content(hash) ON DELETE CASCADE
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_document_summaries_created_at ON document_summaries(created_at)`);
+
   // Content vectors
   const cvInfo = db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
   const hasSeqColumn = cvInfo.some(col => col.name === 'seq');
@@ -995,6 +1005,9 @@ export type Store = {
   getCachedResult: (cacheKey: string) => string | null;
   setCachedResult: (cacheKey: string, result: string) => void;
   clearCache: () => void;
+  getDocumentSummary: (docHash: string) => string | null;
+  setDocumentSummary: (docHash: string, summary: string, createdAt: string) => void;
+  deleteDocumentSummary: (docHash: string) => void;
 
   // Cleanup and maintenance
   deleteLLMCache: () => number;
@@ -1086,6 +1099,9 @@ export function createStore(dbPath?: string): Store {
     getCachedResult: (cacheKey: string) => getCachedResult(db, cacheKey),
     setCachedResult: (cacheKey: string, result: string) => setCachedResult(db, cacheKey, result),
     clearCache: () => clearCache(db),
+    getDocumentSummary: (docHash: string) => getDocumentSummary(db, docHash),
+    setDocumentSummary: (docHash: string, summary: string, createdAt: string) => setDocumentSummary(db, docHash, summary, createdAt),
+    deleteDocumentSummary: (docHash: string) => deleteDocumentSummary(db, docHash),
 
     // Cleanup and maintenance
     deleteLLMCache: () => deleteLLMCache(db),
@@ -2611,6 +2627,27 @@ export function getDocumentsForEmbedding(db: Database): EmbeddingDocument[] {
     WHERE d.active = 1
     GROUP BY d.hash
   `).all() as EmbeddingDocument[];
+}
+
+export function getDocumentSummary(db: Database, docHash: string): string | null {
+  const row = db.prepare(`
+    SELECT summary
+    FROM document_summaries
+    WHERE doc_hash = ?
+    LIMIT 1
+  `).get(docHash) as { summary: string } | undefined;
+  return row?.summary ?? null;
+}
+
+export function setDocumentSummary(db: Database, docHash: string, summary: string, createdAt: string): void {
+  db.prepare(`
+    INSERT OR REPLACE INTO document_summaries (doc_hash, summary, created_at)
+    VALUES (?, ?, ?)
+  `).run(docHash, summary, createdAt);
+}
+
+export function deleteDocumentSummary(db: Database, docHash: string): void {
+  db.prepare(`DELETE FROM document_summaries WHERE doc_hash = ?`).run(docHash);
 }
 
 export function getExistingEmbeddingChunksForHash(db: Database, hash: string): ExistingEmbeddingChunk[] {

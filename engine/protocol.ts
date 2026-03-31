@@ -474,6 +474,7 @@ Intent-aware lex (C++ performance, not sports):
       if (result.context) {
         text = `<!-- Context: ${result.context} -->\n\n` + text;
       }
+      const summary = store.getDocumentSummary(result.hash);
 
       return {
         content: [{
@@ -486,6 +487,14 @@ Intent-aware lex (C++ performance, not sports):
             text,
           },
         }],
+        structuredContent: {
+          file: result.displayPath,
+          title: result.title,
+          docid: result.docid,
+          collection: result.collectionName,
+          context: result.context,
+          summary,
+        },
       };
     }
   );
@@ -523,7 +532,32 @@ Intent-aware lex (C++ performance, not sports):
         content.push({ type: "text", text: `Errors:\n${errors.join('\n')}` });
       }
 
+      const structuredDocuments: {
+        file: string;
+        title: string | null;
+        docid: string | null;
+        collection: string | null;
+        context: string | null;
+        summary: string | null;
+        skipped: boolean;
+        skipReason: string | null;
+      }[] = [];
+
       for (const result of docs) {
+        const docMeta = result.doc;
+        const hasFullMeta = "hash" in docMeta;
+        const summary = hasFullMeta ? store.getDocumentSummary(docMeta.hash) : null;
+        structuredDocuments.push({
+          file: docMeta.displayPath,
+          title: hasFullMeta ? docMeta.title : null,
+          docid: hasFullMeta ? docMeta.docid : null,
+          collection: hasFullMeta ? docMeta.collectionName : null,
+          context: hasFullMeta ? docMeta.context : null,
+          summary,
+          skipped: result.skipped,
+          skipReason: result.skipped ? result.skipReason : null,
+        });
+
         if (result.skipped) {
           content.push({
             type: "text",
@@ -559,7 +593,14 @@ Intent-aware lex (C++ performance, not sports):
         });
       }
 
-      return { content };
+      return {
+        content,
+        structuredContent: {
+          pattern,
+          documents: structuredDocuments,
+          errors,
+        },
+      };
     }
   );
 
