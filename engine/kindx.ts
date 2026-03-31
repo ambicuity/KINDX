@@ -2511,6 +2511,7 @@ function parseCLI() {
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
+      watch: { type: "boolean" },
       port: { type: "string" },
     },
     allowPositionals: true,
@@ -2632,7 +2633,7 @@ function showHelp(): void {
   console.log("");
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
-  console.log("  kindx mcp --http [--daemon]     - Run the shared MCP HTTP server");
+  console.log("  kindx mcp --http [--daemon] [--watch] - Run the shared MCP HTTP server");
   console.log("  kindx mcp stop                  - Stop the MCP HTTP daemon");
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
@@ -3304,9 +3305,10 @@ if (isMain) {
           const selfPath = fileURLToPath(import.meta.url);
           const iName = cli.values.index as string | undefined;
           const indexFlag = iName ? ["--index", iName] : [];
+          const watchFlag = cli.values.watch ? ["--watch"] : [];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...indexFlag]
-            : [selfPath, "mcp", "--http", "--port", String(port), ...indexFlag];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag]
+            : [selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -3326,7 +3328,7 @@ if (isMain) {
         process.removeAllListeners("SIGINT");
         const { startMcpHttpServer } = await import("./protocol.js");
         try {
-          await startMcpHttpServer(port, { dbPath: storeDbPathOverride });
+          await startMcpHttpServer(port, { dbPath: storeDbPathOverride, watch: !!cli.values.watch });
         } catch (e: any) {
           if (e?.code === "EADDRINUSE") {
             console.error(`Port ${port} already in use. Try a different port with --port.`);

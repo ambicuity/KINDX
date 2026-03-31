@@ -1266,8 +1266,10 @@ describe("mcp http daemon", () => {
   }
 
   /** Spawn a foreground HTTP server (non-blocking) and return the process */
-  function spawnHttpServer(port: number): import("child_process").ChildProcess {
-    const proc = spawn(process.execPath, [kindxBin, "mcp", "--http", "--port", String(port)], {
+  function spawnHttpServer(port: number, watch = false): import("child_process").ChildProcess {
+    const args = [kindxBin, "mcp", "--http", "--port", String(port)];
+    if (watch) args.push("--watch");
+    const proc = spawn(process.execPath, args, {
       cwd: fixturesDir,
       env: {
         ...process.env,
@@ -1347,6 +1349,24 @@ describe("mcp http daemon", () => {
       expect(body.status).toBe("ok");
       expect(typeof body.warmed).toBe("boolean");
       expect(body.models).toBeDefined();
+    } finally {
+      proc.kill("SIGTERM");
+      await new Promise(r => proc.on("close", r));
+    }
+  });
+
+  test("foreground HTTP server accepts --watch", async () => {
+    const port = randomPort();
+    const proc = spawnHttpServer(port, true);
+
+    try {
+      const ready = await waitForServer(port);
+      expect(ready).toBe(true);
+
+      const res = await fetch(`http://localhost:${port}/health`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe("ok");
     } finally {
       proc.kill("SIGTERM");
       await new Promise(r => proc.on("close", r));

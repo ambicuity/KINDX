@@ -175,9 +175,11 @@ By default, the MCP server uses stdio (launched as a subprocess per client). For
 # Foreground
 kindx mcp --http                # localhost:8181
 kindx mcp --http --port 8080    # custom port
+kindx mcp --http --watch        # start HTTP MCP + live watcher in one process
 
 # Persistent daemon
 kindx mcp --http --daemon       # writes PID to ~/.cache/kindx/mcp.pid
+kindx mcp --http --daemon --watch
 kindx mcp stop                  # terminate via PID file
 kindx status                    # reports "MCP: running (PID ...)"
 ```
