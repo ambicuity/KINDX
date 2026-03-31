@@ -26,6 +26,7 @@ import {
 import type { Store, StructuredSubSearch } from "./repository.js";
 import { getCollection, getGlobalContext, getDefaultCollectionNames } from "./catalogs.js";
 import { disposeDefaultLLM } from "./inference.js";
+import { getPreloadStatus, startDaemonPreload } from "./preloader.js";
 
 // =============================================================================
 // Types for structured content
@@ -655,6 +656,7 @@ export type HttpServerHandle = {
  */
 export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string }): Promise<HttpServerHandle> {
   const store = createStore(options?.dbPath);
+  startDaemonPreload();
 
   // Read token once at startup. Undefined / empty = auth disabled (single-user local mode).
   const mcpToken = process.env.KINDX_MCP_TOKEN?.trim() || null;
@@ -727,7 +729,13 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
     try {
       if (pathname === "/health" && nodeReq.method === "GET") {
-        const body = JSON.stringify({ status: "ok", uptime: Math.floor((Date.now() - startTime) / 1000) });
+        const preload = getPreloadStatus();
+        const body = JSON.stringify({
+          status: "ok",
+          uptime: Math.floor((Date.now() - startTime) / 1000),
+          warmed: preload.warmed,
+          models: preload.models,
+        });
         nodeRes.writeHead(200, { "Content-Type": "application/json" });
         nodeRes.end(body);
         log(`${ts()} GET /health (${Date.now() - reqStart}ms)`);

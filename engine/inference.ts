@@ -383,6 +383,11 @@ export type LlamaCppConfig = {
   rerankModel?: string;
   modelCacheDir?: string;
   /**
+   * Minimum number of embedding/rerank contexts to keep allocated.
+   * Can also be set via KINDX_CONTEXT_POOL_SIZE (default: 2).
+   */
+  contextPoolSize?: number;
+  /**
    * Context size used for query expansion generation contexts.
    * Default: 2048. Can also be set via KINDX_EXPAND_CONTEXT_SIZE.
    */
@@ -451,6 +456,7 @@ export type LlamaCppConfig = {
  */
 // Default inactivity timeout: 5 minutes (keep models warm during typical search sessions)
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_CONTEXT_POOL_SIZE = 2;
 const DEFAULT_EXPAND_CONTEXT_SIZE = 2048;
 const DEFAULT_RERANK_CONTEXT_SIZE = 4096;
 const DEFAULT_LOW_VRAM_THRESHOLD_MB = 6144;
@@ -557,6 +563,7 @@ export class LlamaCpp implements LLM {
   private modelCacheDir: string;
   private rerankContextSize: number;
   private expandContextSize: number;
+  private contextPoolSize: number;
   private lowVramOverride: boolean | undefined;
   private vramBudgetMB: number | null;
   private lowVramThresholdMB: number;
@@ -586,6 +593,11 @@ export class LlamaCpp implements LLM {
     this.generateModelUri = config.generateModel || DEFAULT_GENERATE_MODEL;
     this.rerankModelUri = config.rerankModel || DEFAULT_RERANK_MODEL;
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
+    this.contextPoolSize = resolvePositiveIntWithEnv(
+      config.contextPoolSize,
+      "KINDX_CONTEXT_POOL_SIZE",
+      DEFAULT_CONTEXT_POOL_SIZE
+    );
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
     this.rerankContextSize = resolveRerankContextSize(config.rerankContextSize);
     this.lowVramOverride = config.lowVram ?? parseOptionalBoolean(process.env.KINDX_LOW_VRAM, "KINDX_LOW_VRAM");
@@ -657,6 +669,16 @@ export class LlamaCpp implements LLM {
     return !!(this.embedContexts.length > 0 || this.rerankContexts.length > 0);
   }
 
+  private async targetEmbedContextCount(): Promise<number> {
+    const computed = await this.computeParallelism(150, "embed");
+    return Math.max(this.contextPoolSize, computed);
+  }
+
+  private async targetRerankContextCount(): Promise<number> {
+    const computed = Math.min(await this.computeParallelism(1000, "rerank"), 4);
+    return Math.max(this.contextPoolSize, computed);
+  }
+
   /**
    * Unload idle resources but keep the instance alive for future use.
    *
@@ -675,15 +697,16 @@ export class LlamaCpp implements LLM {
       this.inactivityTimer = null;
     }
 
-    // Dispose contexts first
-    for (const ctx of this.embedContexts) {
+    const keepEmbed = Math.min(this.contextPoolSize, this.embedContexts.length);
+    const embedToDispose = this.embedContexts.splice(keepEmbed);
+    for (const ctx of embedToDispose) {
       await ctx.dispose();
     }
-    this.embedContexts = [];
-    for (const ctx of this.rerankContexts) {
+    const keepRerank = Math.min(this.contextPoolSize, this.rerankContexts.length);
+    const rerankToDispose = this.rerankContexts.splice(keepRerank);
+    for (const ctx of rerankToDispose) {
       await ctx.dispose();
     }
-    this.rerankContexts = [];
 
     // Optionally dispose models too (opt-in)
     if (this.disposeModelsOnInactivity) {
@@ -923,7 +946,8 @@ export class LlamaCpp implements LLM {
   private embedContextsCreatePromise: Promise<LlamaEmbeddingContext[]> | null = null;
 
   private async ensureEmbedContexts(): Promise<LlamaEmbeddingContext[]> {
-    if (this.embedContexts.length > 0) {
+    const target = await this.targetEmbedContextCount();
+    if (this.embedContexts.length >= target) {
       this.touchActivity();
       return this.embedContexts;
     }
@@ -934,10 +958,10 @@ export class LlamaCpp implements LLM {
 
     this.embedContextsCreatePromise = (async () => {
       const model = await this.ensureEmbedModel();
-      // Embed contexts are ~143 MB each (nomic-embed 2048 ctx)
-      const n = await this.computeParallelism(150, "embed");
+      const n = await this.targetEmbedContextCount();
       const threads = await this.threadsPerContext(n);
-      for (let i = 0; i < n; i++) {
+      const missing = Math.max(0, n - this.embedContexts.length);
+      for (let i = 0; i < missing; i++) {
         try {
           this.embedContexts.push(await model.createEmbeddingContext({
             ...(threads > 0 ? { threads } : {}),
@@ -1037,13 +1061,13 @@ export class LlamaCpp implements LLM {
   // Default: 4096 tokens. Raised from 2048 to handle CJK content and longer chunks
   // without truncation crashes. Still far less than auto (40960).
   private async ensureRerankContexts(): Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> {
-    if (this.rerankContexts.length === 0) {
+    if (this.rerankContexts.length < await this.targetRerankContextCount()) {
       const model = await this.ensureRerankModel();
-      // ~960 MB per context with flash attention at default contextSize 4096
-      const n = Math.min(await this.computeParallelism(1000, "rerank"), 4);
+      const n = await this.targetRerankContextCount();
       const rerankContextSize = await this.effectiveRerankContextSize();
       const threads = await this.threadsPerContext(n);
-      for (let i = 0; i < n; i++) {
+      const missing = Math.max(0, n - this.rerankContexts.length);
+      for (let i = 0; i < missing; i++) {
         try {
           this.rerankContexts.push(await model.createRankingContext({
             contextSize: rerankContextSize,
@@ -1068,6 +1092,47 @@ export class LlamaCpp implements LLM {
     }
     this.touchActivity();
     return this.rerankContexts;
+  }
+
+  async warmup(options: { contextPoolSize?: number } = {}): Promise<{
+    warmed: boolean;
+    embed: boolean;
+    rerank: boolean;
+    expand: boolean;
+    embedContexts: number;
+    rerankContexts: number;
+  }> {
+    if (options.contextPoolSize !== undefined) {
+      if (!Number.isInteger(options.contextPoolSize) || options.contextPoolSize <= 0) {
+        throw new Error("warmup contextPoolSize must be a positive integer");
+      }
+      this.contextPoolSize = options.contextPoolSize;
+    }
+    await this.ensureGenerateModel();
+    await this.ensureEmbedContexts();
+    await this.ensureRerankContexts();
+    return this.getWarmStatus();
+  }
+
+  getWarmStatus(): {
+    warmed: boolean;
+    embed: boolean;
+    rerank: boolean;
+    expand: boolean;
+    embedContexts: number;
+    rerankContexts: number;
+  } {
+    const embed = !!this.embedModel && this.embedContexts.length > 0;
+    const rerank = !!this.rerankModel && this.rerankContexts.length > 0;
+    const expand = !!this.generateModel;
+    return {
+      warmed: embed && rerank && expand,
+      embed,
+      rerank,
+      expand,
+      embedContexts: this.embedContexts.length,
+      rerankContexts: this.rerankContexts.length,
+    };
   }
 
   // ==========================================================================

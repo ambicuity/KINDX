@@ -43,6 +43,7 @@ async function runQmd(
       ...process.env,
       INDEX_PATH: dbPath,
       KINDX_CONFIG_DIR: configDir, // Use test config directory
+      KINDX_STARTUP_PRELOAD: "0",
       ...(cacheHome ? { XDG_CACHE_HOME: cacheHome } : {}),
       PWD: workingDir, // Must explicitly set PWD since getPwd() checks this
       ...options.env,
@@ -1272,6 +1273,7 @@ describe("mcp http daemon", () => {
         ...process.env,
         INDEX_PATH: daemonDbPath,
         KINDX_CONFIG_DIR: daemonConfigDir,
+        KINDX_STARTUP_PRELOAD: "0",
         PWD: fixturesDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1343,6 +1345,8 @@ describe("mcp http daemon", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("ok");
+      expect(typeof body.warmed).toBe("boolean");
+      expect(body.models).toBeDefined();
     } finally {
       proc.kill("SIGTERM");
       await new Promise(r => proc.on("close", r));
@@ -1723,5 +1727,21 @@ describe("Remote API Integration", () => {
     expect(rerankCalls.length).toBeGreaterThan(0);
     
     await rm(notesDir, { recursive: true, force: true });
+  });
+});
+
+describe("preload command", () => {
+  test("returns preload status JSON in remote backend mode", async () => {
+    const { stdout, exitCode } = await runQmd(["preload", "--json"], {
+      env: { KINDX_LLM_BACKEND: "remote" },
+    });
+    expect(exitCode).toBe(0);
+    const body = JSON.parse(stdout);
+    expect(typeof body.warmed).toBe("boolean");
+    expect(body.models).toEqual({
+      embed: "unsupported",
+      rerank: "unsupported",
+      expand: "unsupported",
+    });
   });
 });

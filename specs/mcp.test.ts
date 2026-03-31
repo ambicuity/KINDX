@@ -889,6 +889,7 @@ describe("MCP HTTP Transport", () => {
   // Stash original env to restore after tests
   const origIndexPath = process.env.INDEX_PATH;
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
+  const origStartupPreload = process.env.KINDX_STARTUP_PRELOAD;
 
   beforeAll(async () => {
     // Create isolated test database with seeded data
@@ -914,6 +915,7 @@ describe("MCP HTTP Transport", () => {
     // Point createStore() at our test DB
     process.env.INDEX_PATH = httpTestDbPath;
     process.env.KINDX_CONFIG_DIR = httpTestConfigDir;
+    process.env.KINDX_STARTUP_PRELOAD = "0";
 
     handle = await startMcpHttpServer(0, { quiet: true }); // OS-assigned ephemeral port
     baseUrl = `http://localhost:${handle.port}`;
@@ -927,6 +929,8 @@ describe("MCP HTTP Transport", () => {
     else delete process.env.INDEX_PATH;
     if (origConfigDir !== undefined) process.env.KINDX_CONFIG_DIR = origConfigDir;
     else delete process.env.KINDX_CONFIG_DIR;
+    if (origStartupPreload !== undefined) process.env.KINDX_STARTUP_PRELOAD = origStartupPreload;
+    else delete process.env.KINDX_STARTUP_PRELOAD;
 
     // Clean up test files
     try { unlinkSync(httpTestDbPath); } catch { }
@@ -941,13 +945,18 @@ describe("MCP HTTP Transport", () => {
   // Health & routing
   // ---------------------------------------------------------------------------
 
-  test("GET /health returns 200 with status and uptime", async () => {
+  test("GET /health returns warmed readiness details", async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(typeof body.uptime).toBe("number");
+    expect(typeof body.warmed).toBe("boolean");
+    expect(body.models).toBeDefined();
+    expect(typeof body.models.embed).toBe("string");
+    expect(typeof body.models.rerank).toBe("string");
+    expect(typeof body.models.expand).toBe("string");
   });
 
   test("GET /other returns 404", async () => {

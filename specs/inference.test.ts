@@ -117,6 +117,55 @@ describe("LlamaCpp expand context size config", () => {
   });
 });
 
+describe("LlamaCpp context pool config", () => {
+  test("uses default context pool size when unset", () => {
+    const prev = process.env.KINDX_CONTEXT_POOL_SIZE;
+    delete process.env.KINDX_CONTEXT_POOL_SIZE;
+    try {
+      const llm = new LlamaCpp({}) as any;
+      expect(llm.contextPoolSize).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.KINDX_CONTEXT_POOL_SIZE;
+      else process.env.KINDX_CONTEXT_POOL_SIZE = prev;
+    }
+  });
+
+  test("reads context pool size from KINDX_CONTEXT_POOL_SIZE", () => {
+    const prev = process.env.KINDX_CONTEXT_POOL_SIZE;
+    process.env.KINDX_CONTEXT_POOL_SIZE = "3";
+    try {
+      const llm = new LlamaCpp({}) as any;
+      expect(llm.contextPoolSize).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env.KINDX_CONTEXT_POOL_SIZE;
+      else process.env.KINDX_CONTEXT_POOL_SIZE = prev;
+    }
+  });
+
+  test("retains configured pool contexts during idle unload", async () => {
+    const llm = new LlamaCpp({ contextPoolSize: 2 }) as any;
+    const embedA = { dispose: vi.fn().mockResolvedValue(undefined) };
+    const embedB = { dispose: vi.fn().mockResolvedValue(undefined) };
+    const embedC = { dispose: vi.fn().mockResolvedValue(undefined) };
+    const rerankA = { dispose: vi.fn().mockResolvedValue(undefined) };
+    const rerankB = { dispose: vi.fn().mockResolvedValue(undefined) };
+    const rerankC = { dispose: vi.fn().mockResolvedValue(undefined) };
+    llm.embedContexts = [embedA, embedB, embedC];
+    llm.rerankContexts = [rerankA, rerankB, rerankC];
+
+    await llm.unloadIdleResources();
+
+    expect(llm.embedContexts.length).toBe(2);
+    expect(llm.rerankContexts.length).toBe(2);
+    expect(embedA.dispose).not.toHaveBeenCalled();
+    expect(embedB.dispose).not.toHaveBeenCalled();
+    expect(embedC.dispose).toHaveBeenCalledTimes(1);
+    expect(rerankA.dispose).not.toHaveBeenCalled();
+    expect(rerankB.dispose).not.toHaveBeenCalled();
+    expect(rerankC.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("LlamaCpp low VRAM policy", () => {
   const ENV_KEYS = [
     "KINDX_LOW_VRAM",
