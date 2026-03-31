@@ -578,6 +578,7 @@ export class LlamaCpp implements LLM {
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
   private generateModelLoadPromise: Promise<LlamaModel> | null = null;
   private rerankModelLoadPromise: Promise<LlamaModel> | null = null;
+  private rerankContextsCreatePromise: Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> | null = null;
 
   // Inactivity timer for auto-unloading models
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1061,7 +1062,16 @@ export class LlamaCpp implements LLM {
   // Default: 4096 tokens. Raised from 2048 to handle CJK content and longer chunks
   // without truncation crashes. Still far less than auto (40960).
   private async ensureRerankContexts(): Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> {
-    if (this.rerankContexts.length < await this.targetRerankContextCount()) {
+    const target = await this.targetRerankContextCount();
+    if (this.rerankContexts.length >= target) {
+      this.touchActivity();
+      return this.rerankContexts;
+    }
+    if (this.rerankContextsCreatePromise) {
+      return await this.rerankContextsCreatePromise;
+    }
+
+    this.rerankContextsCreatePromise = (async () => {
       const model = await this.ensureRerankModel();
       const n = await this.targetRerankContextCount();
       const rerankContextSize = await this.effectiveRerankContextSize();
@@ -1089,9 +1099,15 @@ export class LlamaCpp implements LLM {
           break;
         }
       }
+      this.touchActivity();
+      return this.rerankContexts;
+    })();
+
+    try {
+      return await this.rerankContextsCreatePromise;
+    } finally {
+      this.rerankContextsCreatePromise = null;
     }
-    this.touchActivity();
-    return this.rerankContexts;
   }
 
   async warmup(options: { contextPoolSize?: number } = {}): Promise<{
@@ -1615,6 +1631,7 @@ export class LlamaCpp implements LLM {
     this.embedContextsCreatePromise = null;
     this.generateModelLoadPromise = null;
     this.rerankModelLoadPromise = null;
+    this.rerankContextsCreatePromise = null;
   }
 }
 

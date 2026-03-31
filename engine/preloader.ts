@@ -40,15 +40,6 @@ function setModelState(state: ModelWarmState): void {
   };
 }
 
-function contextPoolSizeFromEnv(): number {
-  const raw = process.env.KINDX_CONTEXT_POOL_SIZE?.trim();
-  if (!raw) return 2;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isInteger(parsed) && parsed > 0) return parsed;
-  process.stderr.write(`KINDX Warning: invalid KINDX_CONTEXT_POOL_SIZE="${raw}", using 2.\n`);
-  return 2;
-}
-
 async function installVitestCleanupHook(): Promise<void> {
   const isLikelyTestRuntime = !!(process.env.VITEST || process.env.BUN_TEST || process.env.NODE_ENV === "test");
   if (!isLikelyTestRuntime) return;
@@ -76,8 +67,11 @@ export async function preloadModels(options: {
   origin?: "daemon" | "cli" | "manual";
   force?: boolean;
 } = {}): Promise<PreloadStatus> {
-  if (preloadPromise && !options.force) {
+  if (preloadPromise) {
     return preloadPromise;
+  }
+  if (preloadStatus.warmed && !options.force) {
+    return getPreloadStatus();
   }
 
   preloadStatus = {
@@ -106,8 +100,9 @@ export async function preloadModels(options: {
         return getPreloadStatus();
       }
 
-      const contextPoolSize = options.contextPoolSize ?? contextPoolSizeFromEnv();
-      const warm = await llm.warmup({ contextPoolSize });
+      const warm = options.contextPoolSize !== undefined
+        ? await llm.warmup({ contextPoolSize: options.contextPoolSize })
+        : await llm.warmup();
       preloadStatus = {
         ...preloadStatus,
         warmed: warm.warmed,
