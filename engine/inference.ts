@@ -1118,15 +1118,23 @@ export class LlamaCpp implements LLM {
     embedContexts: number;
     rerankContexts: number;
   }> {
+    let requestedPoolSize: number | undefined;
     if (options.contextPoolSize !== undefined) {
       if (!Number.isInteger(options.contextPoolSize) || options.contextPoolSize <= 0) {
         throw new Error("warmup contextPoolSize must be a positive integer");
       }
-      this.contextPoolSize = options.contextPoolSize;
+      requestedPoolSize = options.contextPoolSize;
     }
     await this.ensureGenerateModel();
     await this.ensureEmbedContexts();
     await this.ensureRerankContexts();
+    if (requestedPoolSize !== undefined && requestedPoolSize !== this.contextPoolSize) {
+      // Apply pool resize after initial warmup has settled to avoid changing
+      // allocation targets while concurrent requests may still be initializing.
+      this.contextPoolSize = requestedPoolSize;
+      await this.ensureEmbedContexts();
+      await this.ensureRerankContexts();
+    }
     return this.getWarmStatus();
   }
 

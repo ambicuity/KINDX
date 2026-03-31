@@ -53,6 +53,9 @@ async function installVitestCleanupHook(): Promise<void> {
   }
 }
 
+// Intentional import-time side-effect: in Vitest/Bun test environments we must
+// register afterAll() immediately so disposeDefaultLLM() runs on test shutdown.
+// `void` explicitly discards the async result because hook registration is best-effort.
 void installVitestCleanupHook();
 
 export function getPreloadStatus(): PreloadStatus {
