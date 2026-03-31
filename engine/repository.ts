@@ -168,6 +168,10 @@ export function isInsideCodeFence(pos: number, fences: CodeFenceRegion[]): boole
   return fences.some(f => pos > f.start && pos < f.end);
 }
 
+function isHeadingBreakPoint(bp: BreakPoint): boolean {
+  return /^h[1-6]$/.test(bp.type);
+}
+
 /**
  * Find the best cut position using scored break points with distance decay.
  *
@@ -189,8 +193,10 @@ export function findBestCutoff(
   codeFences: CodeFenceRegion[] = []
 ): number {
   const windowStart = targetCharPos - windowChars;
-  let bestScore = -1;
-  let bestPos = targetCharPos;
+  let bestHeadingScore = -1;
+  let bestHeadingPos = targetCharPos;
+  let bestFallbackScore = -1;
+  let bestFallbackPos = targetCharPos;
 
   for (const bp of breakPoints) {
     if (bp.pos < windowStart) continue;
@@ -210,13 +216,22 @@ export function findBestCutoff(
     const multiplier = 1.0 - (normalizedDist * normalizedDist) * decayFactor;
     const finalScore = bp.score * multiplier;
 
-    if (finalScore > bestScore) {
-      bestScore = finalScore;
-      bestPos = bp.pos;
+    if (isHeadingBreakPoint(bp) && bp.score >= 30 && finalScore > bestHeadingScore) {
+      bestHeadingScore = finalScore;
+      bestHeadingPos = bp.pos;
+      continue;
+    }
+    if (finalScore > bestFallbackScore) {
+      bestFallbackScore = finalScore;
+      bestFallbackPos = bp.pos;
     }
   }
 
-  return bestPos;
+  // Prefer heading boundaries for positional stability; fallback to normal scoring otherwise.
+  if (bestHeadingScore >= 0) {
+    return bestHeadingPos;
+  }
+  return bestFallbackPos;
 }
 
 // Hybrid query: strong BM25 signal detection thresholds
@@ -803,6 +818,7 @@ function initializeDatabase(db: Database): void {
   // Content vectors
   const cvInfo = db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
   const hasSeqColumn = cvInfo.some(col => col.name === 'seq');
+  const hasChunkHashColumn = cvInfo.some(col => col.name === 'chunk_hash');
   if (cvInfo.length > 0 && !hasSeqColumn) {
     db.exec(`DROP TABLE IF EXISTS content_vectors`);
     db.exec(`DROP TABLE IF EXISTS vectors_vec`);
@@ -814,9 +830,13 @@ function initializeDatabase(db: Database): void {
       pos INTEGER NOT NULL DEFAULT 0,
       model TEXT NOT NULL,
       embedded_at TEXT NOT NULL,
+      chunk_hash TEXT,
       PRIMARY KEY (hash, seq)
     )
   `);
+  if (cvInfo.length > 0 && !hasChunkHashColumn) {
+    db.exec(`ALTER TABLE content_vectors ADD COLUMN chunk_hash TEXT`);
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS feedback (
@@ -1236,6 +1256,20 @@ export type SearchResult = DocumentResult & {
   chunkPos?: number;          // Character position of matching chunk (for vector search)
 };
 
+export type EmbeddingDocument = {
+  hash: string;
+  body: string;
+  path: string;
+  title: string;
+};
+
+export type ExistingEmbeddingChunk = {
+  seq: number;
+  pos: number;
+  chunkHash: string | null;
+  model: string;
+};
+
 /**
  * Ranked result for RRF fusion (simplified, used internally)
  */
@@ -1483,6 +1517,12 @@ export function vacuumDatabase(db: Database): void {
 // =============================================================================
 
 export async function hashContent(content: string): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update(content);
+  return hash.digest("hex");
+}
+
+export function hashChunkContent(content: string): string {
   const hash = createHash("sha256");
   hash.update(content);
   return hash.digest("hex");
@@ -2563,6 +2603,75 @@ export function getHashesForEmbedding(db: Database): { hash: string; body: strin
   `).all() as { hash: string; body: string; path: string }[];
 }
 
+export function getDocumentsForEmbedding(db: Database): EmbeddingDocument[] {
+  return db.prepare(`
+    SELECT d.hash, c.doc as body, MIN(d.path) as path, MIN(d.title) as title
+    FROM documents d
+    JOIN content c ON d.hash = c.hash
+    WHERE d.active = 1
+    GROUP BY d.hash
+  `).all() as EmbeddingDocument[];
+}
+
+export function getExistingEmbeddingChunksForHash(db: Database, hash: string): ExistingEmbeddingChunk[] {
+  return db.prepare(`
+    SELECT seq, pos, chunk_hash as chunkHash, model
+    FROM content_vectors
+    WHERE hash = ?
+    ORDER BY seq
+  `).all(hash) as ExistingEmbeddingChunk[];
+}
+
+export function updateEmbeddingChunkMetadata(
+  db: Database,
+  hash: string,
+  seq: number,
+  pos: number,
+  chunkHash: string
+): void {
+  db.prepare(`
+    UPDATE content_vectors
+    SET pos = ?, chunk_hash = ?
+    WHERE hash = ? AND seq = ?
+  `).run(pos, chunkHash, hash, seq);
+}
+
+export function deleteEmbeddingsForHashSeqs(db: Database, hash: string, seqs: number[]): number {
+  if (seqs.length === 0) return 0;
+
+  const vecPlaceholders = seqs.map(() => '?').join(',');
+  const seqPlaceholders = seqs.map(() => '?').join(',');
+  const hashSeqs = seqs.map(seq => `${hash}_${seq}`);
+
+  db.prepare(`DELETE FROM vectors_vec WHERE hash_seq IN (${vecPlaceholders})`).run(...hashSeqs);
+  const result = db.prepare(`
+    DELETE FROM content_vectors
+    WHERE hash = ? AND seq IN (${seqPlaceholders})
+  `).run(hash, ...seqs);
+  return result.changes;
+}
+
+export function findReusableEmbeddingByChunkHash(
+  db: Database,
+  chunkHash: string,
+  model: string
+): { embedding: Buffer; sourceHashSeq: string } | null {
+  const tableExists = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'
+  `).get();
+  if (!tableExists) {
+    return null;
+  }
+  const row = db.prepare(`
+    SELECT vv.hash_seq as sourceHashSeq, vv.embedding
+    FROM content_vectors cv
+    JOIN vectors_vec vv ON vv.hash_seq = cv.hash || '_' || cv.seq
+    WHERE cv.chunk_hash = ? AND cv.model = ?
+    LIMIT 1
+  `).get(chunkHash, model) as { sourceHashSeq: string; embedding: Buffer } | undefined;
+  return row ?? null;
+}
+
 /**
  * Clear all embeddings from the database (force re-index).
  * Deletes all rows from content_vectors and drops the vectors_vec table.
@@ -2583,14 +2692,18 @@ export function insertEmbedding(
   pos: number,
   embedding: Float32Array,
   model: string,
-  embeddedAt: string
+  embeddedAt: string,
+  chunkHash?: string
 ): void {
   const hashSeq = `${hash}_${seq}`;
   const insertVecStmt = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
-  const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`);
+  const insertContentVectorStmt = db.prepare(`
+    INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at, chunk_hash)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
 
   insertVecStmt.run(hashSeq, embedding);
-  insertContentVectorStmt.run(hash, seq, pos, model, embeddedAt);
+  insertContentVectorStmt.run(hash, seq, pos, model, embeddedAt, chunkHash ?? null);
 }
 
 // =============================================================================

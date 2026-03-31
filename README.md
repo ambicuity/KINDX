@@ -564,12 +564,14 @@ collections:
 ### Vector Index Generation
 
 ```bash
-# Embed all indexed documents (900 tokens/chunk, 15% overlap)
+# Embed changed/new chunks only (900 tokens/chunk, 15% overlap)
 kindx embed
 
 # Force re-embed entire corpus
 kindx embed -f
 ```
+
+`kindx embed` performs chunk-level incremental embedding. Progress is reported as `N changed / M total chunks`, and unchanged chunks are reused when possible.
 
 ### Context Management
 
@@ -745,6 +747,7 @@ erDiagram
         text hash FK
         integer seq
         integer pos
+        text chunk_hash
         blob embedding
     }
     vectors_vec {

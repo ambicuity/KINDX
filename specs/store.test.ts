@@ -24,6 +24,7 @@ import {
   getPwd,
   getRealPath,
   hashContent,
+  hashChunkContent,
   extractTitle,
   formatQueryForEmbedding,
   formatDocForEmbedding,
@@ -33,6 +34,12 @@ import {
   findCodeFences,
   isInsideCodeFence,
   findBestCutoff,
+  getDocumentsForEmbedding,
+  getExistingEmbeddingChunksForHash,
+  updateEmbeddingChunkMetadata,
+  deleteEmbeddingsForHashSeqs,
+  findReusableEmbeddingByChunkHash,
+  insertEmbedding,
   type BreakPoint,
   type CodeFenceRegion,
   reciprocalRankFusion,
@@ -893,6 +900,15 @@ describe("findBestCutoff", () => {
     // newline at 195: dist=5, mult=0.998, final=0.998
     const cutoff = findBestCutoff(breakPoints, 200, 100, 0.7);
     expect(cutoff).toBe(150); // h1 wins easily
+  });
+
+  test("prefers heading breakpoints over non-heading breaks for stability", () => {
+    const breakPoints: BreakPoint[] = [
+      { pos: 130, score: 50, type: "h6" },
+      { pos: 198, score: 60, type: "hr" },
+    ];
+    const cutoff = findBestCutoff(breakPoints, 200, 100, 0.7);
+    expect(cutoff).toBe(130);
   });
 
   test("returns target position when no breaks in window", () => {
@@ -2282,6 +2298,105 @@ describe("Integration", () => {
 
     await cleanupTestDb(store1);
     await cleanupTestDb(store2);
+  });
+});
+
+describe("Embedding Delta Utilities", () => {
+  test("schema includes chunk_hash in content_vectors", async () => {
+    const store = await createTestStore();
+    const tableInfo = store.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
+    const columnNames = tableInfo.map((col) => col.name);
+    expect(columnNames).toContain("chunk_hash");
+    await cleanupTestDb(store);
+  });
+
+  test("hashChunkContent is stable and content-sensitive", () => {
+    const a = hashChunkContent("hello world");
+    const b = hashChunkContent("hello world");
+    const c = hashChunkContent("hello world!");
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+  });
+
+  test("embedding chunk metadata helpers support update and deletion", async () => {
+    const store = await createTestStore();
+    const collectionName = await createTestCollection();
+
+    const hash = "delta_hash_1";
+    await insertTestDocument(store.db, collectionName, {
+      name: "delta",
+      hash,
+      body: "delta body",
+      filepath: "/test/delta.md",
+      displayPath: "delta.md",
+    });
+
+    store.ensureVecTable(8);
+    insertEmbedding(store.db, hash, 0, 0, new Float32Array(8).fill(0.1), "embeddinggemma", new Date().toISOString(), "h0");
+    insertEmbedding(store.db, hash, 1, 10, new Float32Array(8).fill(0.2), "embeddinggemma", new Date().toISOString(), "h1");
+
+    let rows = getExistingEmbeddingChunksForHash(store.db, hash);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.chunkHash).toBe("h0");
+    expect(rows[1]!.chunkHash).toBe("h1");
+
+    updateEmbeddingChunkMetadata(store.db, hash, 1, 12, "h1-updated");
+    rows = getExistingEmbeddingChunksForHash(store.db, hash);
+    expect(rows[1]!.pos).toBe(12);
+    expect(rows[1]!.chunkHash).toBe("h1-updated");
+
+    const deleted = deleteEmbeddingsForHashSeqs(store.db, hash, [0]);
+    expect(deleted).toBe(1);
+    rows = getExistingEmbeddingChunksForHash(store.db, hash);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.seq).toBe(1);
+
+    await cleanupTestDb(store);
+  });
+
+  test("findReusableEmbeddingByChunkHash returns reusable vector rows by model", async () => {
+    const store = await createTestStore();
+    const collectionName = await createTestCollection();
+
+    const hash = "reuse_hash_1";
+    await insertTestDocument(store.db, collectionName, {
+      name: "reuse",
+      hash,
+      body: "reuse body",
+      filepath: "/test/reuse.md",
+      displayPath: "reuse.md",
+    });
+
+    store.ensureVecTable(8);
+    insertEmbedding(store.db, hash, 0, 0, new Float32Array(8).fill(0.5), "embeddinggemma", new Date().toISOString(), "shared_chunk_hash");
+
+    const reusable = findReusableEmbeddingByChunkHash(store.db, "shared_chunk_hash", "embeddinggemma");
+    expect(reusable).not.toBeNull();
+    expect(reusable?.sourceHashSeq).toBe(`${hash}_0`);
+    expect(reusable?.embedding.byteLength).toBeGreaterThan(0);
+
+    const missingModel = findReusableEmbeddingByChunkHash(store.db, "shared_chunk_hash", "other-model");
+    expect(missingModel).toBeNull();
+
+    await cleanupTestDb(store);
+  });
+
+  test("getDocumentsForEmbedding returns active document payloads", async () => {
+    const store = await createTestStore();
+    const collectionName = await createTestCollection();
+    const createdAt = new Date().toISOString();
+    const hash = await hashContent("doc body");
+    store.insertContent(hash, "doc body", createdAt);
+    store.insertDocument(collectionName, "active.md", "Active", hash, createdAt, createdAt);
+    store.deactivateDocument(collectionName, "active.md");
+    store.insertDocument(collectionName, "active-2.md", "Active 2", hash, createdAt, createdAt);
+
+    const docs = getDocumentsForEmbedding(store.db);
+    expect(docs).toHaveLength(1);
+    expect(docs[0]!.hash).toBe(hash);
+    expect(docs[0]!.path).toBe("active-2.md");
+
+    await cleanupTestDb(store);
   });
 });
 

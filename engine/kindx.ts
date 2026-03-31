@@ -24,11 +24,16 @@ import {
   isDocid,
   matchFilesByGlob,
   getHashesNeedingEmbedding,
-  getHashesForEmbedding,
+  getDocumentsForEmbedding,
+  getExistingEmbeddingChunksForHash,
+  updateEmbeddingChunkMetadata,
+  deleteEmbeddingsForHashSeqs,
+  findReusableEmbeddingByChunkHash,
   clearAllEmbeddings,
   insertEmbedding,
   getStatus,
   hashContent,
+  hashChunkContent,
   extractTitle,
   formatDocForEmbedding,
   chunkDocumentByTokens,
@@ -1553,162 +1558,212 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     clearAllEmbeddings(db);
   }
 
-  // Find unique hashes that need embedding (from active documents)
-  const hashesToEmbed = getHashesForEmbedding(db);
-
-  if (hashesToEmbed.length === 0) {
-    console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
+  const docsForEmbedding = getDocumentsForEmbedding(db);
+  if (docsForEmbedding.length === 0) {
+    console.log(`${c.green}✓ No active documents to embed.${c.reset}`);
     closeDb();
     return;
   }
 
-  // Prepare documents with chunks
-  type ChunkItem = { hash: string; title: string; text: string; seq: number; pos: number; tokens: number; bytes: number; displayName: string };
-  const allChunks: ChunkItem[] = [];
+  type ChunkCandidate = {
+    hash: string;
+    title: string;
+    text: string;
+    seq: number;
+    pos: number;
+    tokens: number;
+    bytes: number;
+    displayName: string;
+    chunkHash: string;
+  };
+
+  const encoder = new TextEncoder();
+  const changedChunks: ChunkCandidate[] = [];
+  let totalChunks = 0;
   let multiChunkDocs = 0;
+  let staleDeleted = 0;
 
-  // Chunk all documents using actual token counts
-  process.stderr.write(`Chunking ${hashesToEmbed.length} documents by token count...\n`);
-  for (const item of hashesToEmbed) {
-    const encoder = new TextEncoder();
+  process.stderr.write(`Chunking ${docsForEmbedding.length} documents by token count...\n`);
+
+  for (const item of docsForEmbedding) {
     const bodyBytes = encoder.encode(item.body).length;
-    if (bodyBytes === 0) continue; // Skip empty
+    if (bodyBytes === 0) continue;
 
-    const title = extractTitle(item.body, item.path);
-    const displayName = item.path;
-    const chunks = await chunkDocumentByTokens(item.body);  // Uses actual tokenizer
-
+    const title = item.title || extractTitle(item.body, item.path);
+    const chunks = await chunkDocumentByTokens(item.body);
+    const existing = getExistingEmbeddingChunksForHash(db, item.hash);
+    const existingBySeq = new Map(existing.map((row) => [row.seq, row]));
+    const keepSeqs = new Set<number>();
     if (chunks.length > 1) multiChunkDocs++;
 
     for (let seq = 0; seq < chunks.length; seq++) {
-      allChunks.push({
+      const chunk = chunks[seq]!;
+      keepSeqs.add(seq);
+      totalChunks++;
+      const chunkHash = hashChunkContent(chunk.text);
+      const existingChunk = existingBySeq.get(seq);
+
+      if (existingChunk && existingChunk.chunkHash === chunkHash) {
+        if (existingChunk.pos !== chunk.pos) {
+          updateEmbeddingChunkMetadata(db, item.hash, seq, chunk.pos, chunkHash);
+        }
+        continue;
+      }
+
+      changedChunks.push({
         hash: item.hash,
         title,
-        text: chunks[seq]!.text, // Chunk is guaranteed to exist by seq loop
+        text: chunk.text,
         seq,
-        pos: chunks[seq]!.pos,
-        tokens: chunks[seq]!.tokens,
-        bytes: encoder.encode(chunks[seq]!.text).length,
-        displayName,
+        pos: chunk.pos,
+        tokens: chunk.tokens,
+        bytes: encoder.encode(chunk.text).length,
+        displayName: item.path,
+        chunkHash,
       });
+    }
+
+    const staleSeqs = existing
+      .map((row) => row.seq)
+      .filter((seq) => !keepSeqs.has(seq));
+    if (staleSeqs.length > 0) {
+      staleDeleted += deleteEmbeddingsForHashSeqs(db, item.hash, staleSeqs);
     }
   }
 
-  if (allChunks.length === 0) {
-    console.log(`${c.green}✓ No non-empty documents to embed.${c.reset}`);
+  const changedChunkCount = changedChunks.length;
+  if (changedChunkCount === 0) {
+    if (staleDeleted > 0) {
+      console.log(`${c.green}✓ No changed chunks. Removed ${staleDeleted} stale chunk embeddings.${c.reset}`);
+    } else {
+      console.log(`${c.green}✓ No changed chunks. 0/${totalChunks} need embedding.${c.reset}`);
+    }
     closeDb();
     return;
   }
 
-  const totalBytes = allChunks.reduce((sum, chk) => sum + chk.bytes, 0);
-  const totalChunks = allChunks.length;
-  const totalDocs = hashesToEmbed.length;
-
-  console.log(`${c.bold}Embedding ${totalDocs} documents${c.reset} ${c.dim}(${totalChunks} chunks, ${formatBytes(totalBytes)})${c.reset}`);
+  const totalChangedBytes = changedChunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
+  const totalDocs = docsForEmbedding.length;
+  console.log(`${c.bold}Embedding delta for ${totalDocs} documents${c.reset} ${c.dim}(${changedChunkCount} changed / ${totalChunks} total chunks, ${formatBytes(totalChangedBytes)})${c.reset}`);
   if (multiChunkDocs > 0) {
     console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
   }
   console.log(`${c.dim}Model: ${model}${c.reset}\n`);
 
+  let chunksReused = 0;
+  let errors = 0;
+  let bytesProcessed = 0;
+  const chunksToEmbed: ChunkCandidate[] = [];
+
+  for (const chunk of changedChunks) {
+    const reusable = findReusableEmbeddingByChunkHash(db, chunk.chunkHash, model);
+    if (reusable?.embedding) {
+      const source = reusable.embedding;
+      const view = new Float32Array(source.buffer, source.byteOffset, Math.floor(source.byteLength / Float32Array.BYTES_PER_ELEMENT));
+      const copied = new Float32Array(view);
+      insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, copied, model, now, chunk.chunkHash);
+      chunksReused++;
+      bytesProcessed += chunk.bytes;
+    } else {
+      chunksToEmbed.push(chunk);
+    }
+  }
+
   // Hide cursor during embedding
   cursor.hide();
 
-  // Wrap all LLM embedding operations in a session for lifecycle management
-  // Use 30 minute timeout for large collections
-  await withLLMSession(async (session) => {
-    // Get embedding dimensions from first chunk
-    progress.indeterminate();
-    const firstChunk = allChunks[0];
-    if (!firstChunk) {
-      throw new Error("No chunks available to embed");
-    }
-    const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
-    const firstResult = await session.embed(firstText);
-    if (!firstResult) {
-      throw new Error("Failed to get embedding dimensions from first chunk");
-    }
-    ensureVecTable(db, firstResult.embedding.length);
+  if (chunksToEmbed.length > 0) {
+    await withLLMSession(async (session) => {
+      progress.indeterminate();
+      const firstChunk = chunksToEmbed[0];
+      if (!firstChunk) {
+        throw new Error("No chunks available to embed");
+      }
+      const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
+      const firstResult = await session.embed(firstText);
+      if (!firstResult) {
+        throw new Error("Failed to get embedding dimensions from first chunk");
+      }
+      ensureVecTable(db, firstResult.embedding.length);
 
-    let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
-    const startTime = Date.now();
+      const startTime = Date.now();
+      const BATCH_SIZE = 32;
+      let chunksEmbedded = 0;
 
-    // Batch embedding for better throughput
-    // Process in batches of 32 to balance memory usage and efficiency
-    const BATCH_SIZE = 32;
+      for (let batchStart = 0; batchStart < chunksToEmbed.length; batchStart += BATCH_SIZE) {
+        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksToEmbed.length);
+        const batch = chunksToEmbed.slice(batchStart, batchEnd);
+        const texts = batch.map((chunk) => formatDocForEmbedding(chunk.text, chunk.title));
 
-    for (let batchStart = 0; batchStart < allChunks.length; batchStart += BATCH_SIZE) {
-      const batchEnd = Math.min(batchStart + BATCH_SIZE, allChunks.length);
-      const batch = allChunks.slice(batchStart, batchEnd);
-
-      // Format texts for embedding
-      const texts = batch.map(chunk => formatDocForEmbedding(chunk.text, chunk.title));
-
-      try {
-        // Batch embed all texts at once
-        const embeddings = await session.embedBatch(texts);
-
-        // Insert each embedding
-        for (let i = 0; i < batch.length; i++) {
-          const chunk = batch[i]!;
-          const embedding = embeddings[i];
-
-          if (embedding) {
-            insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now);
-            chunksEmbedded++;
-          } else {
-            errors++;
-            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
-          }
-          bytesProcessed += chunk.bytes;
-        }
-      } catch (err) {
-        // If batch fails, try individual embeddings as fallback
-        for (const chunk of batch) {
-          try {
-            const text = formatDocForEmbedding(chunk.text, chunk.title);
-            const result = await session.embed(text);
-            if (result) {
-              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
+        try {
+          const embeddings = await session.embedBatch(texts);
+          for (let i = 0; i < batch.length; i++) {
+            const chunk = batch[i]!;
+            const embedding = embeddings[i];
+            if (embedding) {
+              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now, chunk.chunkHash);
               chunksEmbedded++;
             } else {
               errors++;
+              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
             }
-          } catch (innerErr) {
-            errors++;
-            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
+            bytesProcessed += chunk.bytes;
           }
-          bytesProcessed += chunk.bytes;
+        } catch (err) {
+          for (const chunk of batch) {
+            try {
+              const text = formatDocForEmbedding(chunk.text, chunk.title);
+              const result = await session.embed(text);
+              if (result) {
+                insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now, chunk.chunkHash);
+                chunksEmbedded++;
+              } else {
+                errors++;
+              }
+            } catch (innerErr) {
+              errors++;
+              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
+            }
+            bytesProcessed += chunk.bytes;
+          }
         }
+
+        const percent = totalChangedBytes > 0 ? (bytesProcessed / totalChangedBytes) * 100 : 100;
+        progress.set(percent);
+        const elapsed = (Date.now() - startTime) / 1000;
+        const bytesPerSec = bytesProcessed / Math.max(elapsed, 0.001);
+        const remainingBytes = Math.max(0, totalChangedBytes - bytesProcessed);
+        const etaSec = remainingBytes / Math.max(bytesPerSec, 1);
+        const bar = renderProgressBar(percent);
+        const percentStr = percent.toFixed(0).padStart(3);
+        const throughput = `${formatBytes(bytesPerSec)}/s`;
+        const eta = elapsed > 2 ? formatETA(etaSec) : "...";
+        const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
+        if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${bytesProcessed > 0 ? Math.min(chunksEmbedded + chunksReused, changedChunkCount) : chunksReused}/${changedChunkCount}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
       }
 
-      const percent = (bytesProcessed / totalBytes) * 100;
-      progress.set(percent);
-
-      const elapsed = (Date.now() - startTime) / 1000;
-      const bytesPerSec = bytesProcessed / elapsed;
-      const remainingBytes = totalBytes - bytesProcessed;
-      const etaSec = remainingBytes / bytesPerSec;
-
-      const bar = renderProgressBar(percent);
-      const percentStr = percent.toFixed(0).padStart(3);
-      const throughput = `${formatBytes(bytesPerSec)}/s`;
-      const eta = elapsed > 2 ? formatETA(etaSec) : "...";
-      const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
-
-      if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
-    }
-
+      progress.clear();
+      cursor.show();
+      const totalTimeSec = (Date.now() - startTime) / 1000;
+      const avgThroughput = formatBytes(totalChangedBytes / Math.max(totalTimeSec, 0.001));
+      console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
+      console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksEmbedded}${c.reset} embedded, ${c.bold}${chunksReused}${c.reset} reused) out of ${c.bold}${totalChunks}${c.reset} total in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+      if (staleDeleted > 0) {
+        console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
+      }
+      if (errors > 0) {
+        console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
+      }
+    }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
+  } else {
     progress.clear();
     cursor.show();
-    const totalTimeSec = (Date.now() - startTime) / 1000;
-    const avgThroughput = formatBytes(totalBytes / totalTimeSec);
-
     console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-    console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
-    if (errors > 0) {
-      console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
+    console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksReused}${c.reset} reused, ${c.bold}0${c.reset} embedded) out of ${c.bold}${totalChunks}${c.reset} total.`);
+    if (staleDeleted > 0) {
+      console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
     }
-  }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
+  }
 
   closeDb();
 }
