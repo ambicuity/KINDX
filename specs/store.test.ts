@@ -1253,6 +1253,41 @@ describe("FTS Search", () => {
     await cleanupTestDb(store);
   });
 
+  test("searchFTS handles contiguous CJK text with mid-sentence keyword queries", async () => {
+    const store = await createTestStore();
+    const collectionName = await createTestCollection();
+
+    await insertTestDocument(store.db, collectionName, {
+      name: "zh-cjk",
+      title: "中文检索示例",
+      body: "数据库性能优化需要索引设计和事务管理",
+      displayPath: "cjk/zh.md",
+    });
+    await insertTestDocument(store.db, collectionName, {
+      name: "ja-cjk",
+      title: "日本語検索サンプル",
+      body: "データベース最適化にはインデックス設計とトランザクション管理が必要です",
+      displayPath: "cjk/ja.md",
+    });
+    await insertTestDocument(store.db, collectionName, {
+      name: "ko-cjk",
+      title: "한국어 검색 샘플",
+      body: "데이터베이스성능최적화에는인덱스설계와트랜잭션관리가필요합니다",
+      displayPath: "cjk/ko.md",
+    });
+
+    const zh = store.searchFTS("索引", 10);
+    expect(zh.some(r => r.displayPath === `${collectionName}/cjk/zh.md`)).toBe(true);
+
+    const ja = store.searchFTS("トランザクション", 10);
+    expect(ja.some(r => r.displayPath === `${collectionName}/cjk/ja.md`)).toBe(true);
+
+    const ko = store.searchFTS("트랜잭션", 10);
+    expect(ko.some(r => r.displayPath === `${collectionName}/cjk/ko.md`)).toBe(true);
+
+    await cleanupTestDb(store);
+  });
+
   // BM25 IDF requires corpus depth — helper adds non-matching docs so term frequency
   // differentiation produces meaningful scores (2-doc corpus has near-zero IDF).
   async function addNoiseDocuments(db: Database, collectionName: string, count = 8) {

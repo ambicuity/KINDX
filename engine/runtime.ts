@@ -37,6 +37,7 @@ export interface Database {
   exec(sql: string): void;
   prepare(sql: string): Statement;
   loadExtension(path: string): void;
+  function?(name: string, ...rest: any[]): void;
   close(): void;
 }
 
