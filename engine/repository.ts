@@ -3847,9 +3847,17 @@ export async function hybridQuery(
   const hasVectors = !!store.db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
   ).get();
-  const originalQueryEmbedding = hasVectors
-    ? await getEmbedding(query, DEFAULT_EMBED_MODEL, true)
-    : null;
+  let originalQueryEmbedding: number[] | null = null;
+  if (hasVectors) {
+    try {
+      originalQueryEmbedding = await getEmbedding(query, DEFAULT_EMBED_MODEL, true);
+    } catch (err) {
+      process.stderr.write(
+        `KINDX Warning: failed to precompute original query embedding, falling back to FTS-only until embedding recovery. ${err}\n`
+      );
+      originalQueryEmbedding = null;
+    }
+  }
 
   // Step 1: BM25 probe — strong signal skips expensive LLM expansion
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
