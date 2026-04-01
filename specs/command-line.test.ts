@@ -548,6 +548,38 @@ describe("CLI Cleanup Command", () => {
     const { stdout, exitCode } = await runQmd(["cleanup"]);
     expect(exitCode).toBe(0);
   });
+
+  test("cleanup --cache purges llm and semantic caches", async () => {
+    const db = new Database(testDbPath);
+    db.prepare(`
+      INSERT OR REPLACE INTO llm_cache (hash, result, created_at)
+      VALUES (?, ?, ?)
+    `).run("cache-key", "cached-result", new Date().toISOString());
+
+    const semanticExists = !!db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'
+    `).get();
+    if (semanticExists) {
+      db.prepare(`
+        INSERT INTO semantic_cache (query, response, created_at, hits)
+        VALUES (?, ?, ?, 0)
+      `).run("deploy steps", '[{"type":"vec","text":"deployment guide"}]', new Date().toISOString());
+    }
+    db.close();
+
+    const { exitCode } = await runQmd(["cleanup", "--cache"]);
+    expect(exitCode).toBe(0);
+
+    const verifyDb = new Database(testDbPath, { readonly: true });
+    const llmCount = (verifyDb.prepare(`SELECT COUNT(*) as count FROM llm_cache`).get() as { count: number }).count;
+    expect(llmCount).toBe(0);
+
+    if (semanticExists) {
+      const semanticCount = (verifyDb.prepare(`SELECT COUNT(*) as count FROM semantic_cache`).get() as { count: number }).count;
+      expect(semanticCount).toBe(0);
+    }
+    verifyDb.close();
+  });
 });
 
 describe("CLI Error Handling", () => {

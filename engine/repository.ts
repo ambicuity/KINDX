@@ -50,6 +50,9 @@ export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-Q8_0";
 export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
 export const DEFAULT_GLOB = "**/*.md";
 export const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024; // 10KB
+export const SEMANTIC_CACHE_DIMENSIONS = 768;
+export const DEFAULT_SEMANTIC_CACHE_THRESHOLD = 0.92;
+export const DEFAULT_CACHE_TTL_HOURS = 168;
 
 // Chunking: 900 tokens per chunk with 15% overlap
 // Increased from 800 to accommodate smart chunking finding natural break points
@@ -253,6 +256,12 @@ export const RERANK_CANDIDATE_LIMIT = 40;
 export type ExpandedQuery = {
   type: 'lex' | 'vec' | 'hyde';
   text: string;
+};
+
+export type ExpandQueryOptions = {
+  queryEmbedding?: number[];
+  session?: ILLMSession;
+  semanticThreshold?: number;
 };
 
 // =============================================================================
@@ -816,6 +825,17 @@ function initializeDatabase(db: Database): void {
   `);
 
   db.exec(`
+    CREATE TABLE IF NOT EXISTS semantic_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      response TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_cache_created_at ON semantic_cache(created_at)`);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS document_summaries (
       doc_hash TEXT PRIMARY KEY,
       summary TEXT NOT NULL,
@@ -846,6 +866,25 @@ function initializeDatabase(db: Database): void {
   `);
   if (cvInfo.length > 0 && hasSeqColumn && !hasChunkHashColumn) {
     db.exec(`ALTER TABLE content_vectors ADD COLUMN chunk_hash TEXT`);
+  }
+
+  if (_sqliteVecAvailable) {
+    const semanticVecInfo = db.prepare(`
+      SELECT sql FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get() as { sql: string } | null;
+    if (semanticVecInfo) {
+      const match = semanticVecInfo.sql.match(/float\[(\d+)\]/);
+      const hasCacheKey = semanticVecInfo.sql.includes("cache_key");
+      const hasCosine = semanticVecInfo.sql.includes("distance_metric=cosine");
+      const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
+      if (existingDims !== SEMANTIC_CACHE_DIMENSIONS || !hasCacheKey || !hasCosine) {
+        db.exec(`DROP TABLE IF EXISTS semantic_cache_vec`);
+      }
+    }
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS semantic_cache_vec
+      USING vec0(cache_key TEXT PRIMARY KEY, embedding float[${SEMANTIC_CACHE_DIMENSIONS}] distance_metric=cosine)
+    `);
   }
 
   db.exec(`
@@ -1012,6 +1051,7 @@ export type Store = {
 
   // Cleanup and maintenance
   deleteLLMCache: () => number;
+  deleteSemanticCache: () => number;
   deleteInactiveDocuments: () => number;
   cleanupOrphanedContent: () => number;
   cleanupOrphanedVectors: () => number;
@@ -1036,7 +1076,7 @@ export type Store = {
   searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
-  expandQuery: (query: string, model?: string) => Promise<ExpandedQuery[]>;
+  expandQuery: (query: string, model?: string, options?: ExpandQueryOptions) => Promise<ExpandedQuery[]>;
   rerank: (query: string, documents: { file: string; text: string }[], model?: string) => Promise<{ file: string; score: number }[]>;
 
   // Document retrieval
@@ -1107,6 +1147,7 @@ export function createStore(dbPath?: string): Store {
 
     // Cleanup and maintenance
     deleteLLMCache: () => deleteLLMCache(db),
+    deleteSemanticCache: () => deleteSemanticCache(db),
     deleteInactiveDocuments: () => deleteInactiveDocuments(db),
     cleanupOrphanedContent: () => cleanupOrphanedContent(db),
     cleanupOrphanedVectors: () => cleanupOrphanedVectors(db),
@@ -1131,7 +1172,7 @@ export function createStore(dbPath?: string): Store {
     searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
 
     // Query expansion & reranking
-    expandQuery: (query: string, model?: string) => expandQuery(query, model, db),
+    expandQuery: (query: string, model?: string, options?: ExpandQueryOptions) => expandQuery(query, model, db, options),
     rerank: (query: string, documents: { file: string; text: string }[], model?: string) => rerank(query, documents, model, db),
 
     // Watcher integrations
@@ -1442,6 +1483,140 @@ export function clearCache(db: Database): void {
   db.exec(`DELETE FROM llm_cache`);
 }
 
+function getSemanticCacheThresholdValue(override?: number): number {
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return Math.min(1, Math.max(0, override));
+  }
+  const raw = process.env.KINDX_SEMANTIC_CACHE_THRESHOLD;
+  if (!raw) return DEFAULT_SEMANTIC_CACHE_THRESHOLD;
+  const parsed = parseFloat(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_SEMANTIC_CACHE_THRESHOLD;
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function getCacheTtlHoursValue(): number {
+  const raw = process.env.KINDX_CACHE_TTL_HOURS;
+  if (!raw) return DEFAULT_CACHE_TTL_HOURS;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_CACHE_TTL_HOURS;
+  return parsed;
+}
+
+function semanticCacheTablesAvailable(db: Database): boolean {
+  if (!_sqliteVecAvailable) return false;
+  const cacheTable = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'
+  `).get();
+  const vecTable = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+  `).get();
+  return !!cacheTable && !!vecTable;
+}
+
+function parseExpandedQueryArray(raw: string): ExpandedQuery[] | null {
+  try {
+    const parsed = JSON.parse(raw) as ExpandedQuery[];
+    if (!Array.isArray(parsed)) return null;
+    if (!parsed.every(item =>
+      item
+      && (item.type === "lex" || item.type === "vec" || item.type === "hyde")
+      && typeof item.text === "string"
+    )) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function pruneSemanticCacheByTtl(db: Database): number {
+  if (!semanticCacheTablesAvailable(db)) return 0;
+  const ttlMs = getCacheTtlHoursValue() * 60 * 60 * 1000;
+  const cutoff = new Date(Date.now() - ttlMs).toISOString();
+  const staleRows = db.prepare(`
+    SELECT id FROM semantic_cache WHERE created_at < ?
+  `).all(cutoff) as { id: number }[];
+  if (staleRows.length === 0) return 0;
+
+  const ids = staleRows.map(row => row.id);
+  const cacheKeys = ids.map(id => String(id));
+  const placeholders = ids.map(() => "?").join(",");
+  db.prepare(`DELETE FROM semantic_cache_vec WHERE cache_key IN (${placeholders})`).run(...cacheKeys);
+  db.prepare(`DELETE FROM semantic_cache WHERE id IN (${placeholders})`).run(...ids);
+  return ids.length;
+}
+
+type SemanticCacheHit = {
+  id: number;
+  response: string;
+  similarity: number;
+};
+
+function lookupSemanticCache(
+  db: Database,
+  queryEmbedding: number[],
+  threshold: number
+): SemanticCacheHit | null {
+  if (!semanticCacheTablesAvailable(db)) return null;
+  if (queryEmbedding.length !== SEMANTIC_CACHE_DIMENSIONS) return null;
+
+  pruneSemanticCacheByTtl(db);
+
+  const vecRows = db.prepare(`
+    SELECT cache_key, distance
+    FROM semantic_cache_vec
+    WHERE embedding MATCH ? AND k = 5
+  `).all(new Float32Array(queryEmbedding)) as { cache_key: string; distance: number }[];
+  if (vecRows.length === 0) return null;
+
+  const candidateRows = vecRows
+    .map(row => ({ cacheId: parseInt(row.cache_key, 10), similarity: 1 - row.distance }))
+    .filter(row => Number.isInteger(row.cacheId))
+    .filter(row => row.similarity >= threshold)
+    .sort((a, b) => b.similarity - a.similarity);
+  if (candidateRows.length === 0) return null;
+
+  const cacheIds = candidateRows.map(row => row.cacheId);
+  const placeholders = cacheIds.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT id, response
+    FROM semantic_cache
+    WHERE id IN (${placeholders})
+  `).all(...cacheIds) as { id: number; response: string }[];
+  if (rows.length === 0) return null;
+
+  const rowById = new Map(rows.map(row => [row.id, row]));
+  for (const candidate of candidateRows) {
+    const hit = rowById.get(candidate.cacheId);
+    if (hit) {
+      return { id: hit.id, response: hit.response, similarity: candidate.similarity };
+    }
+  }
+  return null;
+}
+
+function incrementSemanticCacheHit(db: Database, cacheId: number): void {
+  db.prepare(`UPDATE semantic_cache SET hits = hits + 1 WHERE id = ?`).run(cacheId);
+}
+
+function insertSemanticCacheEntry(db: Database, query: string, response: string, queryEmbedding: number[]): void {
+  if (!semanticCacheTablesAvailable(db)) return;
+  if (queryEmbedding.length !== SEMANTIC_CACHE_DIMENSIONS) return;
+
+  const now = new Date().toISOString();
+  const result = db.prepare(`
+    INSERT INTO semantic_cache (query, response, created_at, hits)
+    VALUES (?, ?, ?, 0)
+  `).run(query, response, now);
+  const cacheId = Number(result.lastInsertRowid);
+  const cacheKey = String(cacheId);
+  db.prepare(`
+    INSERT OR REPLACE INTO semantic_cache_vec (cache_key, embedding)
+    VALUES (?, ?)
+  `).run(cacheKey, new Float32Array(queryEmbedding));
+}
+
 // =============================================================================
 // Cleanup and maintenance operations
 // =============================================================================
@@ -1453,6 +1628,34 @@ export function clearCache(db: Database): void {
 export function deleteLLMCache(db: Database): number {
   const result = db.prepare(`DELETE FROM llm_cache`).run();
   return result.changes;
+}
+
+/**
+ * Delete semantic query-expansion cache entries (table + vector table rows).
+ */
+export function deleteSemanticCache(db: Database): number {
+  const tableExists = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'
+  `).get();
+  if (!tableExists) return 0;
+
+  const countRow = db.prepare(`SELECT COUNT(*) as count FROM semantic_cache`).get() as { count: number };
+  if (countRow.count === 0) return 0;
+
+  db.exec(`DELETE FROM semantic_cache`);
+  const semanticVecExists = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+  `).get();
+  if (semanticVecExists) {
+    db.exec(`DELETE FROM semantic_cache_vec`);
+  }
+  return countRow.count;
+}
+
+export function shouldInvalidateSemanticCache(changedCount: number, activeDocsBefore: number): boolean {
+  if (changedCount <= 0) return false;
+  if (activeDocsBefore <= 0) return true;
+  return (changedCount / activeDocsBefore) > 0.10;
 }
 
 /**
@@ -2760,19 +2963,38 @@ export function insertEmbedding(
 // Query expansion
 // =============================================================================
 
-export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database): Promise<ExpandedQuery[]> {
+export async function expandQuery(
+  query: string,
+  model: string = DEFAULT_QUERY_MODEL,
+  db: Database,
+  options: ExpandQueryOptions = {}
+): Promise<ExpandedQuery[]> {
   // Check cache first — stored as JSON preserving types
   const cacheKey = getCacheKey("expandQuery", { query, model });
   const cached = getCachedResult(db, cacheKey);
   if (cached) {
-    try {
-      return JSON.parse(cached) as ExpandedQuery[];
-    } catch {
-      // Old cache format (pre-typed, newline-separated text) — re-expand
+    const parsed = parseExpandedQueryArray(cached);
+    if (parsed) {
+      return parsed;
     }
   }
 
-  const llm = getDefaultLLM();
+  const semanticThreshold = getSemanticCacheThresholdValue(options.semanticThreshold);
+  const queryEmbedding = options.queryEmbedding
+    ?? await getEmbedding(query, DEFAULT_EMBED_MODEL, true, options.session);
+  if (queryEmbedding) {
+    const semanticHit = lookupSemanticCache(db, queryEmbedding, semanticThreshold);
+    if (semanticHit) {
+      const parsed = parseExpandedQueryArray(semanticHit.response);
+      if (parsed) {
+        incrementSemanticCacheHit(db, semanticHit.id);
+        setCachedResult(db, cacheKey, semanticHit.response);
+        return parsed;
+      }
+    }
+  }
+
+  const llm = options.session ?? getDefaultLLM();
   // Note: LLM usages rely on configuration logic internally
   const results = await llm.expandQuery(query);
 
@@ -2783,7 +3005,11 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
     .map(r => ({ type: r.type, text: r.text }));
 
   if (expanded.length > 0) {
-    setCachedResult(db, cacheKey, JSON.stringify(expanded));
+    const serialized = JSON.stringify(expanded);
+    setCachedResult(db, cacheKey, serialized);
+    if (queryEmbedding) {
+      insertSemanticCacheEntry(db, query, serialized, queryEmbedding);
+    }
   }
 
   return expanded;
@@ -3573,6 +3799,9 @@ export async function hybridQuery(
   const hasVectors = !!store.db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
   ).get();
+  const originalQueryEmbedding = hasVectors
+    ? await getEmbedding(query, DEFAULT_EMBED_MODEL, true)
+    : null;
 
   // Step 1: BM25 probe — strong signal skips expensive LLM expansion
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
@@ -3590,7 +3819,9 @@ export async function hybridQuery(
   const expandStart = Date.now();
   const expanded = hasStrongSignal
     ? []
-    : await store.expandQuery(query);
+    : await store.expandQuery(query, DEFAULT_QUERY_MODEL, {
+      queryEmbedding: originalQueryEmbedding ?? undefined,
+    });
 
   hooks?.onExpand?.(query, expanded, Date.now() - expandStart);
 
@@ -3625,40 +3856,60 @@ export async function hybridQuery(
     }
   }
 
-  // 3b: Collect all texts that need vector search (original query + vec/hyde expansions)
+  // 3b: Run vector searches for original query + vec/hyde expansions.
+  // Reuse the original query embedding to avoid duplicate embedding work.
   if (hasVectors) {
-    const vecQueries: { text: string; queryType: "original" | "vec" | "hyde" }[] = [
-      { text: query, queryType: "original" },
-    ];
-    for (const q of expanded) {
-      if (q.type === 'vec' || q.type === 'hyde') {
-        vecQueries.push({ text: q.text, queryType: q.type });
+    const llm = getDefaultLLM();
+    const expansionVecQueries = expanded.filter(
+      (q): q is ExpandedQuery & { type: "vec" | "hyde" } => q.type === "vec" || q.type === "hyde"
+    );
+    const textsToEmbed = expansionVecQueries.map(q => formatQueryForEmbedding(q.text));
+    const embedTargets = textsToEmbed.length + (originalQueryEmbedding ? 0 : 1);
+
+    let fallbackOriginalEmbedding: number[] | null = originalQueryEmbedding;
+    let expansionEmbeddings: Awaited<ReturnType<typeof llm.embedBatch>> = [];
+    if (embedTargets > 0) {
+      hooks?.onEmbedStart?.(embedTargets);
+      const embedStart = Date.now();
+      try {
+        if (originalQueryEmbedding) {
+          expansionEmbeddings = textsToEmbed.length > 0 ? await llm.embedBatch(textsToEmbed) : [];
+        } else {
+          const batchInput = [formatQueryForEmbedding(query), ...textsToEmbed];
+          const embedded = await llm.embedBatch(batchInput);
+          fallbackOriginalEmbedding = embedded[0]?.embedding ?? null;
+          expansionEmbeddings = embedded.slice(1);
+        }
+      } catch (err) {
+        process.stderr.write(
+          `KINDX Warning: embedBatch failed during hybridQuery, falling back to FTS-only results. ${err}\n`
+        );
+        fallbackOriginalEmbedding = null;
+        expansionEmbeddings = textsToEmbed.map(() => null);
+      }
+      hooks?.onEmbedDone?.(Date.now() - embedStart);
+    }
+
+    if (fallbackOriginalEmbedding) {
+      const originalVecResults = await store.searchVec(
+        query, DEFAULT_EMBED_MODEL, 20, collection, undefined, fallbackOriginalEmbedding
+      );
+      if (originalVecResults.length > 0) {
+        for (const r of originalVecResults) docidMap.set(r.filepath, r.docid);
+        rankedLists.push(originalVecResults.map(r => ({
+          file: r.filepath, displayPath: r.displayPath,
+          title: r.title, body: r.body || "", score: r.score, hash: r.hash,
+        })));
+        rankedListMeta.push({ source: "vec", queryType: "original", query });
       }
     }
 
-    // Batch embed all vector queries in a single call
-    const llm = getDefaultLLM();
-    const textsToEmbed = vecQueries.map(q => formatQueryForEmbedding(q.text));
-    hooks?.onEmbedStart?.(textsToEmbed.length);
-    const embedStart = Date.now();
-    let embeddings: Awaited<ReturnType<typeof llm.embedBatch>>;
-    try {
-      embeddings = await llm.embedBatch(textsToEmbed);
-    } catch (err) {
-      process.stderr.write(
-        `KINDX Warning: embedBatch failed during hybridQuery, falling back to FTS-only results. ${err}\n`
-      );
-      embeddings = textsToEmbed.map(() => null);
-    }
-    hooks?.onEmbedDone?.(Date.now() - embedStart);
-
-    // Run sqlite-vec lookups with pre-computed embeddings
-    for (let i = 0; i < vecQueries.length; i++) {
-      const embedding = embeddings[i]?.embedding;
+    for (let i = 0; i < expansionVecQueries.length; i++) {
+      const embedding = expansionEmbeddings[i]?.embedding;
       if (!embedding) continue;
 
       const vecResults = await store.searchVec(
-        vecQueries[i]!.text, DEFAULT_EMBED_MODEL, 20, collection,
+        expansionVecQueries[i]!.text, DEFAULT_EMBED_MODEL, 20, collection,
         undefined, embedding
       );
       if (vecResults.length > 0) {
@@ -3669,8 +3920,8 @@ export async function hybridQuery(
         })));
         rankedListMeta.push({
           source: "vec",
-          queryType: vecQueries[i]!.queryType,
-          query: vecQueries[i]!.text,
+          queryType: expansionVecQueries[i]!.type,
+          query: expansionVecQueries[i]!.text,
         });
       }
     }

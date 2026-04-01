@@ -461,7 +461,8 @@ kindx pull                   # Download/check the default local models
 kindx update                 # Re-index configured collections
 kindx watch                  # Keep the index fresh in the background
 kindx status                 # Report index, collection, and MCP health
-kindx cleanup                # Clear cache/orphaned rows and vacuum the DB
+kindx cleanup                # Clear caches, orphaned rows, and vacuum the DB
+kindx cleanup --cache        # Clear only LLM + semantic query caches
 kindx mcp                    # Start the MCP server (stdio by default)
 kindx migrate <target> <path> # Import from Chroma or OpenCLAW
 kindx skill install          # Install the packaged Claude skill locally
@@ -692,8 +693,11 @@ kindx multi-get "docs/*.md" --max-bytes 20480
 # Export bulk extraction as JSON for agent processing
 kindx multi-get "docs/*.md" --json
 
-# Purge cache and orphaned index data
+# Purge caches + orphaned index data
 kindx cleanup
+
+# Purge only LLM + semantic caches
+kindx cleanup --cache
 
 # Import an existing Chroma or OpenCLAW corpus
 kindx migrate chroma /path/to/chroma.sqlite3
@@ -759,11 +763,23 @@ erDiagram
         text response
         integer created
     }
+    semantic_cache {
+        integer id PK
+        text query
+        text response
+        text created_at
+        integer hits
+    }
+    semantic_cache_vec {
+        integer cache_id PK
+        blob embedding
+    }
 
     collections ||--o{ documents : contains
     documents ||--|{ documents_fts : indexes
     documents ||--o{ content_vectors : chunks
     content_vectors ||--|| vectors_vec : embeds
+    semantic_cache ||--|| semantic_cache_vec : embeds
 ```
 
 ---
@@ -783,6 +799,8 @@ erDiagram
 | `KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE` | `1024` | Expansion context size cap in low-VRAM mode |
 | `KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE` | `1024` | Rerank context size cap in low-VRAM mode |
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
+| `KINDX_SEMANTIC_CACHE_THRESHOLD` | `0.92` | Minimum cosine similarity to reuse semantic query-expansion cache |
+| `KINDX_CACHE_TTL_HOURS` | `168` | Semantic query-expansion cache entry TTL in hours |
 | `XDG_CACHE_HOME` | `~/.cache` | Cache base directory |
 | `NO_COLOR` | (unset) | Disable ANSI terminal colors |
 | `KINDX_LLM_BACKEND` | `local` | Set to `remote` to use an OpenAI-compatible API instead of local GPU |

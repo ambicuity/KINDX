@@ -59,8 +59,10 @@ import {
   getActiveDocumentPaths,
   cleanupOrphanedContent,
   deleteLLMCache,
+  deleteSemanticCache,
   deleteInactiveDocuments,
   cleanupOrphanedVectors,
+  shouldInvalidateSemanticCache,
   vacuumDatabase,
   getCollectionsWithoutContext,
   getTopLevelPathsWithoutContext,
@@ -1411,6 +1413,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
+  const activeDocsBefore = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
 
   // Clear Ollama cache on index
   clearCache(db);
@@ -1527,6 +1530,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
 
   // Clean up orphaned content hashes (content not referenced by any document)
   const orphanedContent = cleanupOrphanedContent(db);
+  const changedCount = indexed + updated + removed;
+  if (shouldInvalidateSemanticCache(changedCount, activeDocsBefore)) {
+    const flushed = deleteSemanticCache(db);
+    if (flushed > 0) {
+      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
+    }
+  }
 
   // Check if vector index needs updating
   const needsEmbedding = getHashesNeedingEmbedding(db);
@@ -1735,6 +1745,13 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   }
 
   let changedChunkCount = changedChunks.length;
+  const changedDocCount = new Set(changedChunks.map((chunk) => chunk.hash)).size;
+  if (shouldInvalidateSemanticCache(changedDocCount, docsForEmbedding.length)) {
+    const flushed = deleteSemanticCache(db);
+    if (flushed > 0) {
+      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
+    }
+  }
   if (changedChunkCount === 0) {
     if (staleDeleted > 0) {
       console.log(`${c.green}✓ No changed chunks. Removed ${staleDeleted} stale chunk embeddings.${c.reset}`);
@@ -2735,6 +2752,7 @@ function parseCLI() {
       daemon: { type: "boolean" },
       watch: { type: "boolean" },
       port: { type: "string" },
+      cache: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -2861,7 +2879,7 @@ function showHelp(): void {
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
-  console.log("  kindx cleanup                   - Clear caches, vacuum DB");
+  console.log("  kindx cleanup [--cache]         - Full cleanup (default) or cache-only purge");
   console.log("");
   console.log("Corrective feedback:");
   console.log("  kindx feedback --irrelevant --query \"deploy k8s\" --chunk \"#abc123:2\"");
@@ -3572,10 +3590,18 @@ if (isMain) {
 
     case "cleanup": {
       const db = getDb();
+      const cacheOnly = !!cli.values.cache;
 
       // 1. Clear llm_cache
-      const cacheCount = deleteLLMCache(db);
-      console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
+      const llmCacheCount = deleteLLMCache(db);
+      const semanticCacheCount = deleteSemanticCache(db);
+      console.log(`${c.green}✓${c.reset} Cleared ${llmCacheCount} cached API responses`);
+      console.log(`${c.green}✓${c.reset} Cleared ${semanticCacheCount} semantic query cache entr${semanticCacheCount === 1 ? "y" : "ies"}`);
+
+      if (cacheOnly) {
+        closeDb();
+        break;
+      }
 
       // 2. Remove orphaned vectors
       const orphanedVecs = cleanupOrphanedVectors(db);
