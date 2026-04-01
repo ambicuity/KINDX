@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0](https://github.com/ambicuity/KINDX/compare/v1.1.0...v1.2.0) (2026-04-01)
+
+
+### Features
+
+* **engine:** implement chunk-hash incremental embedding delta ([#88](https://github.com/ambicuity/KINDX/issues/88)) ([5563258](https://github.com/ambicuity/KINDX/commit/5563258195ef43f439ba143ad2b5d286f8840b41))
+* **engine:** implement semantic query cache for expansion ([#91](https://github.com/ambicuity/KINDX/issues/91)) ([27c0bb9](https://github.com/ambicuity/KINDX/commit/27c0bb948a0cbb4dfc7639ec3f309d66d4ce8351))
+* **engine:** model preloader + warmed health endpoint (closes [#22](https://github.com/ambicuity/KINDX/issues/22)) ([#84](https://github.com/ambicuity/KINDX/issues/84)) ([76d9a87](https://github.com/ambicuity/KINDX/commit/76d9a870f53dc3155f27e8796fe9fc5b05cfc127))
+* implement context-aware chunking with cached document summaries ([#90](https://github.com/ambicuity/KINDX/issues/90)) ([d9e118b](https://github.com/ambicuity/KINDX/commit/d9e118b603e349bbbff156fb11864db976cdf08a))
+* **watch:** add mcp --watch integration and batched live embeddings ([#86](https://github.com/ambicuity/KINDX/issues/86)) ([3af3676](https://github.com/ambicuity/KINDX/commit/3af3676ee8c7c65c35b31f362f4dfde8d012b263))
+
+
+### Bug Fixes
+
+* **engine:** address post-merge AI review regressions ([#89](https://github.com/ambicuity/KINDX/issues/89)) ([5d1dddc](https://github.com/ambicuity/KINDX/commit/5d1dddcf972f97d7d2fd40bd7eec637ba399dfa5))
+* **engine:** improve CJK BM25 normalization for contiguous text ([#87](https://github.com/ambicuity/KINDX/issues/87)) ([3e4c4b2](https://github.com/ambicuity/KINDX/commit/3e4c4b2c9fc549a1e704ecfebe05398779621b63))
+
 ## [1.1.0](https://github.com/ambicuity/KINDX/compare/v1.0.1...v1.1.0) (2026-03-27)
 
 
