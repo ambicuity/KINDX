@@ -1675,8 +1675,15 @@ export function deleteSemanticCache(db: Database): number {
     const semanticVecExists = db.prepare(`
       SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
     `).get();
-    if (semanticVecExists) {
+    if (_sqliteVecAvailable && semanticVecExists) {
       db.exec(`DELETE FROM semantic_cache_vec`);
+    } else if (semanticVecExists) {
+      // sqlite-vec may be unavailable in this runtime even if the table exists on disk.
+      try {
+        db.exec(`DELETE FROM semantic_cache_vec`);
+      } catch {
+        // Best-effort cleanup: keep semantic_cache purge successful.
+      }
     }
   });
   return countRow.count;
@@ -3010,8 +3017,11 @@ export async function expandQuery(
   }
 
   const semanticThreshold = getSemanticCacheThresholdValue(options.semanticThreshold);
+  const canUseSemanticCache = semanticCacheTablesAvailable(db);
   const queryEmbedding = options.queryEmbedding
-    ?? await getEmbedding(query, DEFAULT_EMBED_MODEL, true, options.session);
+    ?? (canUseSemanticCache
+      ? await getEmbedding(query, DEFAULT_EMBED_MODEL, true, options.session)
+      : null);
   if (queryEmbedding) {
     const semanticHit = lookupSemanticCache(db, queryEmbedding, semanticThreshold);
     if (semanticHit) {

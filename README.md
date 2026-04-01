@@ -771,8 +771,8 @@ erDiagram
         integer hits
     }
     semantic_cache_vec {
-        integer cache_id PK
-        blob embedding
+        text cache_key PK
+        float[768] embedding
     }
 
     collections ||--o{ documents : contains

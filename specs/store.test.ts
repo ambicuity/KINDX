@@ -2618,6 +2618,73 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
     await cleanupTestDb(store);
   }, 30000);
 
+  test("rerank scores documents", async () => {
+    const store = await createTestStore();
+
+    const docs = [
+      { file: "doc1.md", text: "Relevant content about the topic" },
+      { file: "doc2.md", text: "Other content" },
+    ];
+
+    const results = await store.rerank("topic", docs);
+    expect(results).toHaveLength(2);
+    // LlamaCpp reranker returns relevance scores
+    expect(results[0]!.score).toBeGreaterThan(0);
+
+    await cleanupTestDb(store);
+  });
+
+  test("rerank caches results", async () => {
+    const store = await createTestStore();
+
+    const docs = [{ file: "doc1.md", text: "Content for caching test" }];
+
+    // First call
+    await store.rerank("cache test query", docs);
+    // Second call - should hit cache
+    const results = await store.rerank("cache test query", docs);
+
+    expect(results).toHaveLength(1);
+
+    await cleanupTestDb(store);
+  });
+
+  test("rerank deduplicates identical chunks across files", async () => {
+    const store = await createTestStore();
+    const rerankSpy = vi.fn(async (_query: string, docs: { file: string; text: string }[]) => ({
+      results: docs.map((doc, index) => ({
+        file: doc.file,
+        score: 1 - index * 0.1,
+        index,
+      })),
+      model: "mock-reranker",
+    }));
+
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
+      rerank: rerankSpy,
+    } as any);
+
+    try {
+      const docs = [
+        { file: "doc1.md", text: "Shared chunk text" },
+        { file: "doc2.md", text: "Shared chunk text" },
+      ];
+
+      const first = await store.rerank("shared", docs);
+      const second = await store.rerank("shared", docs);
+
+      expect(first).toHaveLength(2);
+      expect(second).toHaveLength(2);
+      expect(rerankSpy).toHaveBeenCalledTimes(1);
+      expect(rerankSpy.mock.calls[0]?.[1]).toEqual([{ file: "doc2.md", text: "Shared chunk text" }]);
+    } finally {
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+});
+
+describe("Semantic Expansion Cache", () => {
   test("expandQuery reuses semantic cache for paraphrased query", async () => {
     const store = await createTestStore();
     const hasSemanticVec = !!store.db.prepare(`
@@ -2728,76 +2795,11 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
     }
   });
 
-  test("rerank scores documents", async () => {
-    const store = await createTestStore();
-
-    const docs = [
-      { file: "doc1.md", text: "Relevant content about the topic" },
-      { file: "doc2.md", text: "Other content" },
-    ];
-
-    const results = await store.rerank("topic", docs);
-    expect(results).toHaveLength(2);
-    // LlamaCpp reranker returns relevance scores
-    expect(results[0]!.score).toBeGreaterThan(0);
-
-    await cleanupTestDb(store);
-  });
-
   test("shouldInvalidateSemanticCache triggers only when change ratio is above 10%", () => {
     expect(shouldInvalidateSemanticCache(11, 100)).toBe(true);
     expect(shouldInvalidateSemanticCache(10, 100)).toBe(false);
     expect(shouldInvalidateSemanticCache(0, 100)).toBe(false);
     expect(shouldInvalidateSemanticCache(1, 0)).toBe(true);
-  });
-
-  test("rerank caches results", async () => {
-    const store = await createTestStore();
-
-    const docs = [{ file: "doc1.md", text: "Content for caching test" }];
-
-    // First call
-    await store.rerank("cache test query", docs);
-    // Second call - should hit cache
-    const results = await store.rerank("cache test query", docs);
-
-    expect(results).toHaveLength(1);
-
-    await cleanupTestDb(store);
-  });
-
-  test("rerank deduplicates identical chunks across files", async () => {
-    const store = await createTestStore();
-    const rerankSpy = vi.fn(async (_query: string, docs: { file: string; text: string }[]) => ({
-      results: docs.map((doc, index) => ({
-        file: doc.file,
-        score: 1 - index * 0.1,
-        index,
-      })),
-      model: "mock-reranker",
-    }));
-
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
-      rerank: rerankSpy,
-    } as any);
-
-    try {
-      const docs = [
-        { file: "doc1.md", text: "Shared chunk text" },
-        { file: "doc2.md", text: "Shared chunk text" },
-      ];
-
-      const first = await store.rerank("shared", docs);
-      const second = await store.rerank("shared", docs);
-
-      expect(first).toHaveLength(2);
-      expect(second).toHaveLength(2);
-      expect(rerankSpy).toHaveBeenCalledTimes(1);
-      expect(rerankSpy.mock.calls[0]?.[1]).toEqual([{ file: "doc2.md", text: "Shared chunk text" }]);
-    } finally {
-      llmSpy.mockRestore();
-      await cleanupTestDb(store);
-    }
   });
 });
 
