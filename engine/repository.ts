@@ -879,6 +879,7 @@ function initializeDatabase(db: Database): void {
       const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
       if (existingDims !== SEMANTIC_CACHE_DIMENSIONS || !hasCacheKey || !hasCosine) {
         db.exec(`DROP TABLE IF EXISTS semantic_cache_vec`);
+        db.exec(`DELETE FROM semantic_cache`);
       }
     }
     db.exec(`
@@ -1502,6 +1503,11 @@ function getCacheTtlHoursValue(): number {
   return parsed;
 }
 
+function getSemanticCacheTtlCutoff(): string {
+  const ttlMs = getCacheTtlHoursValue() * 60 * 60 * 1000;
+  return new Date(Date.now() - ttlMs).toISOString();
+}
+
 function semanticCacheTablesAvailable(db: Database): boolean {
   if (!_sqliteVecAvailable) return false;
   const cacheTable = db.prepare(`
@@ -1530,21 +1536,39 @@ function parseExpandedQueryArray(raw: string): ExpandedQuery[] | null {
   }
 }
 
+function runInTransaction(db: Database, action: () => void): void {
+  db.exec(`BEGIN`);
+  try {
+    action();
+    db.exec(`COMMIT`);
+  } catch (error) {
+    db.exec(`ROLLBACK`);
+    throw error;
+  }
+}
+
 function pruneSemanticCacheByTtl(db: Database): number {
   if (!semanticCacheTablesAvailable(db)) return 0;
-  const ttlMs = getCacheTtlHoursValue() * 60 * 60 * 1000;
-  const cutoff = new Date(Date.now() - ttlMs).toISOString();
-  const staleRows = db.prepare(`
-    SELECT id FROM semantic_cache WHERE created_at < ?
-  `).all(cutoff) as { id: number }[];
-  if (staleRows.length === 0) return 0;
+  const cutoff = getSemanticCacheTtlCutoff();
+  const staleCount = (db.prepare(`
+    SELECT COUNT(*) as count FROM semantic_cache WHERE created_at < ?
+  `).get(cutoff) as { count: number }).count;
+  if (staleCount === 0) return 0;
+  runInTransaction(db, () => {
+    db.prepare(`
+      DELETE FROM semantic_cache_vec
+      WHERE cache_key IN (SELECT CAST(id AS TEXT) FROM semantic_cache WHERE created_at < ?)
+    `).run(cutoff);
+    db.prepare(`DELETE FROM semantic_cache WHERE created_at < ?`).run(cutoff);
+  });
+  return staleCount;
+}
 
-  const ids = staleRows.map(row => row.id);
-  const cacheKeys = ids.map(id => String(id));
-  const placeholders = ids.map(() => "?").join(",");
-  db.prepare(`DELETE FROM semantic_cache_vec WHERE cache_key IN (${placeholders})`).run(...cacheKeys);
-  db.prepare(`DELETE FROM semantic_cache WHERE id IN (${placeholders})`).run(...ids);
-  return ids.length;
+function maybePruneSemanticCacheByTtl(db: Database): void {
+  // Keep lookup hot path fast while still eventually reclaiming stale entries.
+  if (Math.random() < 0.01) {
+    pruneSemanticCacheByTtl(db);
+  }
 }
 
 type SemanticCacheHit = {
@@ -1561,7 +1585,7 @@ function lookupSemanticCache(
   if (!semanticCacheTablesAvailable(db)) return null;
   if (queryEmbedding.length !== SEMANTIC_CACHE_DIMENSIONS) return null;
 
-  pruneSemanticCacheByTtl(db);
+  maybePruneSemanticCacheByTtl(db);
 
   const vecRows = db.prepare(`
     SELECT cache_key, distance
@@ -1579,11 +1603,12 @@ function lookupSemanticCache(
 
   const cacheIds = candidateRows.map(row => row.cacheId);
   const placeholders = cacheIds.map(() => "?").join(",");
+  const cutoff = getSemanticCacheTtlCutoff();
   const rows = db.prepare(`
     SELECT id, response
     FROM semantic_cache
-    WHERE id IN (${placeholders})
-  `).all(...cacheIds) as { id: number; response: string }[];
+    WHERE id IN (${placeholders}) AND created_at >= ?
+  `).all(...cacheIds, cutoff) as { id: number; response: string }[];
   if (rows.length === 0) return null;
 
   const rowById = new Map(rows.map(row => [row.id, row]));
@@ -1605,16 +1630,19 @@ function insertSemanticCacheEntry(db: Database, query: string, response: string,
   if (queryEmbedding.length !== SEMANTIC_CACHE_DIMENSIONS) return;
 
   const now = new Date().toISOString();
-  const result = db.prepare(`
-    INSERT INTO semantic_cache (query, response, created_at, hits)
-    VALUES (?, ?, ?, 0)
-  `).run(query, response, now);
-  const cacheId = Number(result.lastInsertRowid);
-  const cacheKey = String(cacheId);
-  db.prepare(`
-    INSERT OR REPLACE INTO semantic_cache_vec (cache_key, embedding)
-    VALUES (?, ?)
-  `).run(cacheKey, new Float32Array(queryEmbedding));
+  runInTransaction(db, () => {
+    const result = db.prepare(`
+      INSERT INTO semantic_cache (query, response, created_at, hits)
+      VALUES (?, ?, ?, 0)
+    `).run(query, response, now);
+    const cacheId = Number(result.lastInsertRowid);
+    const cacheKey = String(cacheId);
+    db.prepare(`
+      INSERT OR REPLACE INTO semantic_cache_vec (cache_key, embedding)
+      VALUES (?, ?)
+    `).run(cacheKey, new Float32Array(queryEmbedding));
+  });
+  pruneSemanticCacheByTtl(db);
 }
 
 // =============================================================================
@@ -1642,13 +1670,15 @@ export function deleteSemanticCache(db: Database): number {
   const countRow = db.prepare(`SELECT COUNT(*) as count FROM semantic_cache`).get() as { count: number };
   if (countRow.count === 0) return 0;
 
-  db.exec(`DELETE FROM semantic_cache`);
-  const semanticVecExists = db.prepare(`
-    SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
-  `).get();
-  if (semanticVecExists) {
-    db.exec(`DELETE FROM semantic_cache_vec`);
-  }
+  runInTransaction(db, () => {
+    db.exec(`DELETE FROM semantic_cache`);
+    const semanticVecExists = db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (semanticVecExists) {
+      db.exec(`DELETE FROM semantic_cache_vec`);
+    }
+  });
   return countRow.count;
 }
 
