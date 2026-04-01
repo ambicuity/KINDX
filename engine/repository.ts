@@ -828,12 +828,20 @@ function initializeDatabase(db: Database): void {
     CREATE TABLE IF NOT EXISTS semantic_cache (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       query TEXT NOT NULL,
+      model TEXT NOT NULL DEFAULT '${DEFAULT_QUERY_MODEL}',
       response TEXT NOT NULL,
       created_at TEXT NOT NULL,
       hits INTEGER NOT NULL DEFAULT 0
     )
   `);
+  const semanticCacheInfo = db.prepare(`PRAGMA table_info(semantic_cache)`).all() as { name: string }[];
+  const hasSemanticModelColumn = semanticCacheInfo.some(col => col.name === "model");
+  if (!hasSemanticModelColumn) {
+    db.exec(`ALTER TABLE semantic_cache ADD COLUMN model TEXT`);
+    db.prepare(`UPDATE semantic_cache SET model = ? WHERE model IS NULL OR model = ''`).run(DEFAULT_QUERY_MODEL);
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_cache_created_at ON semantic_cache(created_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_cache_model_created_at ON semantic_cache(model, created_at)`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS document_summaries (
@@ -1579,6 +1587,7 @@ type SemanticCacheHit = {
 
 function lookupSemanticCache(
   db: Database,
+  model: string,
   queryEmbedding: number[],
   threshold: number
 ): SemanticCacheHit | null {
@@ -1607,8 +1616,8 @@ function lookupSemanticCache(
   const rows = db.prepare(`
     SELECT id, response
     FROM semantic_cache
-    WHERE id IN (${placeholders}) AND created_at >= ?
-  `).all(...cacheIds, cutoff) as { id: number; response: string }[];
+    WHERE id IN (${placeholders}) AND model = ? AND created_at >= ?
+  `).all(...cacheIds, model, cutoff) as { id: number; response: string }[];
   if (rows.length === 0) return null;
 
   const rowById = new Map(rows.map(row => [row.id, row]));
@@ -1625,16 +1634,16 @@ function incrementSemanticCacheHit(db: Database, cacheId: number): void {
   db.prepare(`UPDATE semantic_cache SET hits = hits + 1 WHERE id = ?`).run(cacheId);
 }
 
-function insertSemanticCacheEntry(db: Database, query: string, response: string, queryEmbedding: number[]): void {
+function insertSemanticCacheEntry(db: Database, query: string, model: string, response: string, queryEmbedding: number[]): void {
   if (!semanticCacheTablesAvailable(db)) return;
   if (queryEmbedding.length !== SEMANTIC_CACHE_DIMENSIONS) return;
 
   const now = new Date().toISOString();
   runInTransaction(db, () => {
     const result = db.prepare(`
-      INSERT INTO semantic_cache (query, response, created_at, hits)
-      VALUES (?, ?, ?, 0)
-    `).run(query, response, now);
+      INSERT INTO semantic_cache (query, model, response, created_at, hits)
+      VALUES (?, ?, ?, ?, 0)
+    `).run(query, model, response, now);
     const cacheId = Number(result.lastInsertRowid);
     const cacheKey = String(cacheId);
     db.prepare(`
@@ -3023,12 +3032,11 @@ export async function expandQuery(
       ? await getEmbedding(query, DEFAULT_EMBED_MODEL, true, options.session)
       : null);
   if (queryEmbedding) {
-    const semanticHit = lookupSemanticCache(db, queryEmbedding, semanticThreshold);
+    const semanticHit = lookupSemanticCache(db, model, queryEmbedding, semanticThreshold);
     if (semanticHit) {
       const parsed = parseExpandedQueryArray(semanticHit.response);
       if (parsed) {
         incrementSemanticCacheHit(db, semanticHit.id);
-        setCachedResult(db, cacheKey, semanticHit.response);
         return parsed;
       }
     }
@@ -3048,7 +3056,7 @@ export async function expandQuery(
     const serialized = JSON.stringify(expanded);
     setCachedResult(db, cacheKey, serialized);
     if (queryEmbedding) {
-      insertSemanticCacheEntry(db, query, serialized, queryEmbedding);
+      insertSemanticCacheEntry(db, query, model, serialized, queryEmbedding);
     }
   }
 
@@ -3924,7 +3932,7 @@ export async function hybridQuery(
         process.stderr.write(
           `KINDX Warning: embedBatch failed during hybridQuery, falling back to FTS-only results. ${err}\n`
         );
-        fallbackOriginalEmbedding = null;
+        fallbackOriginalEmbedding = originalQueryEmbedding ?? null;
         expansionEmbeddings = textsToEmbed.map(() => null);
       }
       hooks?.onEmbedDone?.(Date.now() - embedStart);

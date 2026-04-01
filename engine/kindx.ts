@@ -502,6 +502,11 @@ async function showStatus(): Promise<void> {
   closeDb();
 }
 
+type SemanticDeltaAccumulator = {
+  activeDocsBefore: number;
+  changedCount: number;
+};
+
 async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
@@ -534,6 +539,8 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
 
   // Don't close db here - indexFiles will reuse it and close at the end
   console.log(`${c.bold}Updating ${collections.length} collection(s)...${c.reset}\n`);
+  const activeDocsBefore = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
+  const semanticDelta: SemanticDeltaAccumulator = { activeDocsBefore, changedCount: 0 };
 
   for (let i = 0; i < collections.length; i++) {
     const col = collections[i];
@@ -576,12 +583,18 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
       }
     }
 
-    await indexFiles(col.pwd, col.glob_pattern, col.name, true, yamlCol?.ignore);
+    await indexFiles(col.pwd, col.glob_pattern, col.name, true, yamlCol?.ignore, semanticDelta);
     console.log("");
   }
 
   // Check if any documents need embedding (show once at end)
   const finalDb = getDb();
+  if (shouldInvalidateSemanticCache(semanticDelta.changedCount, semanticDelta.activeDocsBefore)) {
+    const flushed = deleteSemanticCache(finalDb);
+    if (flushed > 0) {
+      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
+    }
+  }
   const needsEmbedding = getHashesNeedingEmbedding(finalDb);
   closeDb();
 
@@ -1408,12 +1421,21 @@ function collectionRename(oldName: string, newName: string): void {
   console.log(`  Virtual paths updated: ${c.cyan}kindx://${oldName}/${c.reset} → ${c.cyan}kindx://${newName}/${c.reset}`);
 }
 
-async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false, ignorePatterns?: string[]): Promise<void> {
+async function indexFiles(
+  pwd?: string,
+  globPattern: string = DEFAULT_GLOB,
+  collectionName?: string,
+  suppressEmbedNotice: boolean = false,
+  ignorePatterns?: string[],
+  semanticDelta?: SemanticDeltaAccumulator
+): Promise<void> {
   const db = getDb();
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
-  const activeDocsBefore = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
+  const activeDocsBefore = semanticDelta
+    ? semanticDelta.activeDocsBefore
+    : (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
 
   // Clear Ollama cache on index
   clearCache(db);
@@ -1531,7 +1553,9 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   // Clean up orphaned content hashes (content not referenced by any document)
   const orphanedContent = cleanupOrphanedContent(db);
   const changedCount = indexed + updated + removed;
-  if (shouldInvalidateSemanticCache(changedCount, activeDocsBefore)) {
+  if (semanticDelta) {
+    semanticDelta.changedCount += changedCount;
+  } else if (shouldInvalidateSemanticCache(changedCount, activeDocsBefore)) {
     const flushed = deleteSemanticCache(db);
     if (flushed > 0) {
       console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);

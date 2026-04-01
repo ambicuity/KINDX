@@ -561,9 +561,9 @@ describe("CLI Cleanup Command", () => {
     `).get();
     if (semanticExists) {
       db.prepare(`
-        INSERT INTO semantic_cache (query, response, created_at, hits)
-        VALUES (?, ?, ?, 0)
-      `).run("deploy steps", '[{"type":"vec","text":"deployment guide"}]', new Date().toISOString());
+        INSERT INTO semantic_cache (query, model, response, created_at, hits)
+        VALUES (?, ?, ?, ?, 0)
+      `).run("deploy steps", "qwen2.5-coder:1.5b", '[{"type":"vec","text":"deployment guide"}]', new Date().toISOString());
     }
     db.close();
 

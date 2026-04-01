@@ -766,6 +766,7 @@ erDiagram
     semantic_cache {
         integer id PK
         text query
+        text model
         text response
         text created_at
         integer hits

@@ -2763,6 +2763,34 @@ describe("Semantic Expansion Cache", () => {
     }
   });
 
+  test("expandQuery semantic cache is scoped by expansion model", async () => {
+    const store = await createTestStore();
+    const hasSemanticVec = !!store.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (!hasSemanticVec) {
+      await cleanupTestDb(store);
+      return;
+    }
+
+    const embedding = new Array(768).fill(0);
+    embedding[0] = 1;
+    const llm = {
+      embed: vi.fn(async () => ({ embedding })),
+      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
+    };
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
+
+    try {
+      await store.expandQuery("deploy steps", "model-a");
+      await store.expandQuery("deployment instructions", "model-b");
+      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
   test("expandQuery semantic cache honors TTL", async () => {
     const store = await createTestStore();
     const hasSemanticVec = !!store.db.prepare(`
