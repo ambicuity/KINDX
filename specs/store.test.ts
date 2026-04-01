@@ -56,6 +56,7 @@ import {
   isDocid,
   STRONG_SIGNAL_MIN_SCORE,
   STRONG_SIGNAL_MIN_GAP,
+  shouldInvalidateSemanticCache,
   type Store,
   type DocumentResult,
   type SearchResult,
@@ -2680,6 +2681,153 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       llmSpy.mockRestore();
       await cleanupTestDb(store);
     }
+  });
+});
+
+describe("Semantic Expansion Cache", () => {
+  test("expandQuery reuses semantic cache for paraphrased query", async () => {
+    const store = await createTestStore();
+    const hasSemanticVec = !!store.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (!hasSemanticVec) {
+      await cleanupTestDb(store);
+      return;
+    }
+
+    const sharedEmbedding = new Array(768).fill(0);
+    sharedEmbedding[0] = 1;
+    const expandResult = [
+      { type: "vec", text: "deployment instructions" },
+      { type: "hyde", text: "Deployment checklist for production rollout." },
+    ];
+
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
+      embed: vi.fn(async () => ({ embedding: sharedEmbedding })),
+      expandQuery: vi.fn(async () => expandResult),
+    } as any);
+
+    try {
+      const first = await store.expandQuery("deploy steps");
+      const second = await store.expandQuery("how to deploy");
+
+      expect(first).toEqual(expandResult);
+      expect(second).toEqual(expandResult);
+      const llm = llmSpy.mock.results[0]?.value as any;
+      expect(llm.expandQuery).toHaveBeenCalledTimes(1);
+
+      const hitRow = store.db.prepare(`
+        SELECT hits FROM semantic_cache ORDER BY id ASC LIMIT 1
+      `).get() as { hits: number } | undefined;
+      expect((hitRow?.hits ?? 0)).toBeGreaterThan(0);
+    } finally {
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
+  test("expandQuery semantic cache respects threshold boundary", async () => {
+    const store = await createTestStore();
+    const hasSemanticVec = !!store.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (!hasSemanticVec) {
+      await cleanupTestDb(store);
+      return;
+    }
+
+    process.env.KINDX_SEMANTIC_CACHE_THRESHOLD = "0.95";
+    const llm = {
+      embed: vi.fn(async (text: string) => {
+        const embedding = new Array(768).fill(0);
+        if (text.includes("deploy steps")) {
+          embedding[0] = 1;
+        } else {
+          embedding[0] = 0.9;
+          embedding[1] = Math.sqrt(1 - 0.9 * 0.9);
+        }
+        return { embedding };
+      }),
+      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
+    };
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
+
+    try {
+      await store.expandQuery("deploy steps");
+      await store.expandQuery("deployment instructions");
+      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.KINDX_SEMANTIC_CACHE_THRESHOLD;
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
+  test("expandQuery semantic cache is scoped by expansion model", async () => {
+    const store = await createTestStore();
+    const hasSemanticVec = !!store.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (!hasSemanticVec) {
+      await cleanupTestDb(store);
+      return;
+    }
+
+    const embedding = new Array(768).fill(0);
+    embedding[0] = 1;
+    const llm = {
+      embed: vi.fn(async () => ({ embedding })),
+      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
+    };
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
+
+    try {
+      await store.expandQuery("deploy steps", "model-a");
+      await store.expandQuery("deployment instructions", "model-b");
+      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
+  test("expandQuery semantic cache honors TTL", async () => {
+    const store = await createTestStore();
+    const hasSemanticVec = !!store.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
+    `).get();
+    if (!hasSemanticVec) {
+      await cleanupTestDb(store);
+      return;
+    }
+
+    process.env.KINDX_CACHE_TTL_HOURS = "1";
+    const embedding = new Array(768).fill(0);
+    embedding[0] = 1;
+    const llm = {
+      embed: vi.fn(async () => ({ embedding })),
+      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
+    };
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
+
+    try {
+      await store.expandQuery("deploy steps");
+      const oldTimestamp = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+      store.db.prepare(`UPDATE semantic_cache SET created_at = ?`).run(oldTimestamp);
+      await store.expandQuery("deployment instructions");
+      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.KINDX_CACHE_TTL_HOURS;
+      llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
+  test("shouldInvalidateSemanticCache triggers only when change ratio is above 10%", () => {
+    expect(shouldInvalidateSemanticCache(11, 100)).toBe(true);
+    expect(shouldInvalidateSemanticCache(10, 100)).toBe(false);
+    expect(shouldInvalidateSemanticCache(0, 100)).toBe(false);
+    expect(shouldInvalidateSemanticCache(1, 0)).toBe(true);
   });
 });
 
