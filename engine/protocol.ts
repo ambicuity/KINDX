@@ -1,5 +1,5 @@
 /**
- * KINDX MCP Server - Model Context Protocol server for QMD
+ * KINDX MCP Server - Model Context Protocol server for KINDX
  *
  * Exposes KINDX search and document retrieval as MCP tools and resources.
  * Documents are accessible via kindx:// URIs.
@@ -95,6 +95,8 @@ const KINDX_MCP_TOOL_NAMES = [
   "get",
   "multi_get",
   "status",
+  "arch_status",
+  "arch_query",
   "memory_put",
   "memory_search",
   "memory_history",
@@ -480,7 +482,7 @@ function createMcpServer(
 ): McpServer {
   const mcpControl = options?.mcpControl;
   const server = new McpServer(
-    { name: "kindx", version: "0.9.9" },
+    { name: "kindx", version: "1.3.1" },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
@@ -657,7 +659,7 @@ Intent-aware lex (C++ performance, not sports):
         searches: z.array(subSearchSchema).min(1).max(10).describe(
           "Typed sub-queries to execute (lex/vec/hyde). First gets 2x weight."
         ),
-        limit: z.number().optional().default(10).describe("Max results (default: 10)"),
+        limit: z.number().max(200).optional().default(10).describe("Max results (default: 10, max: 200)"),
         minScore: z.number().optional().default(0).describe("Min relevance 0-1 (default: 0)"),
         candidateLimit: z.number().optional().describe(
           "Maximum candidates to rerank (default: 40, lower = faster but may miss results)"
@@ -669,6 +671,7 @@ Intent-aware lex (C++ performance, not sports):
       },
     },
     async ({ searches, limit, minScore, candidateLimit, routingProfile, collections }: any) => {
+      try {
       const totalStart = Date.now();
       const timings = newTimings();
       const timeoutMs = parseQueryTimeoutMs();
@@ -770,6 +773,12 @@ Intent-aware lex (C++ performance, not sports):
         content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
         structuredContent: { results: filtered, metadata, timings },
       };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `query_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -791,6 +800,7 @@ Intent-aware lex (C++ performance, not sports):
       },
     },
     async ({ file, fromLine, maxLines, lineNumbers }: any) => {
+      try {
       // Support :line suffix in `file` (e.g. "foo.md:120") when fromLine isn't provided
       let parsedFromLine = fromLine;
       let lookup = file;
@@ -835,6 +845,12 @@ Intent-aware lex (C++ performance, not sports):
           },
         }],
       };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `get_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -856,6 +872,7 @@ Intent-aware lex (C++ performance, not sports):
       },
     },
     async ({ pattern, maxLines, maxBytes, lineNumbers }: any) => {
+      try {
       const { docs, errors } = store.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
 
       if (docs.length === 0 && errors.length === 0) {
@@ -908,6 +925,12 @@ Intent-aware lex (C++ performance, not sports):
       }
 
       return { content };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `multi_get_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -972,6 +995,120 @@ Intent-aware lex (C++ performance, not sports):
         structuredContent: fullStatus,
       };
     }
+  );
+
+  maybeRegisterTool(
+    "arch_status",
+    {
+      title: "Arch Status",
+      description: "Show Arch integration status, artifact paths, and latest distilled manifest summary.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        sourceRoot: z.string().optional().describe("Source root path used to resolve Arch workspace (default: current process cwd)."),
+      },
+    },
+    async ({ sourceRoot }: any) => {
+      try {
+        const root = typeof sourceRoot === "string" && sourceRoot.trim().length > 0
+          ? sourceRoot
+          : process.cwd();
+        const { getArchConfig, getArchStatus } = await import("./integrations/arch/adapter.js");
+        const config = getArchConfig();
+        const status = getArchStatus(config, root);
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `enabled=${status.enabled}`,
+              `augment=${status.augmentEnabled}`,
+              `repo=${config.repoPath}`,
+              `source_root=${root}`,
+              `distilled_docs=${status.paths.docsDir}`,
+              `manifest=${status.paths.manifestPath}`,
+              `manifest_present=${status.manifest ? "yes" : "no"}`,
+            ].join("\n"),
+          }],
+          structuredContent: {
+            enabled: status.enabled,
+            augmentEnabled: status.augmentEnabled,
+            repoCheck: status.repoCheck,
+            paths: status.paths,
+            manifest: status.manifest,
+            config: {
+              collectionName: config.collectionName,
+              minConfidence: config.minConfidence,
+              maxHints: config.maxHints,
+            },
+          },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `arch_status_failed: ${error}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  maybeRegisterTool(
+    "arch_query",
+    {
+      title: "Arch Query",
+      description: "Retrieve architecture-aware hints from distilled Arch artifacts without altering KINDX primary retrieval.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        query: z.string().describe("Architecture-focused query text."),
+        sourceRoot: z.string().optional().describe("Source root path used to resolve Arch workspace (default: current process cwd)."),
+        limit: z.number().optional().default(3).describe("Maximum number of hints to return."),
+      },
+    },
+    async ({ query, sourceRoot, limit }: any) => {
+      try {
+        if (!query || typeof query !== "string" || query.trim().length === 0) {
+          return {
+            content: [{ type: "text", text: "query is required" }],
+            isError: true,
+          };
+        }
+        const root = typeof sourceRoot === "string" && sourceRoot.trim().length > 0
+          ? sourceRoot
+          : process.cwd();
+        const { getArchConfig } = await import("./integrations/arch/adapter.js");
+        const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
+        const { selectArchHints } = await import("./integrations/arch/augment.js");
+        const config = getArchConfig();
+        if (!config.enabled) {
+          return {
+            content: [{ type: "text", text: "Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable." }],
+            isError: true,
+          };
+        }
+        const paths = resolveArchPaths(config.artifactDir, root);
+        const manifest = readDistilledManifest(paths.manifestPath);
+        if (!manifest) {
+          return {
+            content: [{ type: "text", text: `no_arch_manifest: ${paths.manifestPath}` }],
+            isError: true,
+          };
+        }
+        const maxHints = Number.isFinite(limit) ? Math.max(1, Number(limit)) : config.maxHints;
+        const hints = selectArchHints(query, manifest.hintsPath, maxHints);
+        return {
+          content: [{ type: "text", text: `returned ${hints.length} arch hint(s)` }],
+          structuredContent: {
+            query,
+            sourceRoot: root,
+            manifestPath: paths.manifestPath,
+            hints,
+          },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `arch_query_failed: ${error}` }],
+          isError: true,
+        };
+      }
+    },
   );
 
   // ---------------------------------------------------------------------------

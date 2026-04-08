@@ -169,3 +169,30 @@ kindx query $'lex: auth token\nvec: how does authentication work'
 # Structured
 kindx query $'lex: keywords\nvec: question\nhyde: hypothetical answer...'
 ```
+
+## Arch Additive Commands
+
+Arch integration is optional and additive. It does not replace KINDX retrieval/ranking flow.
+
+```bash
+# Enable Arch integration
+export KINDX_ARCH_ENABLED=1
+
+# Sidecar operations
+kindx arch status
+kindx arch build [path]
+kindx arch import [path]
+kindx arch refresh [path]
+
+# Optional update/query flags
+kindx update --arch-refresh
+kindx query "how does auth flow work" --arch-hints
+```
+
+Arch feature flags:
+- `KINDX_ARCH_ENABLED`
+- `KINDX_ARCH_AUGMENT_ENABLED`
+- `KINDX_ARCH_AUTO_REFRESH_ON_UPDATE`
+- `KINDX_ARCH_REPO_PATH`
+- `KINDX_ARCH_ARTIFACT_DIR`
+- `KINDX_ARCH_COLLECTION`

@@ -31,7 +31,7 @@ export function openDatabase(path: string): Database {
 }
 
 /**
- * Common subset of the Database interface used throughout QMD.
+ * Common subset of the Database interface used throughout KINDX.
  */
 export interface Database {
   exec(sql: string): void;

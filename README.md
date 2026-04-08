@@ -11,7 +11,7 @@
 
 [![MCP-Compatible](https://img.shields.io/badge/MCP-Compatible-6f42c1?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHJ4PSIyIiBmaWxsPSIjNmY0MmMxIi8+PC9zdmc+)](https://modelcontextprotocol.io)
 [![Local-First](https://img.shields.io/badge/Local--First-Privacy%20Guaranteed-22c55e?style=flat-square)](https://github.com/ambicuity/KINDX)
-[![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ambicuity/KINDX/badge)](https://scorecard.dev/viewer/?uri=github.com/ambicuity/KINDX)
@@ -194,6 +194,28 @@ Point any MCP client at `http://localhost:8181/mcp`.
 
 > **Pro-tip (Multi-Agent Deployments):** Run `kindx mcp --http --daemon` once at agent-cluster startup. All child agents share a single warm model context, eliminating per-invocation model load overhead (~3–8 s per cold start).
 
+### Release Readiness Notes (Agentic Hardening)
+
+- Session lifecycle is now explicitly managed per MCP connection, with cleanup on disconnect.
+- Tool execution responses are standardized for success/error shape consistency.
+- MCP initialize may include bounded workspace memory summaries when scoped memories exist.
+- Structured vector fan-out runs concurrently but merges in deterministic order for stable rankings.
+
+Risk notes for constrained hosts:
+- If local model initialization fails (VRAM/Metal/CUDA limits), force CPU fallback:
+  - `KINDX_CPU_ONLY=1 kindx query "..."`.
+- Closed MCP sessions must not be reused by clients (`mcp-session-id` becomes invalid).
+
+Benchmark helper (release gate evidence):
+
+```bash
+tsx tooling/benchmark_release_hardening.ts --collection docs --query "auth token flow" --runs 5
+```
+
+Audit artifacts:
+- `reference/audits/release-readiness-hardening-2026-04-02.md`
+- `reference/audits/release-readiness-benchmarks-2026-04-02.md`
+
 ---
 
 ## Architecture
@@ -328,7 +350,7 @@ The `query` command uses Reciprocal Rank Fusion (RRF) with position-aware blendi
 
 ### System Requirements
 
-- Node.js >= 22
+- Node.js >= 20
 - Bun >= 1.0.0
 - macOS: Homebrew SQLite (for extension support)
 
@@ -355,7 +377,7 @@ KINDX uses three local GGUF models (auto-downloaded on first use):
 
 - `embeddinggemma-300M-Q8_0` — embedding model
 - `qwen3-reranker-0.6b-q8_0` — cross-encoder reranker
-- `kindx-query-expansion-1.7B-q4_k_m` — query expansion (fine-tuned)
+- `LFM2.5-1.2B-Instruct-Q4_K_M` — query expansion (LiquidAI LFM2)
 
 Models are downloaded from HuggingFace and cached in `~/.cache/kindx/models/`.
 
@@ -443,6 +465,27 @@ npm install -g @ambicuity/kindx
 
 After any of the above, `kindx --version` should print the installed version.
 
+### Troubleshooting: Local LLM Context Init Failures
+
+If `kindx embed` or `kindx query` fails with messages like `Failed to create any embedding context`, `Failed to create any rerank context`, or low-level `ggml`/`metal` allocation errors:
+
+1. KINDX now automatically retries once in CPU-only mode when local context initialization fails.
+2. You can force CPU mode explicitly for deterministic behavior:
+
+```bash
+KINDX_CPU_ONLY=1 kindx embed
+KINDX_CPU_ONLY=1 kindx query "your query"
+```
+
+3. If local models remain unstable, use remote backend mode:
+
+```bash
+KINDX_LLM_BACKEND=remote kindx query "your query"
+```
+
+### Troubleshooting: MCP HTTP Bind
+
+`kindx mcp --http` attempts to bind `localhost` first, then falls back to `127.0.0.1` if localhost binding is restricted by the host environment.
 
 ## Usage Reference
 
@@ -791,14 +834,7 @@ erDiagram
 |----------|---------|-------------|
 | `KINDX_EMBED_MODEL` | `embeddinggemma-300M` | Override embedding model (HuggingFace URI) |
 | `KINDX_EXPAND_CONTEXT_SIZE` | `2048` | Context window for query expansion LLM |
-| `KINDX_RERANK_CONTEXT_SIZE` | `4096` | Context window for reranking contexts |
-| `KINDX_LOW_VRAM` | (auto) | Force low-VRAM policy on/off (`1`/`0`) |
-| `KINDX_VRAM_BUDGET_MB` | (unset) | Optional GPU budget in MB; constrains context + parallelism |
-| `KINDX_LOW_VRAM_THRESHOLD_MB` | `6144` | Auto low-VRAM threshold based on free GPU memory |
-| `KINDX_LOW_VRAM_EMBED_PARALLELISM` | `2` | Max embedding context parallelism in low-VRAM mode |
-| `KINDX_LOW_VRAM_RERANK_PARALLELISM` | `1` | Max rerank context parallelism in low-VRAM mode |
-| `KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE` | `1024` | Expansion context size cap in low-VRAM mode |
-| `KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE` | `1024` | Rerank context size cap in low-VRAM mode |
+| `KINDX_CPU_ONLY` | (unset) | Set to `1` to force local model execution on CPU (slower, but more compatible) |
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
 | `KINDX_SEMANTIC_CACHE_THRESHOLD` | `0.92` | Minimum cosine similarity to reuse semantic query-expansion cache |
 | `KINDX_CACHE_TTL_HOURS` | `168` | Semantic query-expansion cache entry TTL in hours |
@@ -810,6 +846,48 @@ erDiagram
 | `KINDX_OPENAI_EMBED_MODEL`| `nomic-embed-text` | Model name to pass for `/v1/embeddings` |
 | `KINDX_OPENAI_GENERATE_MODEL` | `llama3.2` | Model name to pass for `/v1/chat/completions` (query expansion) |
 | `KINDX_OPENAI_RERANK_MODEL` | (unset) | Model name to pass for `/v1/rerank` (if supported by backend) |
+| `KINDX_ARCH_ENABLED` | `0` | Enable optional Arch integration |
+| `KINDX_ARCH_AUGMENT_ENABLED` | `0` | Enable Arch hint augmentation for queries |
+| `KINDX_ARCH_AUTO_REFRESH_ON_UPDATE` | `0` | Run Arch refresh automatically after `kindx update` |
+| `KINDX_ARCH_REPO_PATH` | `./tmp/arch` | Path to Arch repository |
+| `KINDX_ARCH_PYTHON_BIN` | `python3` | Python executable for Arch sidecar pipeline |
+| `KINDX_ARCH_COLLECTION` | `__arch` | Collection name used for imported distilled artifacts |
+| `KINDX_ARCH_ARTIFACT_DIR` | `$XDG_CACHE_HOME/kindx/arch` | Root path for Arch sidecar and distilled artifacts |
+| `KINDX_ARCH_MIN_CONFIDENCE` | `INFERRED` | Minimum Arch edge confidence to include when distilling |
+| `KINDX_ARCH_MAX_HINTS` | `3` | Max graph hints returned for augmentation |
+
+---
+
+## Optional Arch Integration
+
+KINDX can optionally use Arch as a sidecar architecture-intelligence layer while preserving the main KINDX retrieval pipeline.
+
+```bash
+# 1) Enable feature flags
+export KINDX_ARCH_ENABLED=1
+export KINDX_ARCH_AUGMENT_ENABLED=1
+
+# 2) Build sidecar artifacts for current repo
+kindx arch build
+
+# 3) Import distilled artifacts into a separate collection
+kindx arch import
+
+# 4) Run end-to-end in one step
+kindx arch refresh
+```
+
+CLI subcommands:
+- `kindx arch status`: Show repo/artifact/manifest status.
+- `kindx arch build [path]`: Run Arch sidecar and distill output (no import).
+- `kindx arch import [path]`: Import existing distilled artifacts into KINDX collection.
+- `kindx arch refresh [path]`: Build + distill + import.
+
+Update/query flags:
+- `kindx update --arch-refresh`: Rebuild/import Arch artifacts after collection update.
+- `kindx query ... --arch-hints`: Add optional Arch hints to result payloads.
+
+This integration is additive and reversible; KINDX core retrieval, ranking, storage, and MCP query contracts remain unchanged.
 
 ---
 
@@ -861,8 +939,8 @@ Models are configured in `engine/inference.ts` as HuggingFace URIs:
 
 ```typescript
 const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
-const DEFAULT_GENERATE_MODEL = "hf:ambicuity/kindx-query-expansion-1.7B-gguf/kindx-query-expansion-1.7B-q4_k_m.gguf";
+const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-Q8_0.gguf";
+const DEFAULT_GENERATE_MODEL = "hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
 ```
 
 ---

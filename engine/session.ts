@@ -15,7 +15,6 @@
 
 import { getDefaultLLM, formatQueryForEmbedding } from "./inference.js";
 import type { EmbeddingResult } from "./inference.js";
-import { randomUUID } from "node:crypto";
 
 // =============================================================================
 // Types
@@ -282,7 +281,11 @@ export const SessionRegistry = {
 // =============================================================================
 
 function generateSessionId(): string {
-  return randomUUID();
+  // Use crypto.randomUUID if available (Node 16.7+), otherwise fallback.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**

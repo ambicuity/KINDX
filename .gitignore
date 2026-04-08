@@ -26,6 +26,12 @@ bun.lock
 # Test artifacts
 coverage/
 .vitest/
+test_corpus/
+test_watch_collection/
+mock_chroma.sqlite3
+
+# Embedded integration repos
+openclaw-integration/
 
 # KINDX cache (local development)
 .cache/kindx/

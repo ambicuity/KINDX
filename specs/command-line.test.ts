@@ -234,6 +234,17 @@ describe("CLI Help", () => {
     expect(stdout).toContain("Usage:");
     expect(stdout).toContain("kindx collection add");
     expect(stdout).toContain("kindx search");
+    expect(stdout).toContain("kindx arch <subcommand>");
+    expect(stdout).toContain("Arch commands:");
+    expect(stdout).toContain("kindx arch status [path]");
+    expect(stdout).toContain("kindx arch refresh [path]");
+    expect(stdout).toContain("Usage: kindx arch <status|build|import|refresh>");
+    expect(stdout).toContain("KINDX_ARCH_ENABLED=1");
+    expect(stdout).toContain("KINDX_ARCH_REPO_PATH");
+    expect(stdout).toContain("KINDX_ARCH_ARTIFACT_DIR");
+    expect(stdout).toContain("KINDX_ARCH_COLLECTION");
+    expect(stdout).toContain("--arch-hints");
+    expect(stdout).toContain("--arch-refresh");
     expect(stdout).toContain("--mask");
     expect(stdout).toContain("--from");
     expect(stdout).toContain("--line-numbers");
@@ -1469,26 +1480,12 @@ describe("CLI Memory Commands", () => {
   });
 
   test("memory commands emit stable JSON payloads", async () => {
-    const parseCliJson = (raw: string): any => {
-      const trimmed = raw.trim();
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        const start = trimmed.indexOf("{");
-        const end = trimmed.lastIndexOf("}");
-        if (start >= 0 && end > start) {
-          return JSON.parse(trimmed.slice(start, end + 1));
-        }
-        throw new Error(`Expected JSON output but received: ${trimmed}`);
-      }
-    };
-
     const put = await runQmd(
       ["memory", "put", "--scope", "cli-test", "--key", "profile:role", "--value", "engineer", "--json"],
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(put.exitCode).toBe(0);
-    const putJson = parseCliJson(put.stdout);
+    const putJson = JSON.parse(put.stdout);
     expect(putJson.scope).toBe("cli-test");
     expect(putJson.memory).toBeDefined();
     expect(typeof putJson.memory.id).toBe("number");
@@ -1498,7 +1495,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(search.exitCode).toBe(0);
-    const searchJson = parseCliJson(search.stdout);
+    const searchJson = JSON.parse(search.stdout);
     expect(searchJson.scope).toBe("cli-test");
     expect(searchJson.mode).toBe("text");
     expect(Array.isArray(searchJson.results)).toBe(true);
@@ -1508,7 +1505,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(history.exitCode).toBe(0);
-    const historyJson = parseCliJson(history.stdout);
+    const historyJson = JSON.parse(history.stdout);
     expect(historyJson.scope).toBe("cli-test");
     expect(Array.isArray(historyJson.history)).toBe(true);
 
@@ -1517,7 +1514,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(stats.exitCode).toBe(0);
-    const statsJson = parseCliJson(stats.stdout);
+    const statsJson = JSON.parse(stats.stdout);
     expect(statsJson.scope).toBe("cli-test");
     expect(typeof statsJson.totalMemories).toBe("number");
   });

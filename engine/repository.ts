@@ -2,7 +2,7 @@
  * KINDX Repository - Core data access and retrieval functions
  *
  * This module provides all database operations, search functions, and document
- * retrieval for QMD. It returns raw data structures that can be formatted by
+ * retrieval for kindx. It returns raw data structures that can be formatted by
  * CLI or MCP consumers.
  *
  * Usage:
@@ -1764,13 +1764,13 @@ export function matchFilesByGlob(db: Database, pattern: string): { filepath: str
     if (coll) {
       const physicalPath = pathResolve(coll.pwd, f.path);
       const relativePathToCwd = relative(cwd, physicalPath);
-      
+
       if (isMatch(physicalPath) || isMatch(relativePathToCwd) || (relativePathToCwd.startsWith('..') === false && isMatch(`./${relativePathToCwd}`))) {
-         results.push({
-            filepath: f.virtual_path,
-            displayPath: f.path,
-            bodyLength: f.body_length
-          });
+        results.push({
+          filepath: f.virtual_path,
+          displayPath: f.path,
+          bodyLength: f.body_length
+        });
       }
     }
   }
@@ -2869,7 +2869,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
     const absolutePath = pathResolve(process.cwd(), filepath);
     const virtualP = toVirtualPath(db, absolutePath);
     if (virtualP) {
-       doc = db.prepare(`
+      doc = db.prepare(`
         SELECT ${selectCols}
         FROM documents d
         JOIN content ON content.hash = d.hash
@@ -3492,7 +3492,7 @@ export async function hybridQuery(
     if (rrfRank <= 3) rrfWeight = 0.75;
     else if (rrfRank <= 10) rrfWeight = 0.60;
     else rrfWeight = 0.40;
-    
+
     // Replace severe 1/rank penalty with a softer exponential decay.
     // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
     const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
@@ -3977,7 +3977,7 @@ export async function structuredSearchWithDiagnostics(
     if (rrfRank <= 3) rrfWeight = 0.75;
     else if (rrfRank <= 10) rrfWeight = 0.60;
     else rrfWeight = 0.40;
-    
+
     // Replace severe 1/rank penalty with a softer exponential decay.
     // Rank 1 = 1.0, Rank 2 = 0.83, Rank 3 = 0.69, Rank 4 = 0.57 ...
     const rrfScore = Math.max(0.01, Math.exp(-(rrfRank - 1) / 5.5));
@@ -4055,28 +4055,28 @@ async function indexSingleFile(
   try {
     const { readFileSync, statSync } = await import("fs");
     const { createHash } = await import("crypto");
-    
+
     // Read file and hash
     const content = readFileSync(absolutePath, "utf-8");
     const stat = statSync(absolutePath);
     const hash = createHash("sha256").update(content).digest("hex");
-    
+
     // Check if unchanged
     const activeDoc = findActiveDocument(db, collectionName, relativePath);
     if (activeDoc && activeDoc.hash === hash) {
       return "unchanged";
     }
-    
+
     const now = new Date().toISOString();
     const modifiedAt = stat.mtime.toISOString();
-    
+
     db.exec("BEGIN TRANSACTION");
     try {
       insertContent(db, hash, content, now);
       if (activeDoc) {
         // Delete old vectors if hash changed
         db.prepare(`DELETE FROM content_vectors WHERE hash = ?`).run(activeDoc.hash);
-        updateDocument(db, activeDoc.id, relativePath, hash, modifiedAt); 
+        updateDocument(db, activeDoc.id, relativePath, hash, modifiedAt);
       } else {
         insertDocument(db, collectionName, relativePath, relativePath, hash, now, modifiedAt);
       }
