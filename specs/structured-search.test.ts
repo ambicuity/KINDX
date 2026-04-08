@@ -16,6 +16,7 @@ import { join } from "node:path";
 import {
   createStore,
   structuredSearch,
+  structuredSearchWithDiagnostics,
   validateSemanticQuery,
   validateLexQuery,
   type StructuredSubSearch,
@@ -303,6 +304,16 @@ describe("structuredSearch", () => {
   test("returns empty array for empty searches", async () => {
     const results = await structuredSearch(store, []);
     expect(results).toEqual([]);
+  });
+
+  test("returns diagnostics with fast profile rerank skip", async () => {
+    const out = await structuredSearchWithDiagnostics(
+      store,
+      [{ type: "lex", query: "nonexistent-term-xyz123" }],
+      { routingProfile: "fast", disableRerank: true }
+    );
+    expect(out.diagnostics.routingProfile).toBe("fast");
+    expect(Array.isArray(out.diagnostics.fallbackReasons)).toBe(true);
   });
 
   test("returns empty array when no documents match", async () => {

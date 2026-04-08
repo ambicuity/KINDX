@@ -35,7 +35,6 @@ afterAll(async () => {
 function initTestDatabase(db: Database): void {
   loadSqliteVec(db);
   db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA busy_timeout = 5000");
 
   // Content-addressable storage - the source of truth for document content
   db.exec(`
@@ -73,16 +72,6 @@ function initTestDatabase(db: Database): void {
       created_at TEXT NOT NULL
     )
   `);
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS document_summaries (
-      doc_hash TEXT PRIMARY KEY,
-      summary TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (doc_hash) REFERENCES content(hash) ON DELETE CASCADE
-    )
-  `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_document_summaries_created_at ON document_summaries(created_at)`);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
@@ -169,13 +158,6 @@ function seedTestData(db: Database): void {
       INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
       VALUES ('docs', ?, ?, ?, ?, ?, 1)
     `).run(doc.path, doc.title, doc.hash, now, now);
-
-    if (doc.hash === "hash1" || doc.hash === "hash2") {
-      db.prepare(`
-        INSERT INTO document_summaries (doc_hash, summary, created_at)
-        VALUES (?, ?, ?)
-      `).run(doc.hash, `Summary for ${doc.title}.`, now);
-    }
   }
 
   // Add embeddings for vector search
@@ -276,13 +258,6 @@ describe("MCP Server", () => {
   // Tool: qmd_search (BM25)
   // ===========================================================================
 
-  test("test DB setup enables SQLite concurrency pragmas", () => {
-    const journal = testDb.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
-    const timeout = testDb.prepare("PRAGMA busy_timeout").get() as { timeout: number };
-    expect(journal.journal_mode).toBe("wal");
-    expect(timeout.timeout).toBe(5000);
-  });
-
   describe("searchFTS (BM25 keyword search)", () => {
     test("returns results for matching query", () => {
       const results = searchFTS(testDb, "readme", 10);
@@ -317,67 +292,6 @@ describe("MCP Server", () => {
       expect(filtered[0]).toHaveProperty("title");
       expect(filtered[0]).toHaveProperty("score");
       expect(filtered[0]).toHaveProperty("snippet");
-    });
-
-    test("matches contiguous CJK keywords through real store indexing path", async () => {
-      const cjkConfigDir = await mkdtemp(join(tmpdir(), "kindx-mcp-cjk-config-"));
-      const cjkDbPath = join(tmpdir(), `kindx-mcp-cjk-${Date.now()}.sqlite`);
-      const prevConfigDir = process.env.KINDX_CONFIG_DIR;
-      const prevIndexName = process.env.KINDX_CONFIG_INDEX_NAME;
-
-      const cjkConfig: CollectionConfig = {
-        collections: {
-          cjk: {
-            path: "/tmp/cjk-docs",
-            pattern: "**/*.md",
-          },
-        },
-      };
-
-      try {
-        process.env.KINDX_CONFIG_DIR = cjkConfigDir;
-        setConfigIndexName(`mcp-cjk-${Date.now()}`);
-        await writeFile(join(cjkConfigDir, "index.yml"), YAML.stringify(cjkConfig));
-
-        const store = createStore(cjkDbPath);
-        const now = new Date().toISOString();
-        const hash = "cjkhash1";
-        const body = "数据库性能优化需要索引设计和事务管理";
-        store.insertContent(hash, body, now);
-        store.insertDocument("cjk", "docs/zh.md", "中文检索示例", hash, now, now);
-
-        const direct = searchFTS(store.db, "索引", 10, "cjk");
-        expect(direct.some(r => r.displayPath === "cjk/docs/zh.md")).toBe(true);
-
-        // Parity with MCP result shaping path (search + snippet extraction).
-        const structured = direct.map(r => ({
-          file: r.displayPath,
-          title: r.title,
-          score: Math.round(r.score * 100) / 100,
-          context: getContextForFile(store.db, r.filepath),
-          snippet: extractSnippet(r.body || "", "索引", 300, r.chunkPos).snippet,
-        }));
-        expect(structured.length).toBeGreaterThan(0);
-        expect(structured[0]!.file).toBe("cjk/docs/zh.md");
-
-        store.close();
-      } finally {
-        if (prevConfigDir === undefined) {
-          delete process.env.KINDX_CONFIG_DIR;
-        } else {
-          process.env.KINDX_CONFIG_DIR = prevConfigDir;
-        }
-        if (prevIndexName === undefined) {
-          delete process.env.KINDX_CONFIG_INDEX_NAME;
-        } else {
-          process.env.KINDX_CONFIG_INDEX_NAME = prevIndexName;
-        }
-        setConfigIndexName(prevIndexName || "index");
-
-        try { await unlink(cjkDbPath); } catch { }
-        try { await unlink(join(cjkConfigDir, "index.yml")); } catch { }
-        try { await rmdir(cjkConfigDir); } catch { }
-      }
     });
   });
 
@@ -956,8 +870,32 @@ describe("MCP Server", () => {
 // HTTP Transport Tests
 // =============================================================================
 
-import { startMcpHttpServer, type HttpServerHandle } from "../engine/protocol.js";
+import { startMcpHttpServer, bindHttpServerWithFallback, type HttpServerHandle, buildInstructionsForTest } from "../engine/protocol.js";
 import { enableProductionMode } from "../engine/repository.js";
+import { EventEmitter } from "node:events";
+import { SessionRegistry } from "../engine/session.js";
+import { KindxSession } from "../engine/session.js";
+
+describe("MCP HTTP bind fallback", () => {
+  test("falls back to 127.0.0.1 when localhost bind fails with retryable code", async () => {
+    class FakeServer extends EventEmitter {
+      attempt = 0;
+      listen(_port: number, host: string) {
+        this.attempt += 1;
+        if (host === "localhost") {
+          this.emit("error", Object.assign(new Error("blocked"), { code: "EPERM" }));
+        } else {
+          this.emit("listening");
+        }
+        return this as any;
+      }
+    }
+
+    const server = new FakeServer() as unknown as import("http").Server;
+    const host = await bindHttpServerWithFallback(server, 8181);
+    expect(host).toBe("127.0.0.1");
+  });
+});
 
 describe("MCP HTTP Transport", () => {
   let handle: HttpServerHandle;
@@ -967,7 +905,6 @@ describe("MCP HTTP Transport", () => {
   // Stash original env to restore after tests
   const origIndexPath = process.env.INDEX_PATH;
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
-  const origStartupPreload = process.env.KINDX_STARTUP_PRELOAD;
 
   beforeAll(async () => {
     // Create isolated test database with seeded data
@@ -993,7 +930,6 @@ describe("MCP HTTP Transport", () => {
     // Point createStore() at our test DB
     process.env.INDEX_PATH = httpTestDbPath;
     process.env.KINDX_CONFIG_DIR = httpTestConfigDir;
-    process.env.KINDX_STARTUP_PRELOAD = "0";
 
     handle = await startMcpHttpServer(0, { quiet: true }); // OS-assigned ephemeral port
     baseUrl = `http://localhost:${handle.port}`;
@@ -1007,8 +943,6 @@ describe("MCP HTTP Transport", () => {
     else delete process.env.INDEX_PATH;
     if (origConfigDir !== undefined) process.env.KINDX_CONFIG_DIR = origConfigDir;
     else delete process.env.KINDX_CONFIG_DIR;
-    if (origStartupPreload !== undefined) process.env.KINDX_STARTUP_PRELOAD = origStartupPreload;
-    else delete process.env.KINDX_STARTUP_PRELOAD;
 
     // Clean up test files
     try { unlinkSync(httpTestDbPath); } catch { }
@@ -1023,18 +957,13 @@ describe("MCP HTTP Transport", () => {
   // Health & routing
   // ---------------------------------------------------------------------------
 
-  test("GET /health returns warmed readiness details", async () => {
+  test("GET /health returns 200 with status and uptime", async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(typeof body.uptime).toBe("number");
-    expect(typeof body.warmed).toBe("boolean");
-    expect(body.models).toBeDefined();
-    expect(typeof body.models.embed).toBe("string");
-    expect(typeof body.models.rerank).toBe("string");
-    expect(typeof body.models.expand).toBe("string");
   });
 
   test("GET /other returns 404", async () => {
@@ -1107,7 +1036,11 @@ describe("MCP HTTP Transport", () => {
     expect(toolNames).toContain("query");
     expect(toolNames).toContain("get");
     expect(toolNames).toContain("status");
-    expect(toolNames).toContain("kindx_feedback");
+    expect(toolNames).toContain("memory_put");
+    expect(toolNames).toContain("memory_search");
+    expect(toolNames).toContain("memory_history");
+    expect(toolNames).toContain("memory_stats");
+    expect(toolNames).toContain("memory_mark_accessed");
   });
 
   test("POST /mcp tools/call query returns results", async () => {
@@ -1126,6 +1059,26 @@ describe("MCP HTTP Transport", () => {
     // Should have content array with text results
     expect(json.result.content.length).toBeGreaterThan(0);
     expect(json.result.content[0].type).toBe("text");
+    expect(json.result.structuredContent).toBeDefined();
+    expect(json.result.structuredContent.timings).toBeDefined();
+    expect(typeof json.result.structuredContent.timings.total_ms).toBe("number");
+  });
+
+  test("POST /query includes timing metadata", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "readme" }],
+        limit: 5,
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.metadata).toBeDefined();
+    expect(body.metadata.timings).toBeDefined();
+    expect(typeof body.metadata.timings.total_ms).toBe("number");
   });
 
   test("POST /mcp tools/call get returns document", async () => {
@@ -1142,49 +1095,108 @@ describe("MCP HTTP Transport", () => {
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
-    expect(json.result.structuredContent).toBeDefined();
-    expect(json.result.structuredContent.summary).toContain("Summary for Project README.");
   });
 
-  test("POST /mcp tools/call multi_get includes summary metadata", async () => {
+  test("same session supports repeated tool calls and keeps MCP contract stable", async () => {
+    sessionId = null;
     await mcpRequest({
-      jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+      jsonrpc: "2.0", id: 51, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "repeat-client", version: "1.0" } },
     });
+    expect(sessionId).toBeTruthy();
 
-    const { status, json } = await mcpRequest({
-      jsonrpc: "2.0", id: 6, method: "tools/call",
-      params: { name: "multi_get", arguments: { pattern: "readme.md, api.md" } },
+    const first = await mcpRequest({
+      jsonrpc: "2.0", id: 52, method: "tools/call",
+      params: { name: "query", arguments: { searches: [{ type: "lex", query: "meeting" }] } },
     });
-    expect(status).toBe(200);
-    expect(Array.isArray(json.result.structuredContent.documents)).toBe(true);
-    const readme = json.result.structuredContent.documents.find((doc: any) => doc.file === "docs/readme.md");
-    expect(readme?.summary).toContain("Summary for Project README.");
+    expect(first.status).toBe(200);
+    expect(first.json.result.structuredContent).toBeDefined();
+
+    const second = await mcpRequest({
+      jsonrpc: "2.0", id: 53, method: "tools/call",
+      params: { name: "query", arguments: { searches: [{ type: "lex", query: "meeting" }] } },
+    });
+    expect(second.status).toBe(200);
+    expect(second.json.result.structuredContent).toBeDefined();
+    expect(typeof second.json.result.structuredContent.timings.total_ms).toBe("number");
   });
 
-  test("POST /mcp tools/call kindx_feedback stores feedback", async () => {
+  test("DELETE /mcp closes session and subsequent calls with stale session id fail", async () => {
+    sessionId = null;
     await mcpRequest({
-      jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+      jsonrpc: "2.0", id: 61, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "close-client", version: "1.0" } },
     });
+    const closedSessionId = sessionId;
+    expect(closedSessionId).toBeTruthy();
 
-    const { status, json } = await mcpRequest({
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: {
-        name: "kindx_feedback",
-        arguments: {
-          query: "readme",
-          chunkId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
-          signal: "irrelevant",
-        },
+    const deleteRes = await fetch(`${baseUrl}/mcp`, {
+      method: "DELETE",
+      headers: {
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": closedSessionId || "",
       },
     });
-    expect(status).toBe(200);
-    expect(json.result.isError).not.toBe(true);
-    expect(json.result.structuredContent.stored).toBe(true);
-    expect(json.result.structuredContent.signal).toBe("irrelevant");
+    expect(deleteRes.status).toBe(200);
+
+    const staleRes = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": closedSessionId || "",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 62,
+        method: "tools/list",
+        params: {},
+      }),
+    });
+    expect(staleRes.status).toBe(404);
+    const staleBody = await staleRes.json();
+    expect(staleBody.error.message).toContain("Session not found");
+  });
+
+  test("session registry remains bounded under create/close cycles", async () => {
+    const baseline = SessionRegistry.size;
+
+    for (let i = 0; i < 5; i++) {
+      let localSid: string | null = null;
+      const initRes = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 70 + i,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "bounded-client", version: "1.0" },
+          },
+        }),
+      });
+      localSid = initRes.headers.get("mcp-session-id");
+      expect(initRes.status).toBe(200);
+      expect(localSid).toBeTruthy();
+
+      const closeRes = await fetch(`${baseUrl}/mcp`, {
+        method: "DELETE",
+        headers: {
+          "Accept": "application/json, text/event-stream",
+          "mcp-session-id": localSid || "",
+        },
+      });
+      expect(closeRes.status).toBe(200);
+    }
+
+    // Registry may still contain entries from the shared test session,
+    // but it must stay bounded and not grow linearly with close cycles.
+    expect(SessionRegistry.size).toBeLessThanOrEqual(baseline + 2);
   });
 
   test("server uses dbPath instead of default index.sqlite", async () => {
@@ -1230,5 +1242,206 @@ describe("MCP HTTP Transport", () => {
       await testHandle.stop();
       if (originalIndexPath !== undefined) process.env.INDEX_PATH = originalIndexPath;
     }
+  });
+
+  test("memory tools work end-to-end in one scoped session", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 101,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+        rootUri: "file:///tmp/workspace-alpha",
+      },
+    });
+
+    const put = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 102,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: {
+          key: "profile:role",
+          value: "engineer",
+          tags: ["profile"],
+          source: "test",
+        },
+      },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json.result.structuredContent.scope).toBe("workspace-alpha");
+    const memoryId = Number(put.json.result.structuredContent.memory.id);
+    expect(memoryId).toBeGreaterThan(0);
+
+    const search = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 103,
+      method: "tools/call",
+      params: {
+        name: "memory_search",
+        arguments: {
+          query: "engineer",
+          mode: "text",
+        },
+      },
+    });
+    expect(search.status).toBe(200);
+    expect(search.json.result.structuredContent.results.length).toBeGreaterThan(0);
+
+    const history = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 104,
+      method: "tools/call",
+      params: {
+        name: "memory_history",
+        arguments: { key: "profile:role" },
+      },
+    });
+    expect(history.status).toBe(200);
+    expect(history.json.result.structuredContent.history.length).toBeGreaterThan(0);
+
+    const mark = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 105,
+      method: "tools/call",
+      params: {
+        name: "memory_mark_accessed",
+        arguments: { id: memoryId },
+      },
+    });
+    expect(mark.status).toBe(200);
+    expect(mark.json.result.structuredContent.marked).toBe(true);
+
+    const stats = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 106,
+      method: "tools/call",
+      params: {
+        name: "memory_stats",
+        arguments: {},
+      },
+    });
+    expect(stats.status).toBe(200);
+    expect(stats.json.result.structuredContent.scope).toBe("workspace-alpha");
+    expect(stats.json.result.structuredContent.totalMemories).toBeGreaterThan(0);
+  });
+
+  test("initialize instructions include bounded memory prefetch only when scope has entries", async () => {
+    sessionId = null;
+    const init = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 401,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "prefetch-client", version: "1.0" },
+        rootUri: "file:///tmp/workspace-prefetch",
+      },
+    });
+    expect(init.status).toBe(200);
+    const initialInstructions = String(init.json?.result?.instructions ?? "");
+    expect(initialInstructions.includes("Workspace memory (top accessed):")).toBe(false);
+
+    // Insert more than 3 entries; initialize should still show a bounded subset.
+    let resolvedScope = "workspace-prefetch";
+    for (let i = 0; i < 5; i++) {
+      const put = await mcpRequest({
+        jsonrpc: "2.0",
+        id: 410 + i,
+        method: "tools/call",
+        params: {
+          name: "memory_put",
+          arguments: {
+            key: `prefetch:key:${i}`,
+            value: `value-${i} ` + "x".repeat(300),
+          },
+        },
+      });
+      expect(put.status).toBe(200);
+      resolvedScope = String(put.json?.result?.structuredContent?.scope ?? resolvedScope);
+    }
+
+    // Validate the bounded memory block directly via test hook.
+    const store = createStore(httpTestDbPath);
+    const instructions = buildInstructionsForTest(
+      store,
+      new KindxSession({ workspaceScope: resolvedScope })
+    );
+    store.close();
+
+    expect(instructions.includes("Workspace memory (top accessed):")).toBe(true);
+
+    const memoryLines = instructions
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("- value-"));
+    expect(memoryLines.length).toBeGreaterThan(0);
+    expect(memoryLines.length).toBeLessThanOrEqual(3);
+    for (const line of memoryLines) {
+      expect(line.length).toBeLessThanOrEqual(130);
+    }
+  });
+
+  test("memory tools reject explicit cross-scope access", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 201,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+        rootUri: "file:///tmp/workspace-alpha",
+      },
+    });
+
+    const denied = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 202,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: {
+          scope: "workspace-beta",
+          key: "profile:city",
+          value: "Austin",
+        },
+      },
+    });
+
+    expect(denied.status).toBe(200);
+    expect(denied.json.result.isError).toBe(true);
+    expect(denied.json.result.content[0].text).toContain("cross_scope_forbidden");
+  });
+
+  test("memory tools fall back to default scope when no session scope exists", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 301,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    const put = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 302,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: { key: "profile:language", value: "TypeScript" },
+      },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json.result.structuredContent.scope).toBe("default");
   });
 });

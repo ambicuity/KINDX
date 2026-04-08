@@ -128,9 +128,34 @@ Or structured format:
   "searches": [
     { "type": "lex", "query": "CAP theorem" },
     { "type": "vec", "query": "consistency vs availability" }
-  ]
+  ],
+  "routingProfile": "balanced"
 }
 ```
+
+`routingProfile` supports:
+- `fast` — lower candidate/rerank budgets (lower latency)
+- `balanced` — default profile
+- `max_precision` — higher candidate/rerank budgets (better recall/precision, higher latency)
+
+Structured responses now include metadata:
+- `metadata.timings`
+- `metadata.degraded_mode`
+- `metadata.fallback_reason` / `metadata.fallback_reasons`
+- `metadata.routing_profile`
+- `metadata.scope`
+- `metadata.dedupe_joined` / `metadata.dedupe_join_hits`
+- `metadata.replay_artifact` / `metadata.replay_artifact_path` (when `KINDX_QUERY_REPLAY_DIR` is set)
+
+MCP control-plane policy is configurable via `mcp-servers.json` (project `.kindx/mcp-servers.json`, user config dir, or `KINDX_MCP_SERVERS_JSON` override) with:
+- `mcp_servers.<id>.enabled_tools`
+- `mcp_servers.<id>.disabled_tools`
+- `mcp_servers.<id>.startup_timeout_sec`
+- `mcp_servers.<id>.tool_timeout_sec`
+- `mcp_servers.<id>.http_headers`
+- `mcp_servers.<id>.env_http_headers`
+- `mcp_servers.<id>.bearer_token_env_var`
+- `mcp_servers.<id>.project_scoped`
 
 ## CLI
 

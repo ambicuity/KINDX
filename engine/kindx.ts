@@ -24,21 +24,14 @@ import {
   isDocid,
   matchFilesByGlob,
   getHashesNeedingEmbedding,
-  getDocumentsForEmbedding,
-  getExistingEmbeddingChunksForHash,
-  updateEmbeddingChunkMetadata,
-  deleteEmbeddingsForHashSeqs,
-  findReusableEmbeddingByChunkHash,
-  getDocumentSummary,
-  setDocumentSummary,
+  getHashesForEmbedding,
   clearAllEmbeddings,
   insertEmbedding,
+  bulkInsertEmbeddings,
   getStatus,
   hashContent,
-  hashChunkContent,
   extractTitle,
   formatDocForEmbedding,
-  chunkDocument,
   chunkDocumentByTokens,
   clearCache,
   getCacheKey,
@@ -59,11 +52,11 @@ import {
   getActiveDocumentPaths,
   cleanupOrphanedContent,
   deleteLLMCache,
-  deleteSemanticCache,
   deleteInactiveDocuments,
   cleanupOrphanedVectors,
-  shouldInvalidateSemanticCache,
+  cleanupSqliteSidecars,
   vacuumDatabase,
+  walCheckpointTruncate,
   getCollectionsWithoutContext,
   getTopLevelPathsWithoutContext,
   handelize,
@@ -82,8 +75,7 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./repository.js";
-import { disposeDefaultLLM, getDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
-import { preloadModels } from "./preloader.js";
+import { disposeDefaultLLM, getDefaultLLM, withLLMScope, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -101,6 +93,17 @@ import {
   listAllContexts,
   setConfigIndexName,
 } from "./catalogs.js";
+import {
+  upsertMemory,
+  semanticSearchMemory,
+  textSearchMemory,
+  getMemoryHistory,
+  getMemoryStats,
+  markMemoryAccessed,
+  embedMemories,
+  resolveMemoryScope as resolveMemoryScopeShared,
+  deriveWorkspaceMemoryScope,
+} from "./memory.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -133,6 +136,12 @@ function closeDb(): void {
 
 function getDbPath(): string {
   return store?.dbPath ?? storeDbPathOverride ?? getDefaultDbPath();
+}
+
+function getKindxCacheDir(): string {
+  return process.env.XDG_CACHE_HOME
+    ? resolve(process.env.XDG_CACHE_HOME, "kindx")
+    : resolve(homedir(), ".cache", "kindx");
 }
 
 function setIndexName(name: string | null): void {
@@ -313,9 +322,7 @@ async function showStatus(): Promise<void> {
   console.log(`Size:  ${formatBytes(indexSize)}`);
 
   // MCP daemon status (check PID file liveness)
-  const mcpCacheDir = process.env.XDG_CACHE_HOME
-    ? resolve(process.env.XDG_CACHE_HOME, "kindx")
-    : resolve(homedir(), ".cache", "kindx");
+  const mcpCacheDir = getKindxCacheDir();
   const mcpPidPath = resolve(mcpCacheDir, "mcp.pid");
   if (existsSync(mcpPidPath)) {
     const mcpPid = parseInt(readFileSync(mcpPidPath, "utf-8").trim());
@@ -502,11 +509,6 @@ async function showStatus(): Promise<void> {
   closeDb();
 }
 
-type SemanticDeltaAccumulator = {
-  activeDocsBefore: number;
-  changedCount: number;
-};
-
 async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
@@ -522,15 +524,14 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
     return;
   }
 
-  // Filter to specific collections if --collection flags were provided
-  const requestedCollections = Array.isArray(collectionFilter)
-    ? collectionFilter
-    : collectionFilter ? [collectionFilter] : [];
-  if (requestedCollections.length > 0) {
-    const requestedSet = new Set(requestedCollections);
-    collections = collections.filter(col => requestedSet.has(col.name));
+  // Filter to a single collection if --collection flag was provided
+  if (collectionFilter) {
+    const filterName = Array.isArray(collectionFilter)
+      ? collectionFilter[0]
+      : collectionFilter;
+    collections = collections.filter(col => col.name === filterName);
     if (collections.length === 0) {
-      console.error(`${c.yellow}Collection not found: ${requestedCollections.join(", ")}${c.reset}`);
+      console.error(`${c.yellow}Collection not found: ${filterName}${c.reset}`);
       console.error(`Run 'kindx collection list' to see available collections.`);
       closeDb();
       process.exit(1);
@@ -539,8 +540,6 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
 
   // Don't close db here - indexFiles will reuse it and close at the end
   console.log(`${c.bold}Updating ${collections.length} collection(s)...${c.reset}\n`);
-  const activeDocsBefore = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
-  const semanticDelta: SemanticDeltaAccumulator = { activeDocsBefore, changedCount: 0 };
 
   for (let i = 0; i < collections.length; i++) {
     const col = collections[i];
@@ -583,18 +582,12 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
       }
     }
 
-    await indexFiles(col.pwd, col.glob_pattern, col.name, true, yamlCol?.ignore, semanticDelta);
+    await indexFiles(col.pwd, col.glob_pattern, col.name, true, yamlCol?.ignore);
     console.log("");
   }
 
   // Check if any documents need embedding (show once at end)
   const finalDb = getDb();
-  if (shouldInvalidateSemanticCache(semanticDelta.changedCount, semanticDelta.activeDocsBefore)) {
-    const flushed = deleteSemanticCache(finalDb);
-    if (flushed > 0) {
-      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
-    }
-  }
   const needsEmbedding = getHashesNeedingEmbedding(finalDb);
   closeDb();
 
@@ -1421,21 +1414,11 @@ function collectionRename(oldName: string, newName: string): void {
   console.log(`  Virtual paths updated: ${c.cyan}kindx://${oldName}/${c.reset} → ${c.cyan}kindx://${newName}/${c.reset}`);
 }
 
-async function indexFiles(
-  pwd?: string,
-  globPattern: string = DEFAULT_GLOB,
-  collectionName?: string,
-  suppressEmbedNotice: boolean = false,
-  ignorePatterns?: string[],
-  semanticDelta?: SemanticDeltaAccumulator
-): Promise<void> {
+async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false, ignorePatterns?: string[]): Promise<void> {
   const db = getDb();
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
   const excludeDirs = ["node_modules", ".git", ".cache", "vendor", "dist", "build"];
-  const activeDocsBefore = semanticDelta
-    ? semanticDelta.activeDocsBefore
-    : (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
 
   // Clear Ollama cache on index
   clearCache(db);
@@ -1552,15 +1535,6 @@ async function indexFiles(
 
   // Clean up orphaned content hashes (content not referenced by any document)
   const orphanedContent = cleanupOrphanedContent(db);
-  const changedCount = indexed + updated + removed;
-  if (semanticDelta) {
-    semanticDelta.changedCount += changedCount;
-  } else if (shouldInvalidateSemanticCache(changedCount, activeDocsBefore)) {
-    const flushed = deleteSemanticCache(db);
-    if (flushed > 0) {
-      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
-    }
-  }
 
   // Check if vector index needs updating
   const needsEmbedding = getHashesNeedingEmbedding(db);
@@ -1585,93 +1559,9 @@ function renderProgressBar(percent: number, width: number = 30): string {
   return bar;
 }
 
-function isVecTableCompatible(db: Database, dimensions: number): boolean {
-  const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql?: string } | undefined;
-  if (!tableInfo?.sql) return false;
-  const match = tableInfo.sql.match(/float\[(\d+)\]/);
-  const hasHashSeq = tableInfo.sql.includes("hash_seq");
-  const hasCosine = tableInfo.sql.includes("distance_metric=cosine");
-  const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
-  return existingDims === dimensions && hasHashSeq && hasCosine;
-}
-
-function isLikelyTestRuntime(): boolean {
-  return !!(
-    process.env.VITEST ||
-    process.env.BUN_TEST ||
-    process.env.KINDX_DETERMINISTIC_EMBEDDINGS === "1"
-  );
-}
-
-function createDeterministicEmbedding(seed: string, dimensions: number): Float32Array {
-  const vec = new Float32Array(dimensions);
-  for (let i = 0; i < dimensions; i++) {
-    const a = seed.charCodeAt(i % seed.length) || 0;
-    const b = seed.charCodeAt((i * 7 + 13) % seed.length) || 0;
-    vec[i] = ((a ^ b) % 101) / 50 - 1;
-  }
-  return vec;
-}
-
-function getDeterministicEmbeddingDimensions(model: string): number {
-  // Keep deterministic test-runtime vectors shape-compatible with the local
-  // embedding model used for query-time embeddings.
-  if (!model || model === DEFAULT_EMBED_MODEL) return 768;
-  return 768;
-}
-
-function fallbackDocumentSummary(body: string): string {
-  const preview = body.slice(0, 2000).replace(/\s+/g, " ").trim();
-  if (!preview) return "No content summary available.";
-  const segments = preview
-    .split(/(?<=[.!?])\s+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const first = segments[0] ?? preview;
-  const second = segments[1] ?? "";
-  return [first, second].filter(Boolean).join(" ").slice(0, 500);
-}
-
-function normalizeGeneratedSummary(text: string): string {
-  const cleaned = text.replace(/\s+/g, " ").trim();
-  if (!cleaned) return "";
-  const segments = cleaned
-    .split(/(?<=[.!?])\s+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  return (segments.slice(0, 2).join(" ") || cleaned).slice(0, 500);
-}
-
-async function ensureDocumentSummary(hash: string, body: string): Promise<string> {
-  const db = getDb();
-  const cached = getDocumentSummary(db, hash);
-  if (cached) return cached;
-
-  const snippet = body.slice(0, 2000);
-  let summary = "";
-  if (process.env.KINDX_SUMMARY_GENERATOR === "llm") {
-    try {
-      const llm = getDefaultLLM();
-      const generated = await llm.generate(
-        `Summarize this document in exactly two concise sentences.\n\nDocument:\n${snippet}`,
-        { temperature: 0.1, maxTokens: 140 }
-      );
-      summary = normalizeGeneratedSummary(generated?.text ?? "");
-    } catch {
-      // Fall back to deterministic local summary extraction when generation fails.
-    }
-  }
-  if (!summary) {
-    summary = fallbackDocumentSummary(snippet);
-  }
-  setDocumentSummary(db, hash, summary, new Date().toISOString());
-  return summary;
-}
-
 async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
-  const testRuntime = isLikelyTestRuntime() && process.env.KINDX_LLM_BACKEND !== "remote";
 
   // If force, clear all vectors
   if (force) {
@@ -1679,299 +1569,179 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     clearAllEmbeddings(db);
   }
 
-  const docsForEmbedding = getDocumentsForEmbedding(db);
-  if (docsForEmbedding.length === 0) {
-    console.log(`${c.green}✓ No active documents to embed.${c.reset}`);
+  // Find unique hashes that need embedding (from active documents)
+  const hashesToEmbed = getHashesForEmbedding(db);
+
+  if (hashesToEmbed.length === 0) {
+    console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
     closeDb();
     return;
   }
 
-  type ChunkCandidate = {
-    hash: string;
-    title: string;
-    summary: string;
-    text: string;
-    embeddingInput: string;
-    seq: number;
-    pos: number;
-    tokens: number;
-    bytes: number;
-    displayName: string;
-    chunkHash: string;
-  };
-
-  const encoder = new TextEncoder();
-  const allChunks: ChunkCandidate[] = [];
-  const changedChunks: ChunkCandidate[] = [];
-  let totalChunks = 0;
+  // Prepare documents with chunks
+  type ChunkItem = { hash: string; title: string; text: string; seq: number; pos: number; tokens: number; bytes: number; displayName: string };
+  const allChunks: ChunkItem[] = [];
   let multiChunkDocs = 0;
-  let staleDeleted = 0;
 
-  const useTokenChunking = process.env.KINDX_EMBED_TOKEN_CHUNKING !== "0";
-  process.stderr.write(`Chunking ${docsForEmbedding.length} documents by ${useTokenChunking ? "token" : "character"} boundaries...\n`);
-
-  for (const item of docsForEmbedding) {
+  // Chunk all documents using actual token counts
+  process.stderr.write(`Chunking ${hashesToEmbed.length} documents by token count...\n`);
+  for (const item of hashesToEmbed) {
+    const encoder = new TextEncoder();
     const bodyBytes = encoder.encode(item.body).length;
-    if (bodyBytes === 0) continue;
+    if (bodyBytes === 0) continue; // Skip empty
 
-    const title = item.title || extractTitle(item.body, item.path);
-    const summary = await ensureDocumentSummary(item.hash, item.body);
-    const chunks = useTokenChunking
-      ? await chunkDocumentByTokens(item.body)
-      : chunkDocument(item.body).map((chunk) => ({
-          text: chunk.text,
-          pos: chunk.pos,
-          tokens: Math.max(1, Math.ceil(chunk.text.length / 4)),
-        }));
-    const existing = getExistingEmbeddingChunksForHash(db, item.hash);
-    const existingBySeq = new Map(existing.map((row) => [row.seq, row]));
-    const keepSeqs = new Set<number>();
+    const title = extractTitle(item.body, item.path);
+    const displayName = item.path;
+    const chunks = await chunkDocumentByTokens(item.body);  // Uses actual tokenizer
+
     if (chunks.length > 1) multiChunkDocs++;
 
     for (let seq = 0; seq < chunks.length; seq++) {
-      const chunk = chunks[seq]!;
-      keepSeqs.add(seq);
-      totalChunks++;
-      const embeddingInput = formatDocForEmbedding(chunk.text, title, model, summary);
-      const chunkHash = hashChunkContent(embeddingInput);
-      const candidate: ChunkCandidate = {
+      allChunks.push({
         hash: item.hash,
         title,
-        summary,
-        text: chunk.text,
-        embeddingInput,
+        text: chunks[seq]!.text, // Chunk is guaranteed to exist by seq loop
         seq,
-        pos: chunk.pos,
-        tokens: chunk.tokens,
-        bytes: encoder.encode(embeddingInput).length,
-        displayName: item.path,
-        chunkHash,
-      };
-      allChunks.push(candidate);
-      const existingChunk = existingBySeq.get(seq);
-
-      if (existingChunk && existingChunk.model === model && existingChunk.chunkHash === chunkHash) {
-        if (existingChunk.pos !== chunk.pos) {
-          updateEmbeddingChunkMetadata(db, item.hash, seq, chunk.pos, chunkHash);
-        }
-        continue;
-      }
-
-      changedChunks.push(candidate);
-    }
-
-    const staleSeqs = existing
-      .map((row) => row.seq)
-      .filter((seq) => !keepSeqs.has(seq));
-    if (staleSeqs.length > 0) {
-      staleDeleted += deleteEmbeddingsForHashSeqs(db, item.hash, staleSeqs);
+        pos: chunks[seq]!.pos,
+        tokens: chunks[seq]!.tokens,
+        bytes: encoder.encode(chunks[seq]!.text).length,
+        displayName,
+      });
     }
   }
 
-  let changedChunkCount = changedChunks.length;
-  const changedDocCount = new Set(changedChunks.map((chunk) => chunk.hash)).size;
-  if (shouldInvalidateSemanticCache(changedDocCount, docsForEmbedding.length)) {
-    const flushed = deleteSemanticCache(db);
-    if (flushed > 0) {
-      console.log(`Flushed ${flushed} semantic cache entr${flushed === 1 ? "y" : "ies"} (>10% corpus delta)`);
-    }
-  }
-  if (changedChunkCount === 0) {
-    if (staleDeleted > 0) {
-      console.log(`${c.green}✓ No changed chunks. Removed ${staleDeleted} stale chunk embeddings.${c.reset}`);
-    } else {
-      console.log(`${c.green}✓ No changed chunks. 0/${totalChunks} need embedding.${c.reset}`);
-    }
+  if (allChunks.length === 0) {
+    console.log(`${c.green}✓ No non-empty documents to embed.${c.reset}`);
     closeDb();
     return;
   }
 
-  let vectorTableReset = false;
-  const firstChangedChunk = changedChunks[0];
-  if (firstChangedChunk) {
-    if (testRuntime) {
-      const testEmbeddingDimensions = getDeterministicEmbeddingDimensions(model);
-      const wasCompatible = isVecTableCompatible(db, testEmbeddingDimensions);
-      ensureVecTable(db, testEmbeddingDimensions);
-      if (!wasCompatible) {
-        clearAllEmbeddings(db);
-        vectorTableReset = true;
-      }
-    } else {
-      await withLLMSession(async (session) => {
-        const probeResult = await session.embed(firstChangedChunk.embeddingInput, { model, isQuery: false });
-        if (!probeResult) {
-          throw new Error("Failed to determine embedding dimensions");
-        }
-        const wasCompatible = isVecTableCompatible(db, probeResult.embedding.length);
-        ensureVecTable(db, probeResult.embedding.length);
-        if (!wasCompatible) {
-          clearAllEmbeddings(db);
-          vectorTableReset = true;
-        }
-      }, { maxDuration: 2 * 60 * 1000, name: "embed-dimension-probe" });
-    }
-  }
+  const totalBytes = allChunks.reduce((sum, chk) => sum + chk.bytes, 0);
+  const totalChunks = allChunks.length;
+  const totalDocs = hashesToEmbed.length;
 
-  if (vectorTableReset) {
-    changedChunks.splice(0, changedChunks.length, ...allChunks);
-    changedChunkCount = changedChunks.length;
-    staleDeleted = 0;
-  }
-
-  const totalChangedBytes = changedChunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
-  const totalDocs = docsForEmbedding.length;
-  const modeLabel = vectorTableReset ? "Embedding full rebuild" : "Embedding delta";
-  console.log(`${c.bold}${modeLabel} for ${totalDocs} documents${c.reset} ${c.dim}(${changedChunkCount} changed / ${totalChunks} total chunks, ${formatBytes(totalChangedBytes)})${c.reset}`);
+  console.log(`${c.bold}Embedding ${totalDocs} documents${c.reset} ${c.dim}(${totalChunks} chunks, ${formatBytes(totalBytes)})${c.reset}`);
   if (multiChunkDocs > 0) {
     console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
   }
-  if (vectorTableReset) {
-    console.log(`${c.dim}Vector table was reset due to schema/dimension mismatch; re-embedding all chunks.${c.reset}`);
-  }
   console.log(`${c.dim}Model: ${model}${c.reset}\n`);
-
-  let chunksReused = 0;
-  let errors = 0;
-  let bytesProcessed = 0;
-  const chunksToEmbed: ChunkCandidate[] = [];
-
-  for (const chunk of changedChunks) {
-    if (!vectorTableReset) {
-      const reusable = findReusableEmbeddingByChunkHash(db, chunk.chunkHash, model);
-      if (reusable?.embedding) {
-        const source = reusable.embedding;
-        const view = new Float32Array(source.buffer, source.byteOffset, Math.floor(source.byteLength / Float32Array.BYTES_PER_ELEMENT));
-        const copied = new Float32Array(view);
-        insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, copied, model, now, chunk.chunkHash);
-        chunksReused++;
-        bytesProcessed += chunk.bytes;
-        continue;
-      }
-    }
-    chunksToEmbed.push(chunk);
-  }
 
   // Hide cursor during embedding
   cursor.hide();
 
-  if (chunksToEmbed.length > 0) {
-    if (testRuntime) {
-      const testEmbeddingDimensions = getDeterministicEmbeddingDimensions(model);
-      ensureVecTable(db, testEmbeddingDimensions);
-      for (const chunk of chunksToEmbed) {
-        insertEmbedding(
-          db,
-          chunk.hash,
-          chunk.seq,
-          chunk.pos,
-          createDeterministicEmbedding(chunk.chunkHash || chunk.hash, testEmbeddingDimensions),
-          model,
-          now,
-          chunk.chunkHash
-        );
-        bytesProcessed += chunk.bytes;
-      }
-      progress.clear();
-      cursor.show();
-      console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-      console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksToEmbed.length}${c.reset} embedded, ${c.bold}${chunksReused}${c.reset} reused) out of ${c.bold}${totalChunks}${c.reset} total.`);
-      if (staleDeleted > 0) {
-        console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
-      }
-      closeDb();
-      return;
+  // Wrap all LLM embedding operations in a session for lifecycle management
+  // Use 30 minute timeout for large collections
+  await withLLMSession(async (session) => {
+    // Get embedding dimensions from first chunk
+    progress.indeterminate();
+    const firstChunk = allChunks[0];
+    if (!firstChunk) {
+      throw new Error("No chunks available to embed");
     }
+    const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
+    const firstResult = await session.embed(firstText);
+    if (!firstResult) {
+      throw new Error("Failed to get embedding dimensions from first chunk");
+    }
+    ensureVecTable(db, firstResult.embedding.length);
 
-    await withLLMSession(async (session) => {
-      progress.indeterminate();
-      const firstChunk = chunksToEmbed[0];
-      if (!firstChunk) {
-        throw new Error("No chunks available to embed");
-      }
-      const firstResult = await session.embed(firstChunk.embeddingInput, { model, isQuery: false });
-      if (!firstResult) {
-        throw new Error("Failed to get embedding dimensions from first chunk");
-      }
-      ensureVecTable(db, firstResult.embedding.length);
+    let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
+    const startTime = Date.now();
 
-      const startTime = Date.now();
-      const BATCH_SIZE = 32;
-      let chunksEmbedded = 0;
+    // Batch embedding for better throughput
+    // Process in batches of 32 to balance memory usage and efficiency
+    const BATCH_SIZE = 32;
 
-      for (let batchStart = 0; batchStart < chunksToEmbed.length; batchStart += BATCH_SIZE) {
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksToEmbed.length);
-        const batch = chunksToEmbed.slice(batchStart, batchEnd);
-        const texts = batch.map((chunk) => chunk.embeddingInput);
+    for (let batchStart = 0; batchStart < allChunks.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, allChunks.length);
+      const batch = allChunks.slice(batchStart, batchEnd);
 
-        try {
-          const embeddings = await session.embedBatch(texts);
-          for (let i = 0; i < batch.length; i++) {
-            const chunk = batch[i]!;
-            const embedding = embeddings[i];
-            if (embedding) {
-              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now, chunk.chunkHash);
+      // Format texts for embedding
+      const texts = batch.map(chunk => formatDocForEmbedding(chunk.text, chunk.title));
+
+      try {
+        // Batch embed all texts at once
+        const embeddings = await session.embedBatch(texts);
+
+        // Collect successful embeddings and insert them in a single transaction.
+        // This amortises the WAL flush cost across the entire batch (32 chunks
+        // by default), giving a 10-50× throughput improvement over per-row commits.
+        const toInsert: {
+          hash: string; seq: number; pos: number;
+          embedding: Float32Array; model: string; embeddedAt: string;
+        }[] = [];
+
+        for (let i = 0; i < batch.length; i++) {
+          const chunk = batch[i]!;
+          const embedding = embeddings[i];
+
+          if (embedding) {
+            toInsert.push({
+              hash: chunk.hash,
+              seq: chunk.seq,
+              pos: chunk.pos,
+              embedding: new Float32Array(embedding.embedding),
+              model,
+              embeddedAt: now,
+            });
+            chunksEmbedded++;
+          } else {
+            errors++;
+            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
+          }
+          bytesProcessed += chunk.bytes;
+        }
+
+        // Commit all successful embeddings atomically
+        bulkInsertEmbeddings(db, toInsert);
+      } catch (err) {
+        // If batch fails, try individual embeddings as fallback
+        for (const chunk of batch) {
+          try {
+            const text = formatDocForEmbedding(chunk.text, chunk.title);
+            const result = await session.embed(text);
+            if (result) {
+              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
               chunksEmbedded++;
             } else {
               errors++;
-              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
             }
-            bytesProcessed += chunk.bytes;
+          } catch (innerErr) {
+            errors++;
+            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
           }
-        } catch (err) {
-          for (const chunk of batch) {
-            try {
-              const result = await session.embed(chunk.embeddingInput, { model, isQuery: false });
-              if (result) {
-                insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now, chunk.chunkHash);
-                chunksEmbedded++;
-              } else {
-                errors++;
-              }
-            } catch (innerErr) {
-              errors++;
-              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
-            }
-            bytesProcessed += chunk.bytes;
-          }
+          bytesProcessed += chunk.bytes;
         }
-
-        const percent = totalChangedBytes > 0 ? (bytesProcessed / totalChangedBytes) * 100 : 100;
-        progress.set(percent);
-        const elapsed = (Date.now() - startTime) / 1000;
-        const bytesPerSec = bytesProcessed / Math.max(elapsed, 0.001);
-        const remainingBytes = Math.max(0, totalChangedBytes - bytesProcessed);
-        const etaSec = remainingBytes / Math.max(bytesPerSec, 1);
-        const bar = renderProgressBar(percent);
-        const percentStr = percent.toFixed(0).padStart(3);
-        const throughput = `${formatBytes(bytesPerSec)}/s`;
-        const eta = elapsed > 2 ? formatETA(etaSec) : "...";
-        const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
-        if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${bytesProcessed > 0 ? Math.min(chunksEmbedded + chunksReused, changedChunkCount) : chunksReused}/${changedChunkCount}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
       }
 
-      progress.clear();
-      cursor.show();
-      const totalTimeSec = (Date.now() - startTime) / 1000;
-      const avgThroughput = formatBytes(totalChangedBytes / Math.max(totalTimeSec, 0.001));
-      console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-      console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksEmbedded}${c.reset} embedded, ${c.bold}${chunksReused}${c.reset} reused) out of ${c.bold}${totalChunks}${c.reset} total in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
-      if (staleDeleted > 0) {
-        console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
-      }
-      if (errors > 0) {
-        console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
-      }
-    }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
-  } else {
+      const percent = (bytesProcessed / totalBytes) * 100;
+      progress.set(percent);
+
+      const elapsed = (Date.now() - startTime) / 1000;
+      const bytesPerSec = bytesProcessed / elapsed;
+      const remainingBytes = totalBytes - bytesProcessed;
+      const etaSec = remainingBytes / bytesPerSec;
+
+      const bar = renderProgressBar(percent);
+      const percentStr = percent.toFixed(0).padStart(3);
+      const throughput = `${formatBytes(bytesPerSec)}/s`;
+      const eta = elapsed > 2 ? formatETA(etaSec) : "...";
+      const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
+
+      if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
+    }
+
     progress.clear();
     cursor.show();
+    const totalTimeSec = (Date.now() - startTime) / 1000;
+    const avgThroughput = formatBytes(totalBytes / totalTimeSec);
+
     console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-    console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksReused}${c.reset} reused, ${c.bold}0${c.reset} embedded) out of ${c.bold}${totalChunks}${c.reset} total.`);
-    if (staleDeleted > 0) {
-      console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
+    console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    if (errors > 0) {
+      console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
     }
-  }
+  }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
 
   closeDb();
 }
@@ -2345,159 +2115,6 @@ function parseStructuredQuery(query: string): StructuredSubSearch[] | null {
   return typed.length > 0 ? typed : null;
 }
 
-// =============================================================================
-// Demo command – one-command wow demo
-// =============================================================================
-
-function runDemo(): void {
-  const evalDocsDir = pathJoin(dirname(__filename), "..", "specs", "eval-docs");
-  const hasEvalDocs = existsSync(evalDocsDir);
-
-  console.log(`\n${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║              KINDX — Interactive Demo                        ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║       The Local Memory Node for MCP Agents                   ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
-
-  // Step 1: Setup
-  console.log(`${c.bold}Step 1: Collection Setup${c.reset}`);
-  console.log(`${c.dim}─────────────────────────${c.reset}`);
-  if (hasEvalDocs) {
-    console.log(`  Found eval-docs corpus at: ${evalDocsDir}`);
-    console.log(`  6 markdown documents covering API design, distributed systems,`);
-    console.log(`  machine learning, product launches, remote work, and fundraising.\n`);
-  } else {
-    console.log(`  ${c.yellow}eval-docs corpus not found at expected path.${c.reset}`);
-    console.log(`  Demo will show simulated results.\n`);
-  }
-  console.log(`  ${c.dim}$ kindx collection add ${hasEvalDocs ? evalDocsDir : './specs/eval-docs'} --name kindx-demo${c.reset}`);
-  console.log(`  ${c.green}✓${c.reset} Registered collection 'kindx-demo' (6 documents)\n`);
-
-  // Step 2: Embedding
-  console.log(`${c.bold}Step 2: Embedding${c.reset}`);
-  console.log(`${c.dim}──────────────────${c.reset}`);
-  console.log(`  ${c.dim}$ kindx embed${c.reset}`);
-  console.log(`  ${c.dim}Model: nomic-embed-text-v1.5 (137M params, Q8_0)${c.reset}`);
-  console.log(`  ${c.dim}Chunking 6 documents → 42 chunks${c.reset}`);
-  console.log(`  ${c.dim}████████████████████████████████████████ 42/42 chunks  2.1s${c.reset}`);
-  console.log(`  ${c.green}✓${c.reset} Embedded 42 chunks from 6 documents\n`);
-  console.log(`  ${c.dim}Note: embed processes pending content across collections; it is not scoped by -c.${c.reset}\n`);
-
-  // Step 3: BM25 search (real if eval-docs available)
-  console.log(`${c.bold}Step 3: BM25 Search (Lexical)${c.reset}`);
-  console.log(`${c.dim}──────────────────────────────${c.reset}`);
-  const bm25Query = "API versioning best practices";
-  console.log(`  ${c.dim}$ kindx search "${bm25Query}"${c.reset}\n`);
-
-  // Always show simulated results to avoid leaking user's private indexed data
-  showSimulatedBM25Results();
-
-  // Step 4: Vector search (simulated)
-  console.log(`${c.bold}Step 4: Vector Search (Semantic)${c.reset}`);
-  console.log(`${c.dim}─────────────────────────────────${c.reset}`);
-  const vectorQuery = "how to prevent models from memorizing training data";
-  console.log(`  ${c.dim}$ kindx vsearch "${vectorQuery}"${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/machine-learning-primer.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Machine Learning: A Beginner's Guide${c.reset}`);
-  console.log(`  Score: ${c.bold}0.82${c.reset}`);
-  console.log(`  ${c.dim}## Key Concepts${c.reset}`);
-  console.log(`  ${c.dim}### Overfitting vs Underfitting${c.reset}`);
-  console.log(`  ${c.dim}**Overfitting**: Model memorizes training data, performs poorly on new data${c.reset}`);
-  console.log(`  ${c.dim}- Solution: More data, regularization, simpler model${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
-  console.log(`  Score: ${c.bold}0.54${c.reset}`);
-  console.log(`  ${c.dim}## Replication Strategies${c.reset}`);
-  console.log(`  ${c.dim}### Single-Leader Replication${c.reset}`);
-  console.log(`  ${c.dim}- One node accepts writes${c.reset}`);
-  console.log(`  ${c.dim}- Followers replicate from leader${c.reset}\n`);
-
-  // Step 5: Hybrid query (simulated)
-  console.log(`${c.bold}Step 5: Hybrid Query (BM25 + Vector + Reranking)${c.reset}`);
-  console.log(`${c.dim}──────────────────────────────────────────────────${c.reset}`);
-  const hybridQuery = "raising money for startup Series A";
-  console.log(`  ${c.dim}$ kindx query "${hybridQuery}"${c.reset}\n`);
-
-  console.log(`  ${c.dim}├─ ${hybridQuery}${c.reset}`);
-  console.log(`  ${c.dim}├─ expand: startup fundraising Series A venture capital${c.reset}`);
-  console.log(`  ${c.dim}└─ hyde: strategies for raising Series A funding round${c.reset}`);
-  console.log(`  ${c.dim}Searching 3 vector queries + BM25...${c.reset}`);
-  console.log(`  ${c.dim}Reranking 12 candidates...${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/startup-fundraising-memo.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Series A Fundraising Strategy Memo${c.reset}`);
-  console.log(`  Score: ${c.bold}0.94${c.reset}`);
-  console.log(`  ${c.dim}## Executive Summary${c.reset}`);
-  console.log(`  ${c.dim}We are targeting a $15M Series A raise at a $60M pre-money valuation.${c.reset}`);
-  console.log(`  ${c.dim}## Current Metrics${c.reset}`);
-  console.log(`  ${c.dim}- ARR: $2.4M (growing 15% MoM)${c.reset}`);
-  console.log(`  ${c.dim}- Customers: 127 paying companies${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
-  console.log(`  Score: ${c.bold}0.61${c.reset}`);
-  console.log(`  ${c.dim}## Key Metrics Post-Launch${c.reset}`);
-  console.log(`  ${c.dim}MAU: 12,400 (exceeded target)${c.reset}`);
-  console.log(`  ${c.dim}Avg Session Duration: 7.2 min${c.reset}\n`);
-
-  // Step 6: Agent output formats
-  console.log(`${c.bold}Step 6: Agent-Friendly Output Formats${c.reset}`);
-  console.log(`${c.dim}───────────────────────────────────────${c.reset}`);
-  console.log(`  KINDX supports structured output for LLM agents:\n`);
-  console.log(`  ${c.dim}$ kindx search "API design" --json${c.reset}     → JSON array with scores + snippets`);
-  console.log(`  ${c.dim}$ kindx search "API design" --csv${c.reset}      → CSV for spreadsheet import`);
-  console.log(`  ${c.dim}$ kindx search "API design" --xml${c.reset}      → XML for enterprise pipelines`);
-  console.log(`  ${c.dim}$ kindx search "API design" --files${c.reset}    → docid,score,path for context injection`);
-  console.log(`  ${c.dim}$ kindx search "API design" --md${c.reset} → Markdown table\n`);
-
-  // Step 7: MCP configuration
-  console.log(`${c.bold}Step 7: Add KINDX to Claude Desktop${c.reset}`);
-  console.log(`${c.dim}─────────────────────────────────────${c.reset}`);
-  console.log(`  Add to ~/Library/Application Support/Claude/claude_desktop_config.json:\n`);
-  console.log(`  ${c.green}{${c.reset}`);
-  console.log(`  ${c.green}  "mcpServers": {${c.reset}`);
-  console.log(`  ${c.green}    "kindx": {${c.reset}`);
-  console.log(`  ${c.green}      "command": "kindx",${c.reset}`);
-  console.log(`  ${c.green}      "args": ["mcp"]${c.reset}`);
-  console.log(`  ${c.green}    }${c.reset}`);
-  console.log(`  ${c.green}  }${c.reset}`);
-  console.log(`  ${c.green}}${c.reset}\n`);
-
-  // Summary
-  console.log(`${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Demo complete!                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Get started:                                                ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    1. kindx collection add ~/Documents --name my-docs        ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    2. kindx embed                                            ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here" -c my-docs            ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/ambicuity/KINDX                    ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
-}
-
-function showSimulatedBM25Results(): void {
-  console.log(`  ${c.cyan}kindx://kindx-demo/api-design-principles.md${c.reset}`);
-  console.log(`  ${c.bold}Title: API Design Principles${c.reset}`);
-  console.log(`  Score: ${c.bold}5.23${c.reset}`);
-  console.log(`  ${c.dim}## Principle 5: Versioning${c.reset}`);
-  console.log(`  ${c.dim}Always version your APIs. We prefer URL versioning.${c.reset}`);
-  console.log(`  ${c.dim}- /v1/users${c.reset}`);
-  console.log(`  ${c.dim}- /v2/users${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
-  console.log(`  Score: ${c.bold}2.87${c.reset}`);
-  console.log(`  ${c.dim}## Consistency Models${c.reset}`);
-  console.log(`  ${c.dim}From strongest to weakest:${c.reset}`);
-  console.log(`  ${c.dim}1. Linearizability - Operations appear instantaneous${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
-  console.log(`  Score: ${c.bold}1.42${c.reset}\n`);
-}
-
 function search(query: string, opts: OutputOptions): void {
   const db = getDb();
 
@@ -2559,7 +2176,8 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
 
   checkIndexHealth(store.db);
 
-  await withLLMSession(async () => {
+  const scopeKey = `cli:${collectionNames.sort().join(",") || "default"}:${opts.context || "default"}`;
+  await withLLMScope(scopeKey, () => withLLMSession(async () => {
     let results = await vectorSearchQuery(store, query, {
       collection: singleCollection,
       limit: opts.all ? 500 : (opts.limit || 10),
@@ -2596,11 +2214,20 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
       context: r.context,
       docid: r.docid,
     })), query, { ...opts, limit: results.length });
-  }, { maxDuration: 10 * 60 * 1000, name: 'vectorSearch' });
+  }, { maxDuration: 10 * 60 * 1000, name: 'vectorSearch' }));
 }
 
 async function querySearch(query: string, opts: OutputOptions, _embedModel: string = DEFAULT_EMBED_MODEL, _rerankModel: string = DEFAULT_RERANK_MODEL): Promise<void> {
   const store = getStore();
+  const timings = {
+    expand_ms: 0,
+    embed_ms: 0,
+    retrieval_ms: 0,
+    rerank_init_ms: 0,
+    rerank_ms: 0,
+    total_ms: 0,
+  };
+  const totalStart = Date.now();
 
   // Validate collection filter (supports multiple -c flags)
   // Use default collections if none specified
@@ -2612,7 +2239,10 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
   // Check for structured query syntax (lex:/vec:/hyde: prefixes)
   const structuredQueries = parseStructuredQuery(query);
 
-  await withLLMSession(async () => {
+  const scopeKey = `cli:${collectionNames.sort().join(",") || "default"}:${opts.context || "default"}`;
+  await withLLMScope(
+    scopeKey,
+    () => withLLMSession(async () => {
     let results;
 
     if (structuredQueries) {
@@ -2639,13 +2269,21 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
           },
           onEmbedDone: (ms) => {
+            timings.embed_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+          },
+          onRetrievalDone: (ms) => {
+            timings.retrieval_ms = ms;
+          },
+          onRerankInitDone: (ms) => {
+            timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
             process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
+            timings.rerank_ms += ms;
             progress.clear();
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
           },
@@ -2667,6 +2305,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             process.stderr.write(`${c.dim}Expanding query...${c.reset}`);
           },
           onExpand: (original, expanded, ms) => {
+            timings.expand_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
             logExpansionTree(original, expanded);
             process.stderr.write(`${c.dim}Searching ${expanded.length + 1} queries...${c.reset}\n`);
@@ -2675,13 +2314,21 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
           },
           onEmbedDone: (ms) => {
+            timings.embed_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+          },
+          onRetrievalDone: (ms) => {
+            timings.retrieval_ms = ms;
+          },
+          onRerankInitDone: (ms) => {
+            timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
             process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
+            timings.rerank_ms += ms;
             progress.clear();
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
           },
@@ -2721,7 +2368,15 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       docid: r.docid,
       explain: r.explain,
     })), displayQuery, { ...opts, limit: results.length });
-  }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' });
+
+    timings.total_ms = Date.now() - totalStart;
+    if (opts.explain) {
+      process.stderr.write(
+        `${c.dim}timings: expand=${formatMs(timings.expand_ms)}, embed=${formatMs(timings.embed_ms)}, retrieval=${formatMs(timings.retrieval_ms)}, rerank_init=${formatMs(timings.rerank_init_ms)}, rerank=${formatMs(timings.rerank_ms)}, total=${formatMs(timings.total_ms)}${c.reset}\n`
+      );
+    }
+    }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' })
+  );
 }
 
 // Parse CLI arguments using util.parseArgs
@@ -2766,17 +2421,20 @@ function parseCLI() {
       "line-numbers": { type: "boolean" },  // add line numbers to output
       // Query options
       "candidate-limit": { type: "string", short: "C" },
-      // Feedback options
-      query: { type: "string" },
-      chunk: { type: "string" },
-      relevant: { type: "boolean" },
-      irrelevant: { type: "boolean" },
+      // Memory options
+      scope: { type: "string" },
+      key: { type: "string" },
+      value: { type: "string" },
+      tag: { type: "string", multiple: true },
+      source: { type: "string" },
+      id: { type: "string" },
+      semantic: { type: "boolean" },
+      text: { type: "boolean" },
+      threshold: { type: "string" },
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
-      watch: { type: "boolean" },
       port: { type: "string" },
-      cache: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -2879,10 +2537,9 @@ function showHelp(): void {
   console.log("  kindx vsearch <query>           - Vector similarity only");
   console.log("  kindx get <file>[:line] [--from <line>] [-l N] [--line-numbers]  - Show a single document from specific line, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
-  console.log("  kindx feedback --irrelevant ... - Store corrective relevance feedback for retrieval");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
+  console.log("  kindx memory <subcommand>       - Store and retrieve scoped agent memories");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
-  console.log("  kindx preload                   - Warm local GGUF models + context pools");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
@@ -2897,18 +2554,15 @@ function showHelp(): void {
   console.log("");
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
-  console.log("  kindx mcp --http [--daemon] [--watch] - Run the shared MCP HTTP server");
+  console.log("  kindx mcp --http [--daemon]     - Run the shared MCP HTTP server");
   console.log("  kindx mcp stop                  - Stop the MCP HTTP daemon");
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
-  console.log("  kindx cleanup [--cache]         - Full cleanup (default) or cache-only purge");
-  console.log("");
-  console.log("Corrective feedback:");
-  console.log("  kindx feedback --irrelevant --query \"deploy k8s\" --chunk \"#abc123:2\"");
-  console.log("  kindx feedback --relevant --query \"deploy k8s\" --chunk \"#def456:0\"");
-  console.log("  kindx feedback list --query \"deploy\"");
+  console.log("  kindx cleanup                   - Clear caches, vacuum DB");
+  console.log("  kindx verify-wipe               - Scan for residual local index artifacts");
+  console.log("  kindx memory embed [--scope S] [--force] - Backfill/regenerate memory embeddings");
   console.log("");
   console.log("Query syntax (kindx query):");
   console.log("  KINDX queries are either a single expand query (no prefix) or a multi-line");
@@ -2962,14 +2616,20 @@ function showHelp(): void {
   console.log("  --explain                  - Include retrieval score traces (query --json/CLI)");
   console.log("  --files | --json | --csv | --md | --xml  - Output format");
   console.log("  -c, --collection <name>    - Filter by one or more collections");
-  console.log("  --query <text>             - Feedback query text (for kindx feedback)");
-  console.log("  --chunk <id>               - Feedback chunk id (#docid[:seq], hash[:seq], or hash_seq)");
-  console.log("  --relevant/--irrelevant    - Feedback signal for kindx feedback");
   console.log("");
   console.log("Multi-get options:");
   console.log("  -l <num>                   - Maximum lines per file");
   console.log("  --max-bytes <num>          - Skip files larger than N bytes (default 10240)");
   console.log("  --json/--csv/--md/--xml/--files - Same formats as search");
+  console.log("");
+  console.log("Memory commands:");
+  console.log("  kindx memory put --scope <scope> --key <k> --value <v> [--tag t ...] [--source s]");
+  console.log("  kindx memory search --scope <scope> <query> [--semantic|--text] [--threshold <n>] [-n <num>]");
+  console.log("  kindx memory history --scope <scope> --key <k>");
+  console.log("  kindx memory stats --scope <scope>");
+  console.log("  kindx memory mark-accessed --scope <scope> --id <id>");
+  console.log("  kindx memory embed --scope <scope> [--force]");
+  console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
   console.log("");
   console.log(`Index: ${getDbPath()}`);
 }
@@ -2990,32 +2650,47 @@ async function showVersion(): Promise<void> {
   console.log(`kindx ${versionStr}`);
 }
 
-function resolveFeedbackChunkToHashSeq(db: Database, chunkRaw: string): string {
-  const chunk = chunkRaw.trim().replace(/^#/, "");
-  if (!chunk) {
-    throw new Error("chunk is required");
+function outputMemoryPayload(payload: unknown, format: OutputFormat): void {
+  if (format === "json") {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
   }
+  console.log(payload);
+}
 
-  const hashSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]*)_(\d+)$/i);
-  if (hashSeqMatch) {
-    return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
-  }
+type VerifyWipeReport = {
+  cacheRoot: string;
+  configRoot: string;
+  indexPath: string;
+  residualFiles: string[];
+};
 
-  const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
-  if (docidWithSeqMatch) {
-    const doc = findDocumentByDocid(db, docidWithSeqMatch[1]);
-    if (!doc) {
-      throw new Error(`Unknown docid: #${docidWithSeqMatch[1]}`);
-    }
-    return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
-  }
+function verifyWipe(): VerifyWipeReport {
+  const cacheRoot = getKindxCacheDir();
+  const configRoot = process.env.KINDX_CONFIG_DIR
+    ? resolve(process.env.KINDX_CONFIG_DIR)
+    : resolve(homedir(), ".config", "kindx");
+  const indexPath = getDbPath();
+  const candidates = [
+    indexPath,
+    `${indexPath}-wal`,
+    `${indexPath}-shm`,
+    resolve(cacheRoot, "index.sqlite"),
+    resolve(cacheRoot, "index.sqlite-wal"),
+    resolve(cacheRoot, "index.sqlite-shm"),
+  ];
 
-  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{8,})(?::(\d+))?$/i);
-  if (hashWithSeqMatch) {
-    return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
-  }
+  const globbed = fastGlob.sync([
+    `${cacheRoot}/**/index.sqlite*`,
+    `${configRoot}/**/index.sqlite*`,
+  ], { onlyFiles: true, followSymbolicLinks: false });
 
-  throw new Error("Invalid chunk format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
+  const residualFiles = Array.from(new Set([
+    ...candidates.filter((file) => existsSync(file)),
+    ...globbed,
+  ]));
+
+  return { cacheRoot, configRoot, indexPath, residualFiles };
 }
 
 // Main CLI - only run if this is the main module
@@ -3117,63 +2792,6 @@ if (isMain) {
           console.error(`Unknown subcommand: ${subcommand}`);
           console.error("Available: add, list, rm");
           process.exit(1);
-      }
-      break;
-    }
-
-    case "feedback": {
-      const subcommand = cli.args[0];
-      const db = getDb();
-      const store = getStore();
-
-      if (subcommand === "list") {
-        const queryFilter = ((cli.values.query as string | undefined) ?? cli.args.slice(1).join(" ")).trim();
-        const rows = store.listFeedback(queryFilter || undefined);
-
-        if (cli.opts.format === "json") {
-          console.log(JSON.stringify({ count: rows.length, feedback: rows }, null, 2));
-        } else if (rows.length === 0) {
-          console.log("No feedback records found.");
-        } else {
-          console.log(`${c.bold}Feedback records${c.reset} (${rows.length})`);
-          for (const row of rows) {
-            const signal = row.signal < 0 ? "irrelevant" : "relevant";
-            const when = new Date(row.created * 1000).toISOString();
-            console.log(`- [${signal}] query="${row.query}" chunk="${row.hashSeq}" at ${when}`);
-          }
-        }
-        break;
-      }
-
-      const relevant = !!cli.values.relevant;
-      const irrelevant = !!cli.values.irrelevant;
-      if (relevant === irrelevant) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
-        process.exit(1);
-      }
-
-      const queryText = ((cli.values.query as string | undefined) ?? "").trim();
-      const chunkArg = ((cli.values.chunk as string | undefined) ?? "").trim();
-      if (!queryText || !chunkArg) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
-        process.exit(1);
-      }
-
-      let hashSeq: string;
-      try {
-        hashSeq = resolveFeedbackChunkToHashSeq(db, chunkArg);
-      } catch (err) {
-        console.error(String(err instanceof Error ? err.message : err));
-        process.exit(1);
-      }
-
-      const signal: -1 | 1 = relevant ? 1 : -1;
-      store.insertFeedback(queryText, hashSeq, signal);
-      const signalText = signal > 0 ? "relevant" : "irrelevant";
-      if (cli.opts.format === "json") {
-        console.log(JSON.stringify({ stored: true, query: queryText, chunk: hashSeq, signal: signalText }, null, 2));
-      } else {
-        console.log(`${c.green}✓${c.reset} Stored ${signalText} feedback for ${hashSeq}`);
       }
       break;
     }
@@ -3347,6 +2965,161 @@ if (isMain) {
       break;
     }
 
+    case "memory": {
+      const subcommand = cli.args[0];
+      const db = getDb();
+      const workspaceScope = deriveWorkspaceMemoryScope(getPwd());
+      const scope = resolveMemoryScopeShared({
+        explicitScope: cli.values.scope,
+        workspaceScope,
+      }).scope;
+
+      switch (subcommand) {
+        case "put": {
+          const key = ((cli.values.key as string | undefined) || "").trim();
+          const value = ((cli.values.value as string | undefined) || "").trim();
+          if (!key || !value) {
+            console.error("Usage: kindx memory put --scope <scope> --key <key> --value <value> [--tag tag ...] [--source source]");
+            process.exit(1);
+          }
+          const tags = (cli.values.tag as string[] | undefined) || [];
+          const source = (cli.values.source as string | undefined) || undefined;
+          const threshold = cli.values.threshold ? parseFloat(String(cli.values.threshold)) : undefined;
+          const memory = await upsertMemory(db, {
+            scope,
+            key,
+            value,
+            tags,
+            source,
+            semanticThreshold: threshold,
+          });
+
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, memory }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Stored memory in scope '${scope}'`);
+            console.log(`  id: ${memory.id}`);
+            console.log(`  key: ${memory.key}`);
+            console.log(`  value: ${memory.value}`);
+          }
+          break;
+        }
+
+        case "search": {
+          const query = cli.args.slice(1).join(" ").trim();
+          if (!query) {
+            console.error("Usage: kindx memory search --scope <scope> <query> [--semantic|--text] [--threshold <n>] [-n <num>]");
+            process.exit(1);
+          }
+          const limit = cli.opts.limit || 20;
+          const threshold = cli.values.threshold ? parseFloat(String(cli.values.threshold)) : 0.3;
+          const useText = !!cli.values.text && !cli.values.semantic;
+          const mode = useText ? "text" : "semantic";
+          const results = useText
+            ? textSearchMemory(db, scope, query, limit)
+            : await semanticSearchMemory(db, scope, query, limit, threshold);
+
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, mode, query, results }, "json");
+          } else {
+            console.log(`${c.bold}Memory ${mode} search${c.reset} (${results.length} result${results.length === 1 ? "" : "s"})`);
+            for (const r of results) {
+              const score = r.similarity != null
+                ? `sim=${r.similarity.toFixed(3)}`
+                : (r.hitRate != null ? `hit=${r.hitRate.toFixed(3)}` : "");
+              console.log(`- #${r.id} ${score} ${r.key}: ${r.value}`);
+            }
+          }
+          break;
+        }
+
+        case "history": {
+          const key = ((cli.values.key as string | undefined) || "").trim();
+          if (!key) {
+            console.error("Usage: kindx memory history --scope <scope> --key <key>");
+            process.exit(1);
+          }
+          const history = getMemoryHistory(db, scope, key);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, key, history }, "json");
+          } else {
+            console.log(`${c.bold}History for ${key}${c.reset} (${history.length})`);
+            for (const h of history) {
+              const superseded = h.supersededBy ? ` -> superseded by #${h.supersededBy}` : "";
+              console.log(`- #${h.id} ${h.value}${superseded}`);
+            }
+          }
+          break;
+        }
+
+        case "stats": {
+          const stats = getMemoryStats(db, scope);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload(stats, "json");
+          } else {
+            console.log(`${c.bold}Memory stats${c.reset} (scope=${scope})`);
+            console.log(`  total: ${stats.totalMemories}`);
+            console.log(`  superseded: ${stats.superseded}`);
+            console.log(`  embedded: ${stats.embedded}`);
+            console.log(`  links: ${stats.links}`);
+          }
+          break;
+        }
+
+        case "mark-accessed": {
+          const idRaw = (cli.values.id as string | undefined) || "";
+          const id = Number.parseInt(idRaw, 10);
+          if (!Number.isFinite(id)) {
+            console.error("Usage: kindx memory mark-accessed --scope <scope> --id <id>");
+            process.exit(1);
+          }
+          const ok = markMemoryAccessed(db, scope, id);
+          if (!ok) {
+            console.error(`Memory id ${id} not found in scope '${scope}'`);
+            process.exit(1);
+          }
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, id, marked: true }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Marked memory #${id} as accessed`);
+          }
+          break;
+        }
+
+        case "embed": {
+          const force = !!cli.values.force;
+          const result = await embedMemories(db, scope, force);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, ...result, force }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Embedded ${result.embedded}/${result.totalCandidates} memories in scope '${scope}'`);
+          }
+          break;
+        }
+
+        case "help":
+        case undefined: {
+          console.log("Usage: kindx memory <subcommand> [options]");
+          console.log("");
+          console.log("Subcommands:");
+          console.log("  put            Store or update a scoped memory");
+          console.log("  search         Semantic/text memory lookup");
+          console.log("  history        Show value history for a key");
+          console.log("  stats          Show scoped memory stats");
+          console.log("  mark-accessed  Bump access counter for a memory id");
+          console.log("  embed          Backfill memory embeddings for this scope");
+          console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
+          process.exit(0);
+        }
+
+        default:
+          console.error(`Unknown memory subcommand: ${subcommand}`);
+          console.error("Run 'kindx memory help' for usage");
+          process.exit(1);
+      }
+      break;
+    }
+
     case "status":
       await showStatus();
       break;
@@ -3443,7 +3216,7 @@ if (isMain) {
     }
 
     case "update": {
-      const collFilter = cli.values.collection as string[] | undefined;
+      const collFilter = cli.values.collection as string | string[] | undefined;
       await updateCollections(collFilter);
       break;
     }
@@ -3468,23 +3241,6 @@ if (isMain) {
         const size = formatBytes(result.sizeBytes);
         const note = result.refreshed ? "refreshed" : "cached/checked";
         console.log(`- ${result.model} -> ${result.path} (${size}, ${note})`);
-      }
-      break;
-    }
-
-    case "preload": {
-      const result = await preloadModels({ origin: "cli", force: true });
-      if (cli.opts.format === "json") {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        const state = result.warmed ? `${c.green}warmed${c.reset}` : `${c.yellow}not warmed${c.reset}`;
-        console.log(`Preload status: ${state}`);
-        console.log(`- embed: ${result.models.embed}`);
-        console.log(`- rerank: ${result.models.rerank}`);
-        console.log(`- expand: ${result.models.expand}`);
-        if (result.lastError) {
-          console.log(`${c.yellow}Last error:${c.reset} ${result.lastError}`);
-        }
       }
       break;
     }
@@ -3523,9 +3279,7 @@ if (isMain) {
       const sub = cli.args[0]; // stop | status | undefined
 
       // Cache dir for PID/log files — same dir as the index
-      const cacheDir = process.env.XDG_CACHE_HOME
-        ? resolve(process.env.XDG_CACHE_HOME, "kindx")
-        : resolve(homedir(), ".cache", "kindx");
+      const cacheDir = getKindxCacheDir();
       const pidPath = resolve(cacheDir, "mcp.pid");
 
       // Subcommands take priority over flags
@@ -3569,10 +3323,9 @@ if (isMain) {
           const selfPath = fileURLToPath(import.meta.url);
           const iName = cli.values.index as string | undefined;
           const indexFlag = iName ? ["--index", iName] : [];
-          const watchFlag = cli.values.watch ? ["--watch"] : [];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag]
-            : [selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...indexFlag]
+            : [selfPath, "mcp", "--http", "--port", String(port), ...indexFlag];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -3592,7 +3345,7 @@ if (isMain) {
         process.removeAllListeners("SIGINT");
         const { startMcpHttpServer } = await import("./protocol.js");
         try {
-          await startMcpHttpServer(port, { dbPath: storeDbPathOverride, watch: !!cli.values.watch });
+          await startMcpHttpServer(port, { dbPath: storeDbPathOverride });
         } catch (e: any) {
           if (e?.code === "EADDRINUSE") {
             console.error(`Port ${port} already in use. Try a different port with --port.`);
@@ -3608,24 +3361,13 @@ if (isMain) {
       break;
     }
 
-    case "demo":
-      runDemo();
-      break;
-
     case "cleanup": {
+      const dbPath = getDbPath();
       const db = getDb();
-      const cacheOnly = !!cli.values.cache;
 
       // 1. Clear llm_cache
-      const llmCacheCount = deleteLLMCache(db);
-      const semanticCacheCount = deleteSemanticCache(db);
-      console.log(`${c.green}✓${c.reset} Cleared ${llmCacheCount} cached API responses`);
-      console.log(`${c.green}✓${c.reset} Cleared ${semanticCacheCount} semantic query cache entr${semanticCacheCount === 1 ? "y" : "ies"}`);
-
-      if (cacheOnly) {
-        closeDb();
-        break;
-      }
+      const cacheCount = deleteLLMCache(db);
+      console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
 
       // 2. Remove orphaned vectors
       const orphanedVecs = cleanupOrphanedVectors(db);
@@ -3641,11 +3383,60 @@ if (isMain) {
         console.log(`${c.green}✓${c.reset} Removed ${inactiveDocs} inactive document records`);
       }
 
-      // 4. Vacuum to reclaim space
+      // 4. Checkpoint WAL before vacuum so sidecar pages are consolidated.
+      const checkpointed = walCheckpointTruncate(db);
+      if (checkpointed) {
+        console.log(`${c.green}✓${c.reset} WAL checkpointed (TRUNCATE)`);
+      } else {
+        console.log(`${c.yellow}!${c.reset} WAL checkpoint skipped (non-WAL mode or unsupported)`);
+      }
+
+      // 5. Vacuum to reclaim space
       vacuumDatabase(db);
       console.log(`${c.green}✓${c.reset} Database vacuumed`);
 
       closeDb();
+
+      // 6. Best-effort sidecar file cleanup after DB handle is closed.
+      const sidecar = cleanupSqliteSidecars(dbPath);
+      if (sidecar.walRemoved || sidecar.shmRemoved) {
+        console.log(`${c.green}✓${c.reset} Removed SQLite sidecars (wal=${sidecar.walRemoved}, shm=${sidecar.shmRemoved})`);
+      }
+      if (sidecar.lockedFiles.length > 0) {
+        console.error(`${c.yellow}!${c.reset} Locked files remain: ${sidecar.lockedFiles.join(", ")}`);
+      }
+
+      const cleanupReport = {
+        checkpointed,
+        wal_removed: sidecar.walRemoved,
+        shm_removed: sidecar.shmRemoved,
+        locked_files: sidecar.lockedFiles,
+      };
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify(cleanupReport, null, 2));
+      }
+      if (sidecar.lockedFiles.length > 0) {
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "verify-wipe": {
+      const report = verifyWipe();
+      const status = report.residualFiles.length === 0 ? "fully_wiped" : "residual_artifacts_found";
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify({ status, ...report }, null, 2));
+      } else if (report.residualFiles.length === 0) {
+        console.log(`${c.green}✓${c.reset} No residual index artifacts found.`);
+      } else {
+        console.error(`${c.yellow}!${c.reset} Residual artifacts detected:`);
+        for (const file of report.residualFiles) {
+          console.error(`- ${file}`);
+        }
+      }
+      if (report.residualFiles.length > 0) {
+        process.exit(2);
+      }
       break;
     }
 
