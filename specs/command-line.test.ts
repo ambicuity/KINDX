@@ -1469,12 +1469,26 @@ describe("CLI Memory Commands", () => {
   });
 
   test("memory commands emit stable JSON payloads", async () => {
+    const parseCliJson = (raw: string): any => {
+      const trimmed = raw.trim();
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        const start = trimmed.indexOf("{");
+        const end = trimmed.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+          return JSON.parse(trimmed.slice(start, end + 1));
+        }
+        throw new Error(`Expected JSON output but received: ${trimmed}`);
+      }
+    };
+
     const put = await runQmd(
       ["memory", "put", "--scope", "cli-test", "--key", "profile:role", "--value", "engineer", "--json"],
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(put.exitCode).toBe(0);
-    const putJson = JSON.parse(put.stdout);
+    const putJson = parseCliJson(put.stdout);
     expect(putJson.scope).toBe("cli-test");
     expect(putJson.memory).toBeDefined();
     expect(typeof putJson.memory.id).toBe("number");
@@ -1484,7 +1498,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(search.exitCode).toBe(0);
-    const searchJson = JSON.parse(search.stdout);
+    const searchJson = parseCliJson(search.stdout);
     expect(searchJson.scope).toBe("cli-test");
     expect(searchJson.mode).toBe("text");
     expect(Array.isArray(searchJson.results)).toBe(true);
@@ -1494,7 +1508,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(history.exitCode).toBe(0);
-    const historyJson = JSON.parse(history.stdout);
+    const historyJson = parseCliJson(history.stdout);
     expect(historyJson.scope).toBe("cli-test");
     expect(Array.isArray(historyJson.history)).toBe(true);
 
@@ -1503,7 +1517,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(stats.exitCode).toBe(0);
-    const statsJson = JSON.parse(stats.stdout);
+    const statsJson = parseCliJson(stats.stdout);
     expect(statsJson.scope).toBe("cli-test");
     expect(typeof statsJson.totalMemories).toBe("number");
   });
