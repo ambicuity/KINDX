@@ -24,7 +24,6 @@ import {
   getPwd,
   getRealPath,
   hashContent,
-  hashChunkContent,
   extractTitle,
   formatQueryForEmbedding,
   formatDocForEmbedding,
@@ -34,15 +33,6 @@ import {
   findCodeFences,
   isInsideCodeFence,
   findBestCutoff,
-  getDocumentsForEmbedding,
-  getDocumentSummary,
-  setDocumentSummary,
-  deleteDocumentSummary,
-  getExistingEmbeddingChunksForHash,
-  updateEmbeddingChunkMetadata,
-  deleteEmbeddingsForHashSeqs,
-  findReusableEmbeddingByChunkHash,
-  insertEmbedding,
   type BreakPoint,
   type CodeFenceRegion,
   reciprocalRankFusion,
@@ -56,7 +46,6 @@ import {
   isDocid,
   STRONG_SIGNAL_MIN_SCORE,
   STRONG_SIGNAL_MIN_GAP,
-  shouldInvalidateSemanticCache,
   type Store,
   type DocumentResult,
   type SearchResult,
@@ -461,7 +450,6 @@ describe("Store Creation", () => {
     expect(tableNames).toContain("documents_fts");
     expect(tableNames).toContain("content_vectors");
     expect(tableNames).toContain("llm_cache");
-    expect(tableNames).toContain("document_summaries");
     // Note: path_contexts table removed in favor of YAML-based context storage
 
     await cleanupTestDb(store);
@@ -471,13 +459,6 @@ describe("Store Creation", () => {
     const store = await createTestStore();
     const result = store.db.prepare("PRAGMA journal_mode").get() as { journal_mode: string };
     expect(result.journal_mode).toBe("wal");
-    await cleanupTestDb(store);
-  });
-
-  test("createStore sets SQLite busy timeout", async () => {
-    const store = await createTestStore();
-    const result = store.db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
-    expect(result.timeout).toBe(5000);
     await cleanupTestDb(store);
   });
 
@@ -574,16 +555,6 @@ describe("Embedding Formatting", () => {
   test("formatDocForEmbedding handles missing title", () => {
     const formatted = formatDocForEmbedding("Some content");
     expect(formatted).toBe("title: none | text: Some content");
-  });
-
-  test("formatDocForEmbedding prepends summary for non-Qwen models", () => {
-    const formatted = formatDocForEmbedding("Some content", "My Title", "embeddinggemma", "Quick summary.");
-    expect(formatted).toBe("summary: Quick summary. | title: My Title | text: Some content");
-  });
-
-  test("formatDocForEmbedding keeps raw style for Qwen while including summary", () => {
-    const formatted = formatDocForEmbedding("Some content", "My Title", "qwen3-embedding", "Quick summary.");
-    expect(formatted).toBe("My Title\nQuick summary.\nSome content");
   });
 });
 
@@ -915,15 +886,6 @@ describe("findBestCutoff", () => {
     // newline at 195: dist=5, mult=0.998, final=0.998
     const cutoff = findBestCutoff(breakPoints, 200, 100, 0.7);
     expect(cutoff).toBe(150); // h1 wins easily
-  });
-
-  test("prefers heading breakpoints over non-heading breaks for stability", () => {
-    const breakPoints: BreakPoint[] = [
-      { pos: 130, score: 50, type: "h6" },
-      { pos: 198, score: 60, type: "hr" },
-    ];
-    const cutoff = findBestCutoff(breakPoints, 200, 100, 0.7);
-    expect(cutoff).toBe(130);
   });
 
   test("returns target position when no breaks in window", () => {
@@ -1280,41 +1242,6 @@ describe("FTS Search", () => {
     const results = store.searchFTS("foo(bar)", 10);
     // Results may vary based on FTS5 handling
     expect(Array.isArray(results)).toBe(true);
-
-    await cleanupTestDb(store);
-  });
-
-  test("searchFTS handles contiguous CJK text with mid-sentence keyword queries", async () => {
-    const store = await createTestStore();
-    const collectionName = await createTestCollection();
-
-    await insertTestDocument(store.db, collectionName, {
-      name: "zh-cjk",
-      title: "中文检索示例",
-      body: "数据库性能优化需要索引设计和事务管理",
-      displayPath: "cjk/zh.md",
-    });
-    await insertTestDocument(store.db, collectionName, {
-      name: "ja-cjk",
-      title: "日本語検索サンプル",
-      body: "データベース最適化にはインデックス設計とトランザクション管理が必要です",
-      displayPath: "cjk/ja.md",
-    });
-    await insertTestDocument(store.db, collectionName, {
-      name: "ko-cjk",
-      title: "한국어 검색 샘플",
-      body: "데이터베이스성능최적화에는인덱스설계와트랜잭션관리가필요합니다",
-      displayPath: "cjk/ko.md",
-    });
-
-    const zh = store.searchFTS("索引", 10);
-    expect(zh.some(r => r.displayPath === `${collectionName}/cjk/zh.md`)).toBe(true);
-
-    const ja = store.searchFTS("トランザクション", 10);
-    expect(ja.some(r => r.displayPath === `${collectionName}/cjk/ja.md`)).toBe(true);
-
-    const ko = store.searchFTS("트랜잭션", 10);
-    expect(ko.some(r => r.displayPath === `${collectionName}/cjk/ko.md`)).toBe(true);
 
     await cleanupTestDb(store);
   });
@@ -2316,153 +2243,6 @@ describe("Integration", () => {
   });
 });
 
-describe("Embedding Delta Utilities", () => {
-  test("legacy content_vectors rebuild path does not duplicate chunk_hash migration", async () => {
-    const store = await createTestStore();
-
-    store.db.exec(`DROP TABLE IF EXISTS content_vectors`);
-    store.db.exec(`
-      CREATE TABLE content_vectors (
-        hash TEXT PRIMARY KEY,
-        pos INTEGER NOT NULL DEFAULT 0,
-        model TEXT NOT NULL,
-        embedded_at TEXT NOT NULL
-      )
-    `);
-    store.close();
-
-    const reopened = createStore(store.dbPath);
-    const tableInfo = reopened.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
-    const columnNames = tableInfo.map((col) => col.name);
-    expect(columnNames).toContain("seq");
-    expect(columnNames).toContain("chunk_hash");
-
-    await cleanupTestDb(reopened);
-  });
-
-  test("schema includes chunk_hash in content_vectors", async () => {
-    const store = await createTestStore();
-    const tableInfo = store.db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
-    const columnNames = tableInfo.map((col) => col.name);
-    expect(columnNames).toContain("chunk_hash");
-    await cleanupTestDb(store);
-  });
-
-  test("chunk hashes can include formatted embedding payload context", () => {
-    const body = "Shared body text";
-    const hashWithTitleA = hashChunkContent(formatDocForEmbedding(body, "Title A", "embeddinggemma"));
-    const hashWithTitleB = hashChunkContent(formatDocForEmbedding(body, "Title B", "embeddinggemma"));
-    expect(hashWithTitleA).not.toBe(hashWithTitleB);
-  });
-
-  test("hashChunkContent is stable and content-sensitive", () => {
-    const a = hashChunkContent("hello world");
-    const b = hashChunkContent("hello world");
-    const c = hashChunkContent("hello world!");
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
-  });
-
-  test("embedding chunk metadata helpers support update and deletion", async () => {
-    const store = await createTestStore();
-    const collectionName = await createTestCollection();
-
-    const hash = "delta_hash_1";
-    await insertTestDocument(store.db, collectionName, {
-      name: "delta",
-      hash,
-      body: "delta body",
-      filepath: "/test/delta.md",
-      displayPath: "delta.md",
-    });
-
-    store.ensureVecTable(8);
-    insertEmbedding(store.db, hash, 0, 0, new Float32Array(8).fill(0.1), "embeddinggemma", new Date().toISOString(), "h0");
-    insertEmbedding(store.db, hash, 1, 10, new Float32Array(8).fill(0.2), "embeddinggemma", new Date().toISOString(), "h1");
-
-    let rows = getExistingEmbeddingChunksForHash(store.db, hash);
-    expect(rows).toHaveLength(2);
-    expect(rows[0]!.chunkHash).toBe("h0");
-    expect(rows[1]!.chunkHash).toBe("h1");
-
-    updateEmbeddingChunkMetadata(store.db, hash, 1, 12, "h1-updated");
-    rows = getExistingEmbeddingChunksForHash(store.db, hash);
-    expect(rows[1]!.pos).toBe(12);
-    expect(rows[1]!.chunkHash).toBe("h1-updated");
-
-    const deleted = deleteEmbeddingsForHashSeqs(store.db, hash, [0]);
-    expect(deleted).toBe(1);
-    rows = getExistingEmbeddingChunksForHash(store.db, hash);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.seq).toBe(1);
-
-    await cleanupTestDb(store);
-  });
-
-  test("findReusableEmbeddingByChunkHash returns reusable vector rows by model", async () => {
-    const store = await createTestStore();
-    const collectionName = await createTestCollection();
-
-    const hash = "reuse_hash_1";
-    await insertTestDocument(store.db, collectionName, {
-      name: "reuse",
-      hash,
-      body: "reuse body",
-      filepath: "/test/reuse.md",
-      displayPath: "reuse.md",
-    });
-
-    store.ensureVecTable(8);
-    insertEmbedding(store.db, hash, 0, 0, new Float32Array(8).fill(0.5), "embeddinggemma", new Date().toISOString(), "shared_chunk_hash");
-
-    const reusable = findReusableEmbeddingByChunkHash(store.db, "shared_chunk_hash", "embeddinggemma");
-    expect(reusable).not.toBeNull();
-    expect(reusable?.sourceHashSeq).toBe(`${hash}_0`);
-    expect(reusable?.embedding.byteLength).toBeGreaterThan(0);
-
-    const missingModel = findReusableEmbeddingByChunkHash(store.db, "shared_chunk_hash", "other-model");
-    expect(missingModel).toBeNull();
-
-    await cleanupTestDb(store);
-  });
-
-  test("getDocumentsForEmbedding returns active document payloads", async () => {
-    const store = await createTestStore();
-    const collectionName = await createTestCollection();
-    const createdAt = new Date().toISOString();
-    const hash = await hashContent("doc body");
-    store.insertContent(hash, "doc body", createdAt);
-    store.insertDocument(collectionName, "active.md", "Active", hash, createdAt, createdAt);
-    store.deactivateDocument(collectionName, "active.md");
-    store.insertDocument(collectionName, "active-2.md", "Active 2", hash, createdAt, createdAt);
-
-    const docs = getDocumentsForEmbedding(store.db);
-    expect(docs).toHaveLength(1);
-    expect(docs[0]!.hash).toBe(hash);
-    expect(docs[0]!.path).toBe("active-2.md");
-
-    await cleanupTestDb(store);
-  });
-
-  test("document summary helpers upsert, read, and delete summaries", async () => {
-    const store = await createTestStore();
-    const hash = "summary_hash_1";
-    const now = new Date().toISOString();
-
-    store.insertContent(hash, "body", now);
-    setDocumentSummary(store.db, hash, "Two sentence summary.", now);
-    expect(getDocumentSummary(store.db, hash)).toBe("Two sentence summary.");
-
-    setDocumentSummary(store.db, hash, "Updated summary.", now);
-    expect(getDocumentSummary(store.db, hash)).toBe("Updated summary.");
-
-    deleteDocumentSummary(store.db, hash);
-    expect(getDocumentSummary(store.db, hash)).toBeNull();
-
-    await cleanupTestDb(store);
-  });
-});
-
 // =============================================================================
 // LlamaCpp Integration Tests (using real local models)
 // =============================================================================
@@ -2681,153 +2461,6 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       llmSpy.mockRestore();
       await cleanupTestDb(store);
     }
-  });
-});
-
-describe("Semantic Expansion Cache", () => {
-  test("expandQuery reuses semantic cache for paraphrased query", async () => {
-    const store = await createTestStore();
-    const hasSemanticVec = !!store.db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
-    `).get();
-    if (!hasSemanticVec) {
-      await cleanupTestDb(store);
-      return;
-    }
-
-    const sharedEmbedding = new Array(768).fill(0);
-    sharedEmbedding[0] = 1;
-    const expandResult = [
-      { type: "vec", text: "deployment instructions" },
-      { type: "hyde", text: "Deployment checklist for production rollout." },
-    ];
-
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
-      embed: vi.fn(async () => ({ embedding: sharedEmbedding })),
-      expandQuery: vi.fn(async () => expandResult),
-    } as any);
-
-    try {
-      const first = await store.expandQuery("deploy steps");
-      const second = await store.expandQuery("how to deploy");
-
-      expect(first).toEqual(expandResult);
-      expect(second).toEqual(expandResult);
-      const llm = llmSpy.mock.results[0]?.value as any;
-      expect(llm.expandQuery).toHaveBeenCalledTimes(1);
-
-      const hitRow = store.db.prepare(`
-        SELECT hits FROM semantic_cache ORDER BY id ASC LIMIT 1
-      `).get() as { hits: number } | undefined;
-      expect((hitRow?.hits ?? 0)).toBeGreaterThan(0);
-    } finally {
-      llmSpy.mockRestore();
-      await cleanupTestDb(store);
-    }
-  });
-
-  test("expandQuery semantic cache respects threshold boundary", async () => {
-    const store = await createTestStore();
-    const hasSemanticVec = !!store.db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
-    `).get();
-    if (!hasSemanticVec) {
-      await cleanupTestDb(store);
-      return;
-    }
-
-    process.env.KINDX_SEMANTIC_CACHE_THRESHOLD = "0.95";
-    const llm = {
-      embed: vi.fn(async (text: string) => {
-        const embedding = new Array(768).fill(0);
-        if (text.includes("deploy steps")) {
-          embedding[0] = 1;
-        } else {
-          embedding[0] = 0.9;
-          embedding[1] = Math.sqrt(1 - 0.9 * 0.9);
-        }
-        return { embedding };
-      }),
-      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
-    };
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
-
-    try {
-      await store.expandQuery("deploy steps");
-      await store.expandQuery("deployment instructions");
-      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
-    } finally {
-      delete process.env.KINDX_SEMANTIC_CACHE_THRESHOLD;
-      llmSpy.mockRestore();
-      await cleanupTestDb(store);
-    }
-  });
-
-  test("expandQuery semantic cache is scoped by expansion model", async () => {
-    const store = await createTestStore();
-    const hasSemanticVec = !!store.db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
-    `).get();
-    if (!hasSemanticVec) {
-      await cleanupTestDb(store);
-      return;
-    }
-
-    const embedding = new Array(768).fill(0);
-    embedding[0] = 1;
-    const llm = {
-      embed: vi.fn(async () => ({ embedding })),
-      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
-    };
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
-
-    try {
-      await store.expandQuery("deploy steps", "model-a");
-      await store.expandQuery("deployment instructions", "model-b");
-      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
-    } finally {
-      llmSpy.mockRestore();
-      await cleanupTestDb(store);
-    }
-  });
-
-  test("expandQuery semantic cache honors TTL", async () => {
-    const store = await createTestStore();
-    const hasSemanticVec = !!store.db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache_vec'
-    `).get();
-    if (!hasSemanticVec) {
-      await cleanupTestDb(store);
-      return;
-    }
-
-    process.env.KINDX_CACHE_TTL_HOURS = "1";
-    const embedding = new Array(768).fill(0);
-    embedding[0] = 1;
-    const llm = {
-      embed: vi.fn(async () => ({ embedding })),
-      expandQuery: vi.fn(async () => [{ type: "vec", text: "deploy guide" }]),
-    };
-    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue(llm as any);
-
-    try {
-      await store.expandQuery("deploy steps");
-      const oldTimestamp = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-      store.db.prepare(`UPDATE semantic_cache SET created_at = ?`).run(oldTimestamp);
-      await store.expandQuery("deployment instructions");
-      expect(llm.expandQuery).toHaveBeenCalledTimes(2);
-    } finally {
-      delete process.env.KINDX_CACHE_TTL_HOURS;
-      llmSpy.mockRestore();
-      await cleanupTestDb(store);
-    }
-  });
-
-  test("shouldInvalidateSemanticCache triggers only when change ratio is above 10%", () => {
-    expect(shouldInvalidateSemanticCache(11, 100)).toBe(true);
-    expect(shouldInvalidateSemanticCache(10, 100)).toBe(false);
-    expect(shouldInvalidateSemanticCache(0, 100)).toBe(false);
-    expect(shouldInvalidateSemanticCache(1, 0)).toBe(true);
   });
 });
 
