@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0](https://github.com/ambicuity/KINDX/compare/v1.2.0...v1.3.0) (2026-04-08)
+
+
+### Features
+
+* **engine:** add mcp control-plane policy, layered instructions, and scoped memory/session runtime ([ee53382](https://github.com/ambicuity/KINDX/commit/ee533821044fd6f5a9e55994678f2f9818e1f465))
+* **mcp:** add control-plane policy, layered instructions, and scoped memory/session runtime ([d75c526](https://github.com/ambicuity/KINDX/commit/d75c52681badc75ed2f2c17193af868566b78875))
+
+
+### Bug Fixes
+
+* **engine:** use crypto randomUUID for session identifiers ([67f22de](https://github.com/ambicuity/KINDX/commit/67f22deba7be54585dc216f6daea7176863da004))
+
 ## [1.2.0](https://github.com/ambicuity/KINDX/compare/v1.1.0...v1.2.0) (2026-04-01)
 
 
