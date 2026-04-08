@@ -43,7 +43,6 @@ async function runQmd(
       ...process.env,
       INDEX_PATH: dbPath,
       KINDX_CONFIG_DIR: configDir, // Use test config directory
-      KINDX_STARTUP_PRELOAD: "0",
       ...(cacheHome ? { XDG_CACHE_HOME: cacheHome } : {}),
       PWD: workingDir, // Must explicitly set PWD since getPwd() checks this
       ...options.env,
@@ -547,38 +546,16 @@ describe("CLI Cleanup Command", () => {
   test("cleans up orphaned entries", async () => {
     const { stdout, exitCode } = await runQmd(["cleanup"]);
     expect(exitCode).toBe(0);
+    expect(stdout).toContain("Database vacuumed");
   });
 
-  test("cleanup --cache purges llm and semantic caches", async () => {
-    const db = new Database(testDbPath);
-    db.prepare(`
-      INSERT OR REPLACE INTO llm_cache (hash, result, created_at)
-      VALUES (?, ?, ?)
-    `).run("cache-key", "cached-result", new Date().toISOString());
-
-    const semanticExists = !!db.prepare(`
-      SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_cache'
-    `).get();
-    if (semanticExists) {
-      db.prepare(`
-        INSERT INTO semantic_cache (query, model, response, created_at, hits)
-        VALUES (?, ?, ?, ?, 0)
-      `).run("deploy steps", "qwen2.5-coder:1.5b", '[{"type":"vec","text":"deployment guide"}]', new Date().toISOString());
-    }
-    db.close();
-
-    const { exitCode } = await runQmd(["cleanup", "--cache"]);
-    expect(exitCode).toBe(0);
-
-    const verifyDb = new Database(testDbPath, { readonly: true });
-    const llmCount = (verifyDb.prepare(`SELECT COUNT(*) as count FROM llm_cache`).get() as { count: number }).count;
-    expect(llmCount).toBe(0);
-
-    if (semanticExists) {
-      const semanticCount = (verifyDb.prepare(`SELECT COUNT(*) as count FROM semantic_cache`).get() as { count: number }).count;
-      expect(semanticCount).toBe(0);
-    }
-    verifyDb.close();
+  test("verify-wipe emits structured status with --json", async () => {
+    const { stdout, exitCode } = await runQmd(["verify-wipe", "--json"]);
+    expect([0, 2]).toContain(exitCode);
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toHaveProperty("status");
+    expect(parsed).toHaveProperty("residualFiles");
+    expect(Array.isArray(parsed.residualFiles)).toBe(true);
   });
 });
 
@@ -600,39 +577,6 @@ describe("CLI Error Handling", () => {
 
     // The custom database should exist
     expect(existsSync(customDbPath)).toBe(true);
-  });
-});
-
-describe("CLI Feedback Command", () => {
-  test("stores and lists feedback as JSON", async () => {
-    const put = await runQmd([
-      "feedback",
-      "--irrelevant",
-      "--query", "deploy k8s",
-      "--chunk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
-      "--json",
-    ]);
-    expect(put.exitCode).toBe(0);
-    const putJson = JSON.parse(put.stdout);
-    expect(putJson.stored).toBe(true);
-    expect(putJson.signal).toBe("irrelevant");
-
-    const list = await runQmd(["feedback", "list", "--query", "deploy", "--json"]);
-    expect(list.exitCode).toBe(0);
-    const listJson = JSON.parse(list.stdout);
-    expect(Array.isArray(listJson.feedback)).toBe(true);
-    expect(listJson.feedback.length).toBeGreaterThan(0);
-    expect(listJson.feedback[0].query).toContain("deploy");
-  });
-
-  test("rejects invalid usage when signal flag is missing", async () => {
-    const res = await runQmd([
-      "feedback",
-      "--query", "deploy k8s",
-      "--chunk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
-    ]);
-    expect(res.exitCode).toBe(1);
-    expect(res.stderr).toContain("Usage: kindx feedback");
   });
 });
 
@@ -1298,16 +1242,13 @@ describe("mcp http daemon", () => {
   }
 
   /** Spawn a foreground HTTP server (non-blocking) and return the process */
-  function spawnHttpServer(port: number, watch = false): import("child_process").ChildProcess {
-    const args = [kindxBin, "mcp", "--http", "--port", String(port)];
-    if (watch) args.push("--watch");
-    const proc = spawn(process.execPath, args, {
+  function spawnHttpServer(port: number): import("child_process").ChildProcess {
+    const proc = spawn(process.execPath, [kindxBin, "mcp", "--http", "--port", String(port)], {
       cwd: fixturesDir,
       env: {
         ...process.env,
         INDEX_PATH: daemonDbPath,
         KINDX_CONFIG_DIR: daemonConfigDir,
-        KINDX_STARTUP_PRELOAD: "0",
         PWD: fixturesDir,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1370,26 +1311,6 @@ describe("mcp http daemon", () => {
   test("foreground HTTP server starts and responds to health check", async () => {
     const port = randomPort();
     const proc = spawnHttpServer(port);
-
-    try {
-      const ready = await waitForServer(port);
-      expect(ready).toBe(true);
-
-      const res = await fetch(`http://localhost:${port}/health`);
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.status).toBe("ok");
-      expect(typeof body.warmed).toBe("boolean");
-      expect(body.models).toBeDefined();
-    } finally {
-      proc.kill("SIGTERM");
-      await new Promise(r => proc.on("close", r));
-    }
-  });
-
-  test("foreground HTTP server accepts --watch", async () => {
-    const port = randomPort();
-    const proc = spawnHttpServer(port, true);
 
     try {
       const ready = await waitForServer(port);
@@ -1520,6 +1441,88 @@ describe("mcp http daemon", () => {
   });
 });
 
+describe("CLI Memory Commands", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("memory-cli");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+  });
+
+  test("memory help renders usage", async () => {
+    const { stdout, exitCode } = await runQmd(["memory", "help"], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Usage: kindx memory");
+    expect(stdout).toContain("put");
+    expect(stdout).toContain("search");
+  });
+
+  test("memory put validates required args", async () => {
+    const { stderr, exitCode } = await runQmd(
+      ["memory", "put", "--scope", "test", "--key", "profile:name"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Usage: kindx memory put");
+  });
+
+  test("memory commands emit stable JSON payloads", async () => {
+    const parseCliJson = (raw: string): any => {
+      const trimmed = raw.trim();
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        const start = trimmed.indexOf("{");
+        const end = trimmed.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+          return JSON.parse(trimmed.slice(start, end + 1));
+        }
+        throw new Error(`Expected JSON output but received: ${trimmed}`);
+      }
+    };
+
+    const put = await runQmd(
+      ["memory", "put", "--scope", "cli-test", "--key", "profile:role", "--value", "engineer", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(put.exitCode).toBe(0);
+    const putJson = parseCliJson(put.stdout);
+    expect(putJson.scope).toBe("cli-test");
+    expect(putJson.memory).toBeDefined();
+    expect(typeof putJson.memory.id).toBe("number");
+
+    const search = await runQmd(
+      ["memory", "search", "--scope", "cli-test", "--text", "--json", "engineer"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(search.exitCode).toBe(0);
+    const searchJson = parseCliJson(search.stdout);
+    expect(searchJson.scope).toBe("cli-test");
+    expect(searchJson.mode).toBe("text");
+    expect(Array.isArray(searchJson.results)).toBe(true);
+
+    const history = await runQmd(
+      ["memory", "history", "--scope", "cli-test", "--key", "profile:role", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(history.exitCode).toBe(0);
+    const historyJson = parseCliJson(history.stdout);
+    expect(historyJson.scope).toBe("cli-test");
+    expect(Array.isArray(historyJson.history)).toBe(true);
+
+    const stats = await runQmd(
+      ["memory", "stats", "--scope", "cli-test", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(stats.exitCode).toBe(0);
+    const statsJson = parseCliJson(stats.stdout);
+    expect(statsJson.scope).toBe("cli-test");
+    expect(typeof statsJson.totalMemories).toBe("number");
+  });
+});
+
 describe("CLI Migrate Chroma Command", () => {
   let localDbPath: string;
   let localConfigDir: string;
@@ -1562,11 +1565,7 @@ describe("CLI Migrate Chroma Command", () => {
     expect(lsResult.stdout).toContain("doc1");
 
     // Re-embed it
-    const embedResult = await runQmd(["embed"], {
-      dbPath: localDbPath,
-      configDir: localConfigDir,
-      env: { KINDX_DETERMINISTIC_EMBEDDINGS: "1" },
-    });
+    const embedResult = await runQmd(["embed"], { dbPath: localDbPath, configDir: localConfigDir });
     expect(embedResult.exitCode).toBe(0);
 
     // Search it
@@ -1783,21 +1782,5 @@ describe("Remote API Integration", () => {
     expect(rerankCalls.length).toBeGreaterThan(0);
     
     await rm(notesDir, { recursive: true, force: true });
-  });
-});
-
-describe("preload command", () => {
-  test("returns preload status JSON in remote backend mode", async () => {
-    const { stdout, exitCode } = await runQmd(["preload", "--json"], {
-      env: { KINDX_LLM_BACKEND: "remote" },
-    });
-    expect(exitCode).toBe(0);
-    const body = JSON.parse(stdout);
-    expect(typeof body.warmed).toBe("boolean");
-    expect(body.models).toEqual({
-      embed: "unsupported",
-      rerank: "unsupported",
-      expand: "unsupported",
-    });
   });
 });

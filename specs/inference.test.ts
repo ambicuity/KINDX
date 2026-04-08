@@ -12,6 +12,7 @@ import {
   LlamaCpp,
   getDefaultLLM,
   disposeDefaultLLM,
+  setDefaultLLM,
   withLLMSession,
   canUnloadLLM,
   SessionReleasedError,
@@ -117,186 +118,6 @@ describe("LlamaCpp expand context size config", () => {
   });
 });
 
-describe("LlamaCpp context pool config", () => {
-  test("uses default context pool size when unset", () => {
-    const prev = process.env.KINDX_CONTEXT_POOL_SIZE;
-    delete process.env.KINDX_CONTEXT_POOL_SIZE;
-    try {
-      const llm = new LlamaCpp({}) as any;
-      expect(llm.contextPoolSize).toBe(2);
-    } finally {
-      if (prev === undefined) delete process.env.KINDX_CONTEXT_POOL_SIZE;
-      else process.env.KINDX_CONTEXT_POOL_SIZE = prev;
-    }
-  });
-
-  test("reads context pool size from KINDX_CONTEXT_POOL_SIZE", () => {
-    const prev = process.env.KINDX_CONTEXT_POOL_SIZE;
-    process.env.KINDX_CONTEXT_POOL_SIZE = "3";
-    try {
-      const llm = new LlamaCpp({}) as any;
-      expect(llm.contextPoolSize).toBe(3);
-    } finally {
-      if (prev === undefined) delete process.env.KINDX_CONTEXT_POOL_SIZE;
-      else process.env.KINDX_CONTEXT_POOL_SIZE = prev;
-    }
-  });
-
-  test("retains configured pool contexts during idle unload", async () => {
-    const llm = new LlamaCpp({ contextPoolSize: 2 }) as any;
-    const embedA = { dispose: vi.fn().mockResolvedValue(undefined) };
-    const embedB = { dispose: vi.fn().mockResolvedValue(undefined) };
-    const embedC = { dispose: vi.fn().mockResolvedValue(undefined) };
-    const rerankA = { dispose: vi.fn().mockResolvedValue(undefined) };
-    const rerankB = { dispose: vi.fn().mockResolvedValue(undefined) };
-    const rerankC = { dispose: vi.fn().mockResolvedValue(undefined) };
-    llm.embedContexts = [embedA, embedB, embedC];
-    llm.rerankContexts = [rerankA, rerankB, rerankC];
-
-    await llm.unloadIdleResources();
-
-    expect(llm.embedContexts.length).toBe(2);
-    expect(llm.rerankContexts.length).toBe(2);
-    expect(embedA.dispose).not.toHaveBeenCalled();
-    expect(embedB.dispose).not.toHaveBeenCalled();
-    expect(embedC.dispose).toHaveBeenCalledTimes(1);
-    expect(rerankA.dispose).not.toHaveBeenCalled();
-    expect(rerankB.dispose).not.toHaveBeenCalled();
-    expect(rerankC.dispose).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("LlamaCpp low VRAM policy", () => {
-  const ENV_KEYS = [
-    "KINDX_LOW_VRAM",
-    "KINDX_VRAM_BUDGET_MB",
-    "KINDX_LOW_VRAM_THRESHOLD_MB",
-    "KINDX_LOW_VRAM_EMBED_PARALLELISM",
-    "KINDX_LOW_VRAM_RERANK_PARALLELISM",
-    "KINDX_LOW_VRAM_EXPAND_CONTEXT_SIZE",
-    "KINDX_LOW_VRAM_RERANK_CONTEXT_SIZE",
-  ] as const;
-
-  const snapshotEnv = () => {
-    const snapshot: Record<string, string | undefined> = {};
-    for (const key of ENV_KEYS) snapshot[key] = process.env[key];
-    return snapshot;
-  };
-
-  const restoreEnv = (snapshot: Record<string, string | undefined>) => {
-    for (const key of ENV_KEYS) {
-      const value = snapshot[key];
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
-
-  test("auto-detects low VRAM when free memory is below threshold", async () => {
-    const llm = new LlamaCpp({ lowVramThresholdMB: 6000 }) as any;
-    llm.ensureLlama = vi.fn().mockResolvedValue({
-      gpu: "vulkan",
-      cpuMathCores: 8,
-      getVramState: vi.fn().mockResolvedValue({ free: 3500 * 1024 * 1024 }),
-    });
-
-    const policy = await llm.resolveMemoryPolicy();
-    expect(policy.lowVram).toBe(true);
-    expect(Math.round(policy.freeMB)).toBe(3500);
-  });
-
-  test("respects forced low-VRAM mode via KINDX_LOW_VRAM", async () => {
-    const prevEnv = snapshotEnv();
-    process.env.KINDX_LOW_VRAM = "1";
-    try {
-      const llm = new LlamaCpp({}) as any;
-      llm.ensureLlama = vi.fn().mockResolvedValue({
-        gpu: "vulkan",
-        cpuMathCores: 8,
-        getVramState: vi.fn().mockResolvedValue({ free: 32000 * 1024 * 1024 }),
-      });
-      const policy = await llm.resolveMemoryPolicy();
-      expect(policy.lowVram).toBe(true);
-      expect(policy.reason).toContain("forced_by_KINDX_LOW_VRAM_or_config");
-    } finally {
-      restoreEnv(prevEnv);
-    }
-  });
-
-  test("caps embed/rerank parallelism under low-VRAM policy", async () => {
-    const llm = new LlamaCpp({
-      lowVram: true,
-      vramBudgetMB: 3500,
-      lowVramEmbedParallelism: 2,
-      lowVramRerankParallelism: 1,
-    }) as any;
-    llm.ensureLlama = vi.fn().mockResolvedValue({
-      gpu: "vulkan",
-      cpuMathCores: 8,
-      getVramState: vi.fn().mockResolvedValue({ free: 4096 * 1024 * 1024 }),
-    });
-
-    const embedParallelism = await llm.computeParallelism(150, "embed");
-    const rerankParallelism = await llm.computeParallelism(1000, "rerank");
-    expect(embedParallelism).toBe(2);
-    expect(rerankParallelism).toBe(1);
-  });
-
-  test("narrows context sizes in low-VRAM mode", async () => {
-    const llm = new LlamaCpp({
-      lowVram: true,
-      expandContextSize: 2048,
-      rerankContextSize: 4096,
-      lowVramExpandContextSize: 1024,
-      lowVramRerankContextSize: 1024,
-    }) as any;
-    llm.ensureLlama = vi.fn().mockResolvedValue({
-      gpu: "vulkan",
-      cpuMathCores: 8,
-      getVramState: vi.fn().mockResolvedValue({ free: 4096 * 1024 * 1024 }),
-    });
-
-    expect(await llm.effectiveExpandContextSize()).toBe(1024);
-    expect(await llm.effectiveRerankContextSize()).toBe(1024);
-  });
-
-  test("falls back gracefully when VRAM state cannot be read", async () => {
-    const llm = new LlamaCpp({
-      lowVram: true,
-      lowVramEmbedParallelism: 2,
-      lowVramRerankParallelism: 1,
-    }) as any;
-    llm.ensureLlama = vi.fn().mockResolvedValue({
-      gpu: "vulkan",
-      cpuMathCores: 8,
-      getVramState: vi.fn().mockRejectedValue(new Error("probe failed")),
-    });
-
-    expect(await llm.computeParallelism(150, "embed")).toBe(2);
-    expect(await llm.computeParallelism(1000, "rerank")).toBe(1);
-  });
-
-  test("warns and ignores invalid KINDX_LOW_VRAM value", async () => {
-    const prevEnv = snapshotEnv();
-    process.env.KINDX_LOW_VRAM = "maybe";
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-    try {
-      const llm = new LlamaCpp({}) as any;
-      llm.ensureLlama = vi.fn().mockResolvedValue({
-        gpu: "vulkan",
-        cpuMathCores: 8,
-        getVramState: vi.fn().mockResolvedValue({ free: 32000 * 1024 * 1024 }),
-      });
-      const policy = await llm.resolveMemoryPolicy();
-      expect(policy.lowVram).toBe(false);
-      expect(stderrSpy).toHaveBeenCalled();
-      expect(String(stderrSpy.mock.calls[0]?.[0] || "")).toContain("KINDX_LOW_VRAM");
-    } finally {
-      stderrSpy.mockRestore();
-      restoreEnv(prevEnv);
-    }
-  });
-});
-
 describe("LlamaCpp rerank deduping", () => {
   test("deduplicates identical document texts before scoring", async () => {
     const llm = new LlamaCpp({}) as any;
@@ -325,6 +146,89 @@ describe("LlamaCpp rerank deduping", () => {
     expect(scoreByFile.get("a.md")).toBe(0.9);
     expect(scoreByFile.get("b.md")).toBe(0.9);
     expect(scoreByFile.get("c.md")).toBe(0.2);
+  });
+});
+
+describe("LlamaCpp CPU fallback", () => {
+  test("retries embedding context creation once in CPU-only mode", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    const createEmbeddingContext = vi.fn()
+      .mockRejectedValueOnce(new Error("ggml metal init failed"))
+      .mockResolvedValueOnce({ dispose: vi.fn() });
+
+    llm.ensureEmbedModel = vi.fn().mockResolvedValue({ createEmbeddingContext });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    const contexts = await llm.ensureEmbedContexts();
+    expect(contexts.length).toBe(1);
+    expect(llm.forceCpuMode).toBe(true);
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(createEmbeddingContext).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not loop forever when fallback also fails", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    llm.ensureEmbedModel = vi.fn().mockResolvedValue({
+      createEmbeddingContext: vi.fn().mockRejectedValue(new Error("ggml allocation failure")),
+    });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    await expect(llm.ensureEmbedContexts()).rejects.toThrow();
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(llm.cpuFallbackAttempted).toBe(true);
+  });
+
+  test("retries rerank context creation once in CPU-only mode", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    const createRankingContext = vi.fn()
+      .mockRejectedValueOnce(new Error("metal allocation failed"))
+      .mockRejectedValueOnce(new Error("ggml allocation failed"))
+      .mockResolvedValueOnce({ rankAll: vi.fn(), dispose: vi.fn() });
+
+    llm.ensureRerankModel = vi.fn().mockResolvedValue({
+      createRankingContext,
+      tokenize: (text: string) => Array.from(text),
+      detokenize: (tokens: string[]) => tokens.join(""),
+    });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.hasRerankVramBudget = vi.fn().mockResolvedValue(true);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    const contexts = await llm.ensureRerankContexts();
+    expect(contexts.length).toBe(1);
+    expect(llm.forceCpuMode).toBe(true);
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(createRankingContext).toHaveBeenCalledTimes(3);
+  });
+
+  test("remote backend selection remains unaffected", async () => {
+    const prevBackend = process.env.KINDX_LLM_BACKEND;
+    try {
+      process.env.KINDX_LLM_BACKEND = "remote";
+      setDefaultLLM(null);
+      const llm = getDefaultLLM();
+      expect(llm).not.toBeInstanceOf(LlamaCpp);
+      expect((llm as any).constructor.name).toBe("RemoteLLM");
+    } finally {
+      if (prevBackend === undefined) delete process.env.KINDX_LLM_BACKEND;
+      else process.env.KINDX_LLM_BACKEND = prevBackend;
+      await disposeDefaultLLM();
+      setDefaultLLM(null);
+    }
   });
 });
 
