@@ -98,6 +98,11 @@ kindx multi-get "journals/2025-05*.md"
 # Scoped Contextual Retrieval within a collection
 kindx search "API" -c notes
 
+# Corrective feedback (Phase 1)
+kindx feedback --irrelevant --query "deploy k8s" --chunk "#abc123:2"
+kindx feedback --relevant --query "deploy k8s" --chunk "#abc123:2"
+kindx feedback list --query "deploy"
+
 # Export full match set for agent pipeline
 kindx search "API" --all --files --min-score 0.3
 
@@ -125,6 +130,15 @@ kindx get "docs/api-reference.md" --full
 
 > **Pro-tip (Context Window Budgeting):** Use `--min-score 0.4` with `--files` to produce a ranked manifest, then `multi-get` only the top-k assets. This two-phase pattern prevents context window overflow while preserving retrieval precision.
 
+### Typed SDK Packages
+
+KINDX now includes typed client packages and integration scaffolding:
+
+- `@ambicuity/kindx-schemas` — shared Zod schemas for KINDX MCP/HTTP request and response contracts.
+- `@ambicuity/kindx-client` — TypeScript client for `/query` and MCP tool calls (`get`, `multi_get`, `status`, `kindx_feedback`, and memory tools).
+- `python/kindx-langchain` — installable Python retriever wrapper for LangChain-style document retrieval.
+- [`reference/integrations/agent-templates.md`](reference/integrations/agent-templates.md) — tested MCP configuration templates for OpenDevin, Goose, and Claude Code.
+
 ---
 
 ## MCP Server
@@ -138,6 +152,7 @@ KINDX exposes a Model Context Protocol (MCP) server for tool-call integration wi
 - `kindx_get` — Neural Extraction by path or docid (with fuzzy matching fallback)
 - `kindx_multi_get` — Bulk Neural Extraction by glob pattern, list, or docids
 - `kindx_status` — Index health and collection inventory
+- `kindx_feedback` — Store relevance feedback (`relevant` / `irrelevant`) for query+chunk pairs
 
 **Claude Desktop configuration** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
@@ -160,9 +175,11 @@ By default, the MCP server uses stdio (launched as a subprocess per client). For
 # Foreground
 kindx mcp --http                # localhost:8181
 kindx mcp --http --port 8080    # custom port
+kindx mcp --http --watch        # start HTTP MCP + live watcher in one process
 
 # Persistent daemon
 kindx mcp --http --daemon       # writes PID to ~/.cache/kindx/mcp.pid
+kindx mcp --http --daemon --watch
 kindx mcp stop                  # terminate via PID file
 kindx status                    # reports "MCP: running (PID ...)"
 ```
@@ -370,6 +387,8 @@ Models are downloaded from HuggingFace and cached in `~/.cache/kindx/models/`.
 
 Override the default embedding model via the `KINDX_EMBED_MODEL` environment variable. Required for multilingual corpora (CJK, Arabic, etc.) where `embeddinggemma-300M` has limited coverage.
 
+BM25 keyword search now normalizes CJK text at both index and query time (with `Intl.Segmenter` plus CJK bigram fallback), so `kindx search` remains effective even for contiguous Chinese/Japanese/Korean text without whitespace.
+
 ```bash
 # Use Qwen3-Embedding-0.6B for multilingual corpus (CJK) support
 export KINDX_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-Q8_0.gguf"
@@ -485,13 +504,17 @@ kindx pull                   # Download/check the default local models
 kindx update                 # Re-index configured collections
 kindx watch                  # Keep the index fresh in the background
 kindx status                 # Report index, collection, and MCP health
-kindx cleanup                # Clear cache/orphaned rows and vacuum the DB
+kindx cleanup                # Clear caches, orphaned rows, and vacuum the DB
+kindx cleanup --cache        # Clear only LLM + semantic query caches
 kindx mcp                    # Start the MCP server (stdio by default)
 kindx migrate <target> <path> # Import from Chroma or OpenCLAW
 kindx skill install          # Install the packaged Claude skill locally
 kindx --skill                # Print the packaged skill markdown
 kindx --version              # Print the installed CLI version
 ```
+
+KINDX opens SQLite indexes with `journal_mode=WAL` and `busy_timeout=5000`, so background writers
+(for example `kindx watch`) and MCP readers can run concurrently with fewer lock conflicts.
 
 Collection subcommands:
 
@@ -585,12 +608,14 @@ collections:
 ### Vector Index Generation
 
 ```bash
-# Embed all indexed documents (900 tokens/chunk, 15% overlap)
+# Embed changed/new chunks only (900 tokens/chunk, 15% overlap)
 kindx embed
 
 # Force re-embed entire corpus
 kindx embed -f
 ```
+
+`kindx embed` performs chunk-level incremental embedding. Progress is reported as `N changed / M total chunks`, and unchanged chunks are reused when possible.
 
 ### Context Management
 
@@ -711,8 +736,11 @@ kindx multi-get "docs/*.md" --max-bytes 20480
 # Export bulk extraction as JSON for agent processing
 kindx multi-get "docs/*.md" --json
 
-# Purge cache and orphaned index data
+# Purge caches + orphaned index data
 kindx cleanup
+
+# Purge only LLM + semantic caches
+kindx cleanup --cache
 
 # Import an existing Chroma or OpenCLAW corpus
 kindx migrate chroma /path/to/chroma.sqlite3
@@ -766,6 +794,7 @@ erDiagram
         text hash FK
         integer seq
         integer pos
+        text chunk_hash
         blob embedding
     }
     vectors_vec {
@@ -777,11 +806,24 @@ erDiagram
         text response
         integer created
     }
+    semantic_cache {
+        integer id PK
+        text query
+        text model
+        text response
+        text created_at
+        integer hits
+    }
+    semantic_cache_vec {
+        text cache_key PK
+        float[768] embedding
+    }
 
     collections ||--o{ documents : contains
     documents ||--|{ documents_fts : indexes
     documents ||--o{ content_vectors : chunks
     content_vectors ||--|| vectors_vec : embeds
+    semantic_cache ||--|| semantic_cache_vec : embeds
 ```
 
 ---
@@ -794,6 +836,8 @@ erDiagram
 | `KINDX_EXPAND_CONTEXT_SIZE` | `2048` | Context window for query expansion LLM |
 | `KINDX_CPU_ONLY` | (unset) | Set to `1` to force local model execution on CPU (slower, but more compatible) |
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
+| `KINDX_SEMANTIC_CACHE_THRESHOLD` | `0.92` | Minimum cosine similarity to reuse semantic query-expansion cache |
+| `KINDX_CACHE_TTL_HOURS` | `168` | Semantic query-expansion cache entry TTL in hours |
 | `XDG_CACHE_HOME` | `~/.cache` | Cache base directory |
 | `NO_COLOR` | (unset) | Disable ANSI terminal colors |
 | `KINDX_LLM_BACKEND` | `local` | Set to `remote` to use an OpenAI-compatible API instead of local GPU |

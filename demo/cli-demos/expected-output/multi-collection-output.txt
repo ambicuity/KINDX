@@ -1,0 +1,210 @@
+=== Step 1: Register collections ===
+
+Adding 'docs' collection from ~/projects/docs...
+✓ Collection 'docs' added → ~/projects/docs (23 files detected)
+
+Adding 'notes' collection from ~/notes...
+✓ Collection 'notes' added → ~/notes (14 files detected)
+
+=== Step 2: Index and embed ===
+
+Updating all collections...
+Scanning docs... 23 files found
+Indexing ████████████████████████████████████████ 23/23
+Scanning notes... 14 files found
+Indexing ████████████████████████████████████████ 14/14
+✓ Indexed 37 documents in 0.61s (BM25 terms: 19,847)
+
+Embedding all collections...
+Embedding ████████████████████████████████████████ 37/37
+✓ Embedded 37 documents in 4.3s (model: all-MiniLM-L6-v2)
+
+=== Step 3: List collections ===
+
+Collection         Path                   Files  Indexed  Embedded  Last Updated
+──────────────────────────────────────────────────────────────────────────────────
+docs               ~/projects/docs        23     23       23        2026-03-13 09:22:05
+notes              ~/notes                14     14       14        2026-03-13 09:22:07
+
+2 collections, 37 documents total
+
+=== Step 4: Search across all collections ===
+Searching all collections for 'authentication flow'...
+
+kindx://docs/api-auth.md:5 #g7h8i9
+Title: API Authentication Guide
+Score: 5.12
+
+--- api-auth.md:5 ---
+## Authentication Design
+
+All API endpoints require Bearer token authentication. Tokens are issued
+via the /auth/token endpoint with a 1-hour TTL.
+---
+
+kindx://docs/auth-middleware.md:1 #r2s3t4
+Title: Authentication Middleware
+Score: 4.68
+
+--- auth-middleware.md:1 ---
+# Authentication Middleware
+
+The auth middleware validates Bearer tokens on every request. It extracts
+the token from the Authorization header and verifies the JWT signature.
+---
+
+kindx://notes/standup.md:7 #u5v6w7
+Title: Weekly Standup Notes
+Score: 3.24
+
+--- standup.md:7 ---
+## Status Updates
+
+**Alice** — Auth service refactor on track. PR ready for review.
+New token refresh flow passes all integration tests.
+---
+
+kindx://docs/oauth-flow.md:3 #x8y9z0
+Title: OAuth2 Integration
+Score: 2.89
+
+--- oauth-flow.md:3 ---
+## OAuth2 Authorization Code Flow
+
+1. Client redirects user to /auth/authorize
+2. User authenticates and grants consent
+3. Server redirects back with authorization code
+---
+
+4 results across 2 collections (0.03s)
+
+=== Step 5: Search a specific collection ===
+Searching only 'docs' for 'authentication flow'...
+
+kindx://docs/api-auth.md:5 #g7h8i9
+Title: API Authentication Guide
+Score: 5.12
+
+--- api-auth.md:5 ---
+## Authentication Design
+
+All API endpoints require Bearer token authentication. Tokens are issued
+via the /auth/token endpoint with a 1-hour TTL.
+---
+
+kindx://docs/auth-middleware.md:1 #r2s3t4
+Title: Authentication Middleware
+Score: 4.68
+
+--- auth-middleware.md:1 ---
+# Authentication Middleware
+
+The auth middleware validates Bearer tokens on every request. It extracts
+the token from the Authorization header and verifies the JWT signature.
+---
+
+kindx://docs/oauth-flow.md:3 #x8y9z0
+Title: OAuth2 Integration
+Score: 2.89
+
+--- oauth-flow.md:3 ---
+## OAuth2 Authorization Code Flow
+
+1. Client redirects user to /auth/authorize
+2. User authenticates and grants consent
+3. Server redirects back with authorization code
+---
+
+3 results in 'docs' (0.02s)
+
+=== Step 6: List documents per collection ===
+
+--- Documents in 'docs' ---
+kindx://docs/api-auth.md
+kindx://docs/api-design.md
+kindx://docs/api-errors.md
+kindx://docs/api-pagination.md
+kindx://docs/api-versioning.md
+kindx://docs/auth-middleware.md
+kindx://docs/caching-strategy.md
+kindx://docs/ci-pipeline.md
+kindx://docs/database-schema.md
+kindx://docs/deployment-guide.md
+kindx://docs/error-handling.md
+kindx://docs/getting-started.md
+kindx://docs/logging-standards.md
+kindx://docs/monitoring-alerts.md
+kindx://docs/oauth-flow.md
+kindx://docs/onboarding.md
+kindx://docs/performance-tuning.md
+kindx://docs/rate-limiting.md
+kindx://docs/release-process.md
+kindx://docs/security-checklist.md
+kindx://docs/service-mesh.md
+kindx://docs/testing-strategy.md
+kindx://docs/troubleshooting.md
+
+23 documents in 'docs'
+
+--- Documents in 'notes' ---
+kindx://notes/architecture-review.md
+kindx://notes/brainstorm-features.md
+kindx://notes/design-review-2026-02.md
+kindx://notes/incident-2026-02-28.md
+kindx://notes/infra-decisions.md
+kindx://notes/interview-questions.md
+kindx://notes/onboarding-feedback.md
+kindx://notes/planning-q2.md
+kindx://notes/retro-2026-02.md
+kindx://notes/retro-2026-03.md
+kindx://notes/security-audit.md
+kindx://notes/standup.md
+kindx://notes/tech-debt-log.md
+kindx://notes/weekly-metrics.md
+
+14 documents in 'notes'
+
+=== Step 7: Cross-collection hybrid query ===
+Running hybrid query across all collections...
+
+kindx://docs/auth-middleware.md:1 #r2s3t4
+Title: Authentication Middleware
+Score: 8.41 (hybrid)
+
+--- auth-middleware.md:1 ---
+# Authentication Middleware
+
+The auth middleware validates Bearer tokens on every request. It extracts
+the token from the Authorization header, verifies the JWT signature, and
+attaches the decoded claims to the request context.
+---
+
+kindx://docs/api-auth.md:5 #g7h8i9
+Title: API Authentication Guide
+Score: 7.36 (hybrid)
+
+--- api-auth.md:5 ---
+## Authentication Design
+
+All API endpoints require Bearer token authentication. Tokens are issued
+via the /auth/token endpoint with a 1-hour TTL. Refresh tokens have a
+30-day TTL and are rotated on each use.
+---
+
+kindx://docs/oauth-flow.md:3 #x8y9z0
+Title: OAuth2 Integration
+Score: 5.72 (hybrid)
+
+--- oauth-flow.md:3 ---
+## OAuth2 Authorization Code Flow
+
+1. Client redirects user to /auth/authorize
+2. User authenticates and grants consent
+3. Server redirects back with authorization code
+4. Client exchanges code for access + refresh tokens
+---
+
+3 results across 2 collections (0.10s)
+
+=== Multi-collection demo complete ===
+Use -c to target a collection, or omit it to search everywhere.

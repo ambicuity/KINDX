@@ -1,0 +1,139 @@
+{
+  "corpus_dir": "../../specs/eval-docs",
+  "corpus_files": [
+    "api-design-principles.md",
+    "distributed-systems-overview.md",
+    "machine-learning-primer.md",
+    "product-launch-retrospective.md",
+    "remote-work-policy.md",
+    "startup-fundraising-memo.md"
+  ],
+  "queries": [
+    {
+      "id": 1,
+      "query": "API versioning",
+      "expected_doc": "api-design-principles.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 2,
+      "query": "Series A fundraising",
+      "expected_doc": "startup-fundraising-memo.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 3,
+      "query": "CAP theorem",
+      "expected_doc": "distributed-systems-overview.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 4,
+      "query": "overfitting machine learning",
+      "expected_doc": "machine-learning-primer.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 5,
+      "query": "remote work VPN",
+      "expected_doc": "remote-work-policy.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 6,
+      "query": "Project Phoenix retrospective",
+      "expected_doc": "product-launch-retrospective.md",
+      "difficulty": "easy",
+      "type": "keyword"
+    },
+    {
+      "id": 7,
+      "query": "how to structure REST endpoints",
+      "expected_doc": "api-design-principles.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 8,
+      "query": "raising money for startup",
+      "expected_doc": "startup-fundraising-memo.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 9,
+      "query": "consistency vs availability tradeoffs",
+      "expected_doc": "distributed-systems-overview.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 10,
+      "query": "how to prevent models from memorizing data",
+      "expected_doc": "machine-learning-primer.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 11,
+      "query": "working from home guidelines",
+      "expected_doc": "remote-work-policy.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 12,
+      "query": "what went wrong with the launch",
+      "expected_doc": "product-launch-retrospective.md",
+      "difficulty": "medium",
+      "type": "semantic"
+    },
+    {
+      "id": 13,
+      "query": "nouns not verbs",
+      "expected_doc": "api-design-principles.md",
+      "difficulty": "hard",
+      "type": "vague"
+    },
+    {
+      "id": 14,
+      "query": "Sequoia investor pitch",
+      "expected_doc": "startup-fundraising-memo.md",
+      "difficulty": "hard",
+      "type": "vague"
+    },
+    {
+      "id": 15,
+      "query": "Raft algorithm leader election",
+      "expected_doc": "distributed-systems-overview.md",
+      "difficulty": "hard",
+      "type": "vague"
+    },
+    {
+      "id": 16,
+      "query": "F1 score precision recall",
+      "expected_doc": "machine-learning-primer.md",
+      "difficulty": "hard",
+      "type": "vague"
+    },
+    {
+      "id": 17,
+      "query": "quarterly team gathering travel",
+      "expected_doc": "remote-work-policy.md",
+      "difficulty": "hard",
+      "type": "vague"
+    },
+    {
+      "id": 18,
+      "query": "beta program 47 bugs",
+      "expected_doc": "product-launch-retrospective.md",
+      "difficulty": "hard",
+      "type": "vague"
+    }
+  ]
+}
