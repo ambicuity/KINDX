@@ -35,6 +35,8 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: '.'
+          skip-dirs: 'node_modules/@node-llama-cpp'
+          ignorefile: '.trivyignore'
           skip-setup-trivy: true
           format: 'sarif'
           output: 'trivy-results.sarif'

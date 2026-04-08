@@ -12,6 +12,7 @@ import {
   LlamaCpp,
   getDefaultLLM,
   disposeDefaultLLM,
+  setDefaultLLM,
   withLLMSession,
   canUnloadLLM,
   SessionReleasedError,
@@ -145,6 +146,89 @@ describe("LlamaCpp rerank deduping", () => {
     expect(scoreByFile.get("a.md")).toBe(0.9);
     expect(scoreByFile.get("b.md")).toBe(0.9);
     expect(scoreByFile.get("c.md")).toBe(0.2);
+  });
+});
+
+describe("LlamaCpp CPU fallback", () => {
+  test("retries embedding context creation once in CPU-only mode", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    const createEmbeddingContext = vi.fn()
+      .mockRejectedValueOnce(new Error("ggml metal init failed"))
+      .mockResolvedValueOnce({ dispose: vi.fn() });
+
+    llm.ensureEmbedModel = vi.fn().mockResolvedValue({ createEmbeddingContext });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    const contexts = await llm.ensureEmbedContexts();
+    expect(contexts.length).toBe(1);
+    expect(llm.forceCpuMode).toBe(true);
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(createEmbeddingContext).toHaveBeenCalledTimes(2);
+  });
+
+  test("does not loop forever when fallback also fails", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    llm.ensureEmbedModel = vi.fn().mockResolvedValue({
+      createEmbeddingContext: vi.fn().mockRejectedValue(new Error("ggml allocation failure")),
+    });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    await expect(llm.ensureEmbedContexts()).rejects.toThrow();
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(llm.cpuFallbackAttempted).toBe(true);
+  });
+
+  test("retries rerank context creation once in CPU-only mode", async () => {
+    const llm = new LlamaCpp({}) as any;
+    llm.forceCpuMode = false;
+    llm.cpuFallbackAttempted = false;
+    const createRankingContext = vi.fn()
+      .mockRejectedValueOnce(new Error("metal allocation failed"))
+      .mockRejectedValueOnce(new Error("ggml allocation failed"))
+      .mockResolvedValueOnce({ rankAll: vi.fn(), dispose: vi.fn() });
+
+    llm.ensureRerankModel = vi.fn().mockResolvedValue({
+      createRankingContext,
+      tokenize: (text: string) => Array.from(text),
+      detokenize: (tokens: string[]) => tokens.join(""),
+    });
+    llm.computeParallelism = vi.fn().mockResolvedValue(1);
+    llm.threadsPerContext = vi.fn().mockResolvedValue(0);
+    llm.hasRerankVramBudget = vi.fn().mockResolvedValue(true);
+    llm.resetRuntimeForCpuFallback = vi.fn().mockResolvedValue(undefined);
+    llm.touchActivity = vi.fn();
+
+    const contexts = await llm.ensureRerankContexts();
+    expect(contexts.length).toBe(1);
+    expect(llm.forceCpuMode).toBe(true);
+    expect(llm.resetRuntimeForCpuFallback).toHaveBeenCalledTimes(1);
+    expect(createRankingContext).toHaveBeenCalledTimes(3);
+  });
+
+  test("remote backend selection remains unaffected", async () => {
+    const prevBackend = process.env.KINDX_LLM_BACKEND;
+    try {
+      process.env.KINDX_LLM_BACKEND = "remote";
+      setDefaultLLM(null);
+      const llm = getDefaultLLM();
+      expect(llm).not.toBeInstanceOf(LlamaCpp);
+      expect((llm as any).constructor.name).toBe("RemoteLLM");
+    } finally {
+      if (prevBackend === undefined) delete process.env.KINDX_LLM_BACKEND;
+      else process.env.KINDX_LLM_BACKEND = prevBackend;
+      await disposeDefaultLLM();
+      setDefaultLLM(null);
+    }
   });
 });
 

@@ -16,6 +16,7 @@ import {
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
 import { createHash } from "crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync, promises as fs } from "node:fs";
 import * as os from "node:os";
 import { resolve, join } from "path";
@@ -139,6 +140,7 @@ export type GenerateOptions = {
  */
 export type RerankOptions = {
   model?: string;
+  onRerankInit?: (elapsedMs: number) => void;
 };
 
 /**
@@ -371,6 +373,11 @@ export interface LLM {
    * Dispose of resources
    */
   dispose(): Promise<void>;
+
+  /**
+   * Dispose sensitive contexts (rerank/chat sequences) between isolated sessions.
+   */
+  disposeSensitiveContexts?(): Promise<void>;
 }
 
 // =============================================================================
@@ -393,6 +400,11 @@ export type LlamaCppConfig = {
    * Increase this if reranking CJK or long-form content that exceeds the window.
    */
   rerankContextSize?: number;
+  /**
+   * Reserve VRAM (in MB) to avoid allocation races with external GPU consumers.
+   * Default: 512. Can also be set via KINDX_VRAM_RESERVE_MB.
+   */
+  vramReserveMB?: number;
   /**
    * Inactivity timeout in ms before unloading contexts (default: 2 minutes, 0 to disable).
    *
@@ -417,6 +429,56 @@ export type LlamaCppConfig = {
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_EXPAND_CONTEXT_SIZE = 2048;
 const DEFAULT_RERANK_CONTEXT_SIZE = 4096;
+const DEFAULT_VRAM_RESERVE_MB = 512;
+
+function resolveVramReserveMB(configValue?: number): number {
+  if (configValue !== undefined) {
+    if (!Number.isFinite(configValue) || configValue < 0) {
+      throw new Error(`Invalid vramReserveMB: ${configValue}. Must be a non-negative number.`);
+    }
+    return Math.floor(configValue);
+  }
+
+  const envValue = process.env.KINDX_VRAM_RESERVE_MB?.trim();
+  if (!envValue) return DEFAULT_VRAM_RESERVE_MB;
+
+  const parsed = Number.parseInt(envValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    process.stderr.write(
+      `KINDX Warning: invalid KINDX_VRAM_RESERVE_MB="${envValue}", using default ${DEFAULT_VRAM_RESERVE_MB}.\n`
+    );
+    return DEFAULT_VRAM_RESERVE_MB;
+  }
+  return parsed;
+}
+
+export class RerankContextAllocationError extends Error {
+  readonly code = "rerank_context_allocation_failed";
+  readonly causeMessage?: string;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "RerankContextAllocationError";
+    this.causeMessage = cause instanceof Error ? cause.message : undefined;
+  }
+}
+
+function isAllocationLikeError(error: unknown): boolean {
+  if ((error as { code?: string } | undefined)?.code === "rerank_context_allocation_failed") {
+    return true;
+  }
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  return (
+    msg.includes("out of memory")
+    || msg.includes("insufficient")
+    || msg.includes("allocation")
+    || msg.includes("vram")
+    || msg.includes("metal")
+    || msg.includes("cuda")
+    || msg.includes("ggml")
+  );
+}
 
 function resolveExpandContextSize(configValue?: number): number {
   if (configValue !== undefined) {
@@ -474,6 +536,10 @@ export class LlamaCpp implements LLM {
   private modelCacheDir: string;
   private rerankContextSize: number;
   private expandContextSize: number;
+  private vramReserveMB: number;
+  private forceCpuMode: boolean;
+  private cpuFallbackAttempted = false;
+  private cpuFallbackWarned = false;
 
   // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
@@ -487,6 +553,7 @@ export class LlamaCpp implements LLM {
 
   // Track disposal state to prevent double-dispose
   private disposed = false;
+  private rerankScopeKey = "global";
 
 
   constructor(config: LlamaCppConfig = {}) {
@@ -496,8 +563,10 @@ export class LlamaCpp implements LLM {
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
     this.rerankContextSize = resolveRerankContextSize(config.rerankContextSize);
+    this.vramReserveMB = resolveVramReserveMB(config.vramReserveMB);
     this.inactivityTimeoutMs = config.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS;
     this.disposeModelsOnInactivity = config.disposeModelsOnInactivity ?? false;
+    this.forceCpuMode = process.env.KINDX_CPU_ONLY === '1';
   }
 
   /**
@@ -603,17 +672,14 @@ export class LlamaCpp implements LLM {
    */
   private async ensureLlama(): Promise<Llama> {
     if (!this.llama) {
-      // KINDX_CPU_ONLY=1 forces CPU execution (useful for older GPU architectures
-      // like Pascal that fail with node-llama-cpp GPU acceleration).
-      const forceCPU = process.env.KINDX_CPU_ONLY === '1';
       const llama = await getLlama({
         // attempt to build
         build: "autoAttempt",
         logLevel: LlamaLogLevel.error,
-        ...(forceCPU ? { gpu: false } : {}),
+        ...(this.forceCpuMode ? { gpu: false } : {}),
       });
 
-      if (forceCPU) {
+      if (this.forceCpuMode) {
         process.stderr.write(
           "KINDX: CPU-only mode enabled via KINDX_CPU_ONLY=1.\n"
         );
@@ -632,6 +698,64 @@ export class LlamaCpp implements LLM {
       this.llama = llama;
     }
     return this.llama;
+  }
+
+  private async resetRuntimeForCpuFallback(): Promise<void> {
+    if (this.inactivityTimer) {
+      clearTimeout(this.inactivityTimer);
+      this.inactivityTimer = null;
+    }
+
+    for (const ctx of this.embedContexts) {
+      await ctx.dispose();
+    }
+    this.embedContexts = [];
+    for (const ctx of this.rerankContexts) {
+      await ctx.dispose();
+    }
+    this.rerankContexts = [];
+
+    if (this.embedModel) {
+      await this.embedModel.dispose();
+      this.embedModel = null;
+    }
+    if (this.generateModel) {
+      await this.generateModel.dispose();
+      this.generateModel = null;
+    }
+    if (this.rerankModel) {
+      await this.rerankModel.dispose();
+      this.rerankModel = null;
+    }
+    this.embedModelLoadPromise = null;
+    this.embedContextsCreatePromise = null;
+    this.generateModelLoadPromise = null;
+    this.rerankModelLoadPromise = null;
+
+    if (this.llama) {
+      const disposePromise = this.llama.dispose();
+      const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, 1000));
+      await Promise.race([disposePromise, timeoutPromise]);
+      this.llama = null;
+    }
+  }
+
+  private async tryActivateCpuFallback(error: unknown, operation: string): Promise<boolean> {
+    if (!isAllocationLikeError(error)) return false;
+    if (this.forceCpuMode || this.cpuFallbackAttempted) return false;
+
+    this.cpuFallbackAttempted = true;
+    this.forceCpuMode = true;
+    await this.resetRuntimeForCpuFallback();
+
+    if (!this.cpuFallbackWarned) {
+      const reason = error instanceof Error ? error.message : String(error);
+      process.stderr.write(
+        `KINDX Warning: local ${operation} initialization failed (${reason}). Retrying once in CPU-only mode (slower).\n`
+      );
+      this.cpuFallbackWarned = true;
+    }
+    return true;
   }
 
   /**
@@ -687,8 +811,9 @@ export class LlamaCpp implements LLM {
       try {
         const vram = await llama.getVramState();
         const freeMB = vram.free / (1024 * 1024);
-        const maxByVram = Math.floor((freeMB * 0.25) / perContextMB);
-        return Math.max(1, Math.min(8, maxByVram));
+        const usableMB = Math.max(0, freeMB * 0.25 - this.vramReserveMB);
+        const maxByVram = Math.floor(usableMB / perContextMB);
+        return Math.max(0, Math.min(8, maxByVram));
       } catch {
         return 2;
       }
@@ -698,6 +823,19 @@ export class LlamaCpp implements LLM {
     const cores = llama.cpuMathCores || 4;
     const maxContexts = Math.floor(cores / 4);
     return Math.max(1, Math.min(4, maxContexts));
+  }
+
+  private async hasRerankVramBudget(perContextMB: number): Promise<boolean> {
+    const llama = await this.ensureLlama();
+    if (!llama.gpu) return true;
+    try {
+      const vram = await llama.getVramState();
+      const freeMB = vram.free / (1024 * 1024);
+      const usableMB = Math.max(0, freeMB * 0.25 - this.vramReserveMB);
+      return usableMB >= perContextMB;
+    } catch {
+      return true;
+    }
   }
 
   /**
@@ -730,17 +868,24 @@ export class LlamaCpp implements LLM {
     this.embedContextsCreatePromise = (async () => {
       const model = await this.ensureEmbedModel();
       // Embed contexts are ~143 MB each (nomic-embed 2048 ctx)
-      const n = await this.computeParallelism(150);
+      const n = Math.max(1, await this.computeParallelism(150));
       const threads = await this.threadsPerContext(n);
+      let firstFailure: unknown = null;
       for (let i = 0; i < n; i++) {
         try {
           this.embedContexts.push(await model.createEmbeddingContext({
             ...(threads > 0 ? { threads } : {}),
           }));
-        } catch {
-          if (this.embedContexts.length === 0) throw new Error("Failed to create any embedding context");
+        } catch (error) {
+          if (firstFailure === null) firstFailure = error;
+          if (this.embedContexts.length === 0) {
+            throw error;
+          }
           break;
         }
+      }
+      if (this.embedContexts.length === 0) {
+        throw firstFailure ?? new Error("Failed to create any embedding context");
       }
       this.touchActivity();
       return this.embedContexts;
@@ -748,6 +893,13 @@ export class LlamaCpp implements LLM {
 
     try {
       return await this.embedContextsCreatePromise;
+    } catch (error) {
+      if (await this.tryActivateCpuFallback(error, "embedding")) {
+        this.embedContextsCreatePromise = null;
+        return await this.ensureEmbedContexts();
+      }
+      if (error instanceof Error) throw error;
+      throw new Error("Failed to create any embedding context");
     } finally {
       this.embedContextsCreatePromise = null;
     }
@@ -832,36 +984,70 @@ export class LlamaCpp implements LLM {
   // Default: 4096 tokens. Raised from 2048 to handle CJK content and longer chunks
   // without truncation crashes. Still far less than auto (40960).
   private async ensureRerankContexts(): Promise<Awaited<ReturnType<LlamaModel["createRankingContext"]>>[]> {
+    const scopeKey = llmScopeStorage.getStore() || "global";
+    if (this.rerankContexts.length > 0 && this.rerankScopeKey !== scopeKey) {
+      await this.disposeSensitiveContexts();
+    }
+
     if (this.rerankContexts.length === 0) {
-      const model = await this.ensureRerankModel();
-      // ~960 MB per context with flash attention at default contextSize 4096
-      const n = Math.min(await this.computeParallelism(1000), 4);
-      const threads = await this.threadsPerContext(n);
-      for (let i = 0; i < n; i++) {
-        try {
-          this.rerankContexts.push(await model.createRankingContext({
-            contextSize: this.rerankContextSize,
-            flashAttention: true,
-            ...(threads > 0 ? { threads } : {}),
-          } as any));
-        } catch {
-          if (this.rerankContexts.length === 0) {
-            // Flash attention might not be supported — retry without it
-            try {
-              this.rerankContexts.push(await model.createRankingContext({
-                contextSize: this.rerankContextSize,
-                ...(threads > 0 ? { threads } : {}),
-              }));
-            } catch {
-              throw new Error("Failed to create any rerank context");
+      try {
+        this.rerankScopeKey = scopeKey;
+        const model = await this.ensureRerankModel();
+        // ~960 MB per context with flash attention at default contextSize 4096
+        const n = Math.max(1, Math.min(await this.computeParallelism(1000), 4));
+        const threads = await this.threadsPerContext(n);
+        for (let i = 0; i < n; i++) {
+          // Always attempt at least one context; gate additional contexts on a fresh VRAM check.
+          const canAllocate = i === 0 ? true : await this.hasRerankVramBudget(1000);
+          if (!canAllocate) {
+            if (this.rerankContexts.length === 0) {
+              throw new RerankContextAllocationError(
+                "Insufficient VRAM budget before rerank context allocation"
+              );
             }
+            break;
           }
-          break;
+          try {
+            this.rerankContexts.push(await model.createRankingContext({
+              contextSize: this.rerankContextSize,
+              flashAttention: true,
+              ...(threads > 0 ? { threads } : {}),
+            } as any));
+          } catch (error) {
+            if (this.rerankContexts.length === 0) {
+              // Flash attention might not be supported — retry without it
+              try {
+                this.rerankContexts.push(await model.createRankingContext({
+                  contextSize: this.rerankContextSize,
+                  ...(threads > 0 ? { threads } : {}),
+                }));
+              } catch (retryError) {
+                if (isAllocationLikeError(error) || isAllocationLikeError(retryError)) {
+                  throw new RerankContextAllocationError("Failed to allocate rerank context", retryError);
+                }
+                throw retryError;
+              }
+            }
+            break;
+          }
         }
+      } catch (error) {
+        if (await this.tryActivateCpuFallback(error, "rerank")) {
+          return await this.ensureRerankContexts();
+        }
+        if (error instanceof Error) throw error;
+        throw new Error("Failed to create any rerank context");
       }
     }
     this.touchActivity();
     return this.rerankContexts;
+  }
+
+  async disposeSensitiveContexts(): Promise<void> {
+    for (const ctx of this.rerankContexts) {
+      await ctx.dispose();
+    }
+    this.rerankContexts = [];
   }
 
   // ==========================================================================
@@ -991,7 +1177,15 @@ export class LlamaCpp implements LLM {
     await this.ensureGenerateModel();
 
     // Create fresh context -> sequence -> session for each call
-    const context = await this.generateModel!.createContext();
+    let context: Awaited<ReturnType<LlamaModel["createContext"]>>;
+    try {
+      context = await this.generateModel!.createContext();
+    } catch (error) {
+      if (await this.tryActivateCpuFallback(error, "generation")) {
+        return await this.generate(prompt, options);
+      }
+      throw error;
+    }
     const sequence = context.getSequence();
     const session = new LlamaChatSession({ contextSequence: sequence });
 
@@ -1114,9 +1308,17 @@ export class LlamaCpp implements LLM {
     // on top of expandContextSize to prevent native llama.cpp from aborting on context
     // overflow when the combined system prompt + user query exceeds the window.
     const SYSTEM_PROMPT_TOKEN_OVERHEAD = 512;
-    const genContext = await this.generateModel!.createContext({
-      contextSize: this.expandContextSize + SYSTEM_PROMPT_TOKEN_OVERHEAD,
-    });
+    let genContext: Awaited<ReturnType<LlamaModel["createContext"]>>;
+    try {
+      genContext = await this.generateModel!.createContext({
+        contextSize: this.expandContextSize + SYSTEM_PROMPT_TOKEN_OVERHEAD,
+      });
+    } catch (error) {
+      if (await this.tryActivateCpuFallback(error, "query expansion")) {
+        return await this.expandQuery(query, options);
+      }
+      throw error;
+    }
     const sequence = genContext.getSequence();
     const session = new LlamaChatSession({ contextSequence: sequence, systemPrompt });
 
@@ -1189,7 +1391,9 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
+    const rerankInitStart = Date.now();
     const contexts = await this.ensureRerankContexts();
+    options.onRerankInit?.(Date.now() - rerankInitStart);
     const model = await this.ensureRerankModel();
 
     // Truncate documents that would exceed the rerank context size.
@@ -1576,6 +1780,7 @@ export function canUnloadLLM(): boolean {
 // =============================================================================
 
 let defaultLLM: LLM | null = null;
+const llmScopeStorage = new AsyncLocalStorage<string | undefined>();
 
 /**
  * Get the default LLM instance (creates one if needed)
@@ -1590,6 +1795,15 @@ export function getDefaultLLM(): LLM {
     }
   }
   return defaultLLM;
+}
+
+export async function withLLMScope<T>(scopeKey: string | undefined, fn: () => Promise<T>): Promise<T> {
+  return llmScopeStorage.run(scopeKey, fn);
+}
+
+export async function disposeSensitiveContexts(): Promise<void> {
+  if (!defaultLLM || typeof defaultLLM.disposeSensitiveContexts !== "function") return;
+  await defaultLLM.disposeSensitiveContexts();
 }
 
 /**

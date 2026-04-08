@@ -149,7 +149,18 @@ Dependabot updates for patch/minor versions might auto-merge when CI is green, t
 
 ---
 
-## 6. Reporting Issues & Security
+## 6. Release Verification Note
+
+KINDX publishes to npmjs. When validating a release, treat npmjs as the source of truth.
+
+- Run `npm view @ambicuity/kindx version dist-tags --json` from this repo.
+- If local output disagrees with release logs, check scoped registry config first:
+  - `npm config get @ambicuity:registry`
+  - It should resolve to `https://registry.npmjs.org/` in this repository context.
+
+---
+
+## 7. Reporting Issues & Security
 
 If you find a bug or have a feature idea, please use our [Issue Templates](https://github.com/ambicuity/KINDX/issues/new/choose).
 

@@ -31,11 +31,17 @@ export function openDatabase(path: string): Database {
 }
 
 /**
- * Common subset of the Database interface used throughout QMD.
+ * Common subset of the Database interface used throughout KINDX.
  */
 export interface Database {
   exec(sql: string): void;
   prepare(sql: string): Statement;
+  /**
+   * Wrap a callback in a SQLite transaction.
+   * Both better-sqlite3 and bun:sqlite expose this with compatible signatures.
+   * Returns a function that, when called, runs the callback inside BEGIN/COMMIT.
+   */
+  transaction<T extends (...args: any[]) => any>(fn: T): T;
   loadExtension(path: string): void;
   close(): void;
 }

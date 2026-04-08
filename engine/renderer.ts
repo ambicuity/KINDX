@@ -1,5 +1,5 @@
 /**
- * renderer.ts - Output formatting utilities for QMD
+ * renderer.ts - Output formatting utilities for KINDX
  *
  * Provides methods to format search results and documents into various output formats:
  * JSON, CSV, XML, Markdown, files list, and CLI (colored terminal output).

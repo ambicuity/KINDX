@@ -234,6 +234,17 @@ describe("CLI Help", () => {
     expect(stdout).toContain("Usage:");
     expect(stdout).toContain("kindx collection add");
     expect(stdout).toContain("kindx search");
+    expect(stdout).toContain("kindx arch <subcommand>");
+    expect(stdout).toContain("Arch commands:");
+    expect(stdout).toContain("kindx arch status [path]");
+    expect(stdout).toContain("kindx arch refresh [path]");
+    expect(stdout).toContain("Usage: kindx arch <status|build|import|refresh>");
+    expect(stdout).toContain("KINDX_ARCH_ENABLED=1");
+    expect(stdout).toContain("KINDX_ARCH_REPO_PATH");
+    expect(stdout).toContain("KINDX_ARCH_ARTIFACT_DIR");
+    expect(stdout).toContain("KINDX_ARCH_COLLECTION");
+    expect(stdout).toContain("--arch-hints");
+    expect(stdout).toContain("--arch-refresh");
     expect(stdout).toContain("--mask");
     expect(stdout).toContain("--from");
     expect(stdout).toContain("--line-numbers");
@@ -546,6 +557,16 @@ describe("CLI Cleanup Command", () => {
   test("cleans up orphaned entries", async () => {
     const { stdout, exitCode } = await runQmd(["cleanup"]);
     expect(exitCode).toBe(0);
+    expect(stdout).toContain("Database vacuumed");
+  });
+
+  test("verify-wipe emits structured status with --json", async () => {
+    const { stdout, exitCode } = await runQmd(["verify-wipe", "--json"]);
+    expect([0, 2]).toContain(exitCode);
+    const parsed = JSON.parse(stdout);
+    expect(parsed).toHaveProperty("status");
+    expect(parsed).toHaveProperty("residualFiles");
+    expect(Array.isArray(parsed.residualFiles)).toBe(true);
   });
 });
 
@@ -1428,6 +1449,74 @@ describe("mcp http daemon", () => {
     expect(ready).toBe(true);
     await sleep(500);
     try { unlinkSync(pidPath()); } catch { }
+  });
+});
+
+describe("CLI Memory Commands", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+
+  beforeEach(async () => {
+    const env = await createIsolatedTestEnv("memory-cli");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+  });
+
+  test("memory help renders usage", async () => {
+    const { stdout, exitCode } = await runQmd(["memory", "help"], { dbPath: localDbPath, configDir: localConfigDir });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Usage: kindx memory");
+    expect(stdout).toContain("put");
+    expect(stdout).toContain("search");
+  });
+
+  test("memory put validates required args", async () => {
+    const { stderr, exitCode } = await runQmd(
+      ["memory", "put", "--scope", "test", "--key", "profile:name"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Usage: kindx memory put");
+  });
+
+  test("memory commands emit stable JSON payloads", async () => {
+    const put = await runQmd(
+      ["memory", "put", "--scope", "cli-test", "--key", "profile:role", "--value", "engineer", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(put.exitCode).toBe(0);
+    const putJson = JSON.parse(put.stdout);
+    expect(putJson.scope).toBe("cli-test");
+    expect(putJson.memory).toBeDefined();
+    expect(typeof putJson.memory.id).toBe("number");
+
+    const search = await runQmd(
+      ["memory", "search", "--scope", "cli-test", "--text", "--json", "engineer"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(search.exitCode).toBe(0);
+    const searchJson = JSON.parse(search.stdout);
+    expect(searchJson.scope).toBe("cli-test");
+    expect(searchJson.mode).toBe("text");
+    expect(Array.isArray(searchJson.results)).toBe(true);
+
+    const history = await runQmd(
+      ["memory", "history", "--scope", "cli-test", "--key", "profile:role", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(history.exitCode).toBe(0);
+    const historyJson = JSON.parse(history.stdout);
+    expect(historyJson.scope).toBe("cli-test");
+    expect(Array.isArray(historyJson.history)).toBe(true);
+
+    const stats = await runQmd(
+      ["memory", "stats", "--scope", "cli-test", "--json"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(stats.exitCode).toBe(0);
+    const statsJson = JSON.parse(stats.stdout);
+    expect(statsJson.scope).toBe("cli-test");
+    expect(typeof statsJson.totalMemories).toBe("number");
   });
 });
 

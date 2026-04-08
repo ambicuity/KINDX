@@ -870,8 +870,32 @@ describe("MCP Server", () => {
 // HTTP Transport Tests
 // =============================================================================
 
-import { startMcpHttpServer, type HttpServerHandle } from "../engine/protocol.js";
+import { startMcpHttpServer, bindHttpServerWithFallback, type HttpServerHandle, buildInstructionsForTest } from "../engine/protocol.js";
 import { enableProductionMode } from "../engine/repository.js";
+import { EventEmitter } from "node:events";
+import { SessionRegistry } from "../engine/session.js";
+import { KindxSession } from "../engine/session.js";
+
+describe("MCP HTTP bind fallback", () => {
+  test("falls back to 127.0.0.1 when localhost bind fails with retryable code", async () => {
+    class FakeServer extends EventEmitter {
+      attempt = 0;
+      listen(_port: number, host: string) {
+        this.attempt += 1;
+        if (host === "localhost") {
+          this.emit("error", Object.assign(new Error("blocked"), { code: "EPERM" }));
+        } else {
+          this.emit("listening");
+        }
+        return this as any;
+      }
+    }
+
+    const server = new FakeServer() as unknown as import("http").Server;
+    const host = await bindHttpServerWithFallback(server, 8181);
+    expect(host).toBe("127.0.0.1");
+  });
+});
 
 describe("MCP HTTP Transport", () => {
   let handle: HttpServerHandle;
@@ -1012,6 +1036,11 @@ describe("MCP HTTP Transport", () => {
     expect(toolNames).toContain("query");
     expect(toolNames).toContain("get");
     expect(toolNames).toContain("status");
+    expect(toolNames).toContain("memory_put");
+    expect(toolNames).toContain("memory_search");
+    expect(toolNames).toContain("memory_history");
+    expect(toolNames).toContain("memory_stats");
+    expect(toolNames).toContain("memory_mark_accessed");
   });
 
   test("POST /mcp tools/call query returns results", async () => {
@@ -1030,6 +1059,26 @@ describe("MCP HTTP Transport", () => {
     // Should have content array with text results
     expect(json.result.content.length).toBeGreaterThan(0);
     expect(json.result.content[0].type).toBe("text");
+    expect(json.result.structuredContent).toBeDefined();
+    expect(json.result.structuredContent.timings).toBeDefined();
+    expect(typeof json.result.structuredContent.timings.total_ms).toBe("number");
+  });
+
+  test("POST /query includes timing metadata", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "readme" }],
+        limit: 5,
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.metadata).toBeDefined();
+    expect(body.metadata.timings).toBeDefined();
+    expect(typeof body.metadata.timings.total_ms).toBe("number");
   });
 
   test("POST /mcp tools/call get returns document", async () => {
@@ -1046,6 +1095,108 @@ describe("MCP HTTP Transport", () => {
     expect(status).toBe(200);
     expect(json.result).toBeDefined();
     expect(json.result.content.length).toBeGreaterThan(0);
+  });
+
+  test("same session supports repeated tool calls and keeps MCP contract stable", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0", id: 51, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "repeat-client", version: "1.0" } },
+    });
+    expect(sessionId).toBeTruthy();
+
+    const first = await mcpRequest({
+      jsonrpc: "2.0", id: 52, method: "tools/call",
+      params: { name: "query", arguments: { searches: [{ type: "lex", query: "meeting" }] } },
+    });
+    expect(first.status).toBe(200);
+    expect(first.json.result.structuredContent).toBeDefined();
+
+    const second = await mcpRequest({
+      jsonrpc: "2.0", id: 53, method: "tools/call",
+      params: { name: "query", arguments: { searches: [{ type: "lex", query: "meeting" }] } },
+    });
+    expect(second.status).toBe(200);
+    expect(second.json.result.structuredContent).toBeDefined();
+    expect(typeof second.json.result.structuredContent.timings.total_ms).toBe("number");
+  });
+
+  test("DELETE /mcp closes session and subsequent calls with stale session id fail", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0", id: 61, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "close-client", version: "1.0" } },
+    });
+    const closedSessionId = sessionId;
+    expect(closedSessionId).toBeTruthy();
+
+    const deleteRes = await fetch(`${baseUrl}/mcp`, {
+      method: "DELETE",
+      headers: {
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": closedSessionId || "",
+      },
+    });
+    expect(deleteRes.status).toBe(200);
+
+    const staleRes = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": closedSessionId || "",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 62,
+        method: "tools/list",
+        params: {},
+      }),
+    });
+    expect(staleRes.status).toBe(404);
+    const staleBody = await staleRes.json();
+    expect(staleBody.error.message).toContain("Session not found");
+  });
+
+  test("session registry remains bounded under create/close cycles", async () => {
+    const baseline = SessionRegistry.size;
+
+    for (let i = 0; i < 5; i++) {
+      let localSid: string | null = null;
+      const initRes = await fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 70 + i,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "bounded-client", version: "1.0" },
+          },
+        }),
+      });
+      localSid = initRes.headers.get("mcp-session-id");
+      expect(initRes.status).toBe(200);
+      expect(localSid).toBeTruthy();
+
+      const closeRes = await fetch(`${baseUrl}/mcp`, {
+        method: "DELETE",
+        headers: {
+          "Accept": "application/json, text/event-stream",
+          "mcp-session-id": localSid || "",
+        },
+      });
+      expect(closeRes.status).toBe(200);
+    }
+
+    // Registry may still contain entries from the shared test session,
+    // but it must stay bounded and not grow linearly with close cycles.
+    expect(SessionRegistry.size).toBeLessThanOrEqual(baseline + 2);
   });
 
   test("server uses dbPath instead of default index.sqlite", async () => {
@@ -1091,5 +1242,206 @@ describe("MCP HTTP Transport", () => {
       await testHandle.stop();
       if (originalIndexPath !== undefined) process.env.INDEX_PATH = originalIndexPath;
     }
+  });
+
+  test("memory tools work end-to-end in one scoped session", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 101,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+        rootUri: "file:///tmp/workspace-alpha",
+      },
+    });
+
+    const put = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 102,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: {
+          key: "profile:role",
+          value: "engineer",
+          tags: ["profile"],
+          source: "test",
+        },
+      },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json.result.structuredContent.scope).toBe("workspace-alpha");
+    const memoryId = Number(put.json.result.structuredContent.memory.id);
+    expect(memoryId).toBeGreaterThan(0);
+
+    const search = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 103,
+      method: "tools/call",
+      params: {
+        name: "memory_search",
+        arguments: {
+          query: "engineer",
+          mode: "text",
+        },
+      },
+    });
+    expect(search.status).toBe(200);
+    expect(search.json.result.structuredContent.results.length).toBeGreaterThan(0);
+
+    const history = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 104,
+      method: "tools/call",
+      params: {
+        name: "memory_history",
+        arguments: { key: "profile:role" },
+      },
+    });
+    expect(history.status).toBe(200);
+    expect(history.json.result.structuredContent.history.length).toBeGreaterThan(0);
+
+    const mark = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 105,
+      method: "tools/call",
+      params: {
+        name: "memory_mark_accessed",
+        arguments: { id: memoryId },
+      },
+    });
+    expect(mark.status).toBe(200);
+    expect(mark.json.result.structuredContent.marked).toBe(true);
+
+    const stats = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 106,
+      method: "tools/call",
+      params: {
+        name: "memory_stats",
+        arguments: {},
+      },
+    });
+    expect(stats.status).toBe(200);
+    expect(stats.json.result.structuredContent.scope).toBe("workspace-alpha");
+    expect(stats.json.result.structuredContent.totalMemories).toBeGreaterThan(0);
+  });
+
+  test("initialize instructions include bounded memory prefetch only when scope has entries", async () => {
+    sessionId = null;
+    const init = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 401,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "prefetch-client", version: "1.0" },
+        rootUri: "file:///tmp/workspace-prefetch",
+      },
+    });
+    expect(init.status).toBe(200);
+    const initialInstructions = String(init.json?.result?.instructions ?? "");
+    expect(initialInstructions.includes("Workspace memory (top accessed):")).toBe(false);
+
+    // Insert more than 3 entries; initialize should still show a bounded subset.
+    let resolvedScope = "workspace-prefetch";
+    for (let i = 0; i < 5; i++) {
+      const put = await mcpRequest({
+        jsonrpc: "2.0",
+        id: 410 + i,
+        method: "tools/call",
+        params: {
+          name: "memory_put",
+          arguments: {
+            key: `prefetch:key:${i}`,
+            value: `value-${i} ` + "x".repeat(300),
+          },
+        },
+      });
+      expect(put.status).toBe(200);
+      resolvedScope = String(put.json?.result?.structuredContent?.scope ?? resolvedScope);
+    }
+
+    // Validate the bounded memory block directly via test hook.
+    const store = createStore(httpTestDbPath);
+    const instructions = buildInstructionsForTest(
+      store,
+      new KindxSession({ workspaceScope: resolvedScope })
+    );
+    store.close();
+
+    expect(instructions.includes("Workspace memory (top accessed):")).toBe(true);
+
+    const memoryLines = instructions
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("- value-"));
+    expect(memoryLines.length).toBeGreaterThan(0);
+    expect(memoryLines.length).toBeLessThanOrEqual(3);
+    for (const line of memoryLines) {
+      expect(line.length).toBeLessThanOrEqual(130);
+    }
+  });
+
+  test("memory tools reject explicit cross-scope access", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 201,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+        rootUri: "file:///tmp/workspace-alpha",
+      },
+    });
+
+    const denied = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 202,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: {
+          scope: "workspace-beta",
+          key: "profile:city",
+          value: "Austin",
+        },
+      },
+    });
+
+    expect(denied.status).toBe(200);
+    expect(denied.json.result.isError).toBe(true);
+    expect(denied.json.result.content[0].text).toContain("cross_scope_forbidden");
+  });
+
+  test("memory tools fall back to default scope when no session scope exists", async () => {
+    sessionId = null;
+    await mcpRequest({
+      jsonrpc: "2.0",
+      id: 301,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    const put = await mcpRequest({
+      jsonrpc: "2.0",
+      id: 302,
+      method: "tools/call",
+      params: {
+        name: "memory_put",
+        arguments: { key: "profile:language", value: "TypeScript" },
+      },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json.result.structuredContent.scope).toBe("default");
   });
 });
