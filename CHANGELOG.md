@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Regenerated lockfile for cross-platform CI compatibility.
 - Ensured `kindx arch` command group is fully documented in `kindx --help` output with detailed subcommands, options, environment variables, and architecture diagrams.
 - Aligned `arch:status` and `arch:refresh` npm helper scripts for dev workflow consistency.
 
