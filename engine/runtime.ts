@@ -21,9 +21,12 @@ if (isBun) {
   _sqliteVecLoad = (db: any) => db.loadExtension(getLoadablePath());
 } else {
   const explicitDriver = String(process.env.KINDX_SQLITE_DRIVER ?? "").trim();
+  const encryptionRequested = Boolean(String(process.env.KINDX_ENCRYPTION_KEY ?? "").trim());
   const preferredDrivers = explicitDriver
     ? [explicitDriver]
-    : ["better-sqlite3-multiple-ciphers", "better-sqlite3"];
+    : encryptionRequested
+      ? ["better-sqlite3-multiple-ciphers", "better-sqlite3"]
+      : ["better-sqlite3", "better-sqlite3-multiple-ciphers"];
   let loaded = false;
   let lastError: unknown;
   for (const driver of preferredDrivers) {
