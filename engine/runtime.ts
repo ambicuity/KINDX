@@ -12,6 +12,34 @@ let _Database: any;
 let _sqliteVecLoad: (db: any) => void;
 let _sqliteDriverName = "unknown";
 
+const SQLITE_STDOUT_NOISE = "Not searching for unused variables given on the command line.";
+
+function withSuppressedSqliteStdoutNoise<T>(fn: () => T): T {
+  const stream = process.stdout as NodeJS.WriteStream & { write: (...args: any[]) => any };
+  const originalWrite = stream.write.bind(stream);
+  const filteredWrite = ((chunk: any, encoding?: any, cb?: any) => {
+    const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString(encoding || "utf8") : null;
+    if (text && text.includes(SQLITE_STDOUT_NOISE)) {
+      const cleaned = text
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== SQLITE_STDOUT_NOISE)
+        .join("\n");
+      if (!cleaned.trim()) {
+        if (typeof cb === "function") cb();
+        return true;
+      }
+      return originalWrite(cleaned, encoding, cb);
+    }
+    return originalWrite(chunk, encoding, cb);
+  }) as typeof stream.write;
+  stream.write = filteredWrite;
+  try {
+    return fn();
+  } finally {
+    stream.write = originalWrite;
+  }
+}
+
 if (isBun) {
   // Dynamic string prevents tsc from resolving bun:sqlite on Node.js builds
   const bunSqlite = "bun:" + "sqlite";
@@ -58,7 +86,7 @@ if (isBun) {
  * Open a SQLite database. Works with both bun:sqlite and better-sqlite3.
  */
 export function openDatabase(path: string): Database {
-  const db = new _Database(path) as Database;
+  const db = withSuppressedSqliteStdoutNoise(() => new _Database(path) as Database);
   db.exec("PRAGMA busy_timeout = 15000;");
   const key = process.env.KINDX_ENCRYPTION_KEY?.trim();
   if (key) {
