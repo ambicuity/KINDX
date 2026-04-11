@@ -70,6 +70,7 @@
     "zod": "^4.2.1"
   },
   "optionalDependencies": {
+    "better-sqlite3-multiple-ciphers": "^12.8.0",
     "sqlite-vec-darwin-arm64": "0.1.9",
     "sqlite-vec-darwin-x64": "0.1.9",
     "sqlite-vec-linux-arm64": "0.1.9",

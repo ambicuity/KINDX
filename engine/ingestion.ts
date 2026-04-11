@@ -47,12 +47,15 @@ function safeCommand(command: string, args: string[], timeoutMs = 8_000): { ok: 
 }
 
 function decodeXmlEntities(input: string): string {
-  return input
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
+  const entities: Record<string, string> = {
+    "&lt;": "<",
+    "&gt;": ">",
+    "&amp;": "&",
+    "&quot;": '"',
+    "&#39;": "'",
+  };
+  // Decode only one entity token at a time to avoid chained replacement edge cases.
+  return input.replace(/&(lt|gt|amp|quot|#39);/g, (entity) => entities[entity] ?? entity);
 }
 
 function stripXml(xml: string): string {
