@@ -5,6 +5,8 @@ import { execSync, spawn as nodeSpawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join as pathJoin } from "path";
 import { parseArgs } from "util";
+import { createHash } from "node:crypto";
+import readline from "node:readline";
 import { readFileSync, realpathSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync } from "fs";
 import {
   getPwd,
@@ -44,6 +46,7 @@ import {
   resolveVirtualPath,
   toVirtualPath,
   insertContent,
+  upsertDocumentIngestion,
   insertDocument,
   findActiveDocument,
   updateDocumentTitle,
@@ -62,7 +65,7 @@ import {
   handelize,
   hybridQuery,
   vectorSearchQuery,
-  structuredSearch,
+  structuredSearchWithDiagnostics,
   addLineNumbers,
   findDocument,
   type ExpandedQuery,
@@ -75,6 +78,7 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./repository.js";
+import { ingestFile } from "./ingestion.js";
 import { disposeDefaultLLM, getDefaultLLM, withLLMScope, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
 import {
   formatSearchResults,
@@ -104,6 +108,32 @@ import {
   resolveMemoryScope as resolveMemoryScopeShared,
   deriveWorkspaceMemoryScope,
 } from "./memory.js";
+import { createBackup, restoreBackup, verifyBackup } from "./backup.js";
+import {
+  buildOperationalStatus,
+  checkDatabaseIntegrity,
+  checkModelReadiness,
+  checkSqliteVecCapability,
+  checkTrustedUpdateCommands,
+  checkWalHealth,
+  getDefaultBackupName,
+} from "./diagnostics.js";
+import { configureLogger } from "./utils/logger.js";
+import { executeEmbedCommand } from "./commands/embed-command.js";
+import { executeQueryCommand } from "./commands/query-command.js";
+import { runSchedulerStatusCommand } from "./commands/scheduler-status-command.js";
+import { runStatusCommand } from "./commands/status-command.js";
+import { runDoctorCommand, runRepairCheckCommand } from "./commands/doctor-command.js";
+import { runBackupCommand as runBackupCmd } from "./commands/backup-command.js";
+import { runInitCommand } from "./commands/init-command.js";
+import { runTenantCommand } from "./commands/tenant-command.js";
+import {
+  getSchedulerCheckpointState,
+  getSchedulerQueueState,
+  getShardHealthSummary,
+  getShardRuntimeStatus,
+  syncCollectionShardsFromMainDb,
+} from "./sharding.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -162,52 +192,19 @@ function ensureVecTable(_db: Database, dimensions: number): void {
   getStore().ensureVecTable(dimensions);
 }
 
-// Terminal colors (respects NO_COLOR env)
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
-const c = {
-  reset: useColor ? "\x1b[0m" : "",
-  dim: useColor ? "\x1b[2m" : "",
-  bold: useColor ? "\x1b[1m" : "",
-  cyan: useColor ? "\x1b[36m" : "",
-  yellow: useColor ? "\x1b[33m" : "",
-  green: useColor ? "\x1b[32m" : "",
-  magenta: useColor ? "\x1b[35m" : "",
-  blue: useColor ? "\x1b[34m" : "",
-};
+import {
+  c,
+  cursor,
+  progress,
+  formatETA,
+  formatTimeAgo,
+  formatMs,
+  formatBytes,
+  renderProgressBar,
+} from "./utils/ui.js";
 
-// Terminal cursor control
-const cursor = {
-  hide() { process.stderr.write('\x1b[?25l'); },
-  show() { process.stderr.write('\x1b[?25h'); },
-};
-
-// Ensure cursor is restored on exit
-process.on('SIGINT', () => { cursor.show(); process.exit(130); });
-process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
-
-// Terminal progress bar using OSC 9;4 escape sequence (TTY only)
 const isTTY = process.stderr.isTTY;
-const progress = {
-  set(percent: number) {
-    if (isTTY) process.stderr.write(`\x1b]9;4;1;${Math.round(percent)}\x07`);
-  },
-  clear() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;0\x07`);
-  },
-  indeterminate() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;3\x07`);
-  },
-  error() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;2\x07`);
-  },
-};
-
-// Format seconds into human-readable ETA
-function formatETA(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
+const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
 
 
 // Check index health and print warnings/tips
@@ -267,28 +264,7 @@ function computeDisplayPath(
 }
 
 
-function formatTimeAgo(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
-function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
 
 async function showStatus(): Promise<void> {
   const dbPath = getDbPath();
@@ -310,6 +286,7 @@ async function showStatus(): Promise<void> {
   const totalDocs = db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number };
   const vectorCount = db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number };
   const needsEmbedding = getHashesNeedingEmbedding(db);
+  const status = getStatus(db);
 
   // Most recent update across all collections
   const mostRecent = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
@@ -356,12 +333,37 @@ async function showStatus(): Promise<void> {
   console.log(`${c.bold}Documents${c.reset}`);
   console.log(`  Total:    ${totalDocs.count} files indexed`);
   console.log(`  Vectors:  ${vectorCount.count} embedded`);
+  const opsStatus = buildOperationalStatus(db, dbPath, vectorCount.count > 0);
+  console.log(`  Capability: vector=${opsStatus.vector_available ? "available" : "unavailable"}, models=${opsStatus.models_ready ? "ready" : "missing"}, db=${opsStatus.db_integrity}`);
+  const capabilitySummary = Object.entries(status.capabilities || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+  if (capabilitySummary) {
+    console.log(`  Index Caps: ${capabilitySummary}`);
+  }
+  console.log(`  Encryption: ${status.encryption.encrypted ? "encrypted" : "plaintext"} (key=${status.encryption.keyConfigured ? "set" : "unset"})`);
+  console.log(`  ANN:        ${status.ann.mode} (${status.ann.state}) probes=${status.ann.probeCount} shortlist=${status.ann.shortlistLimit}`);
+  if ((status.ingestion?.warnedDocuments ?? 0) > 0) {
+    console.log(`  Ingestion: ${c.yellow}${status.ingestion.warnedDocuments} file(s) with extractor warnings${c.reset}`);
+    const topWarnings = status.ingestion.byWarning.slice(0, 5).map((w) => `${w.warning}:${w.count}`).join(", ");
+    if (topWarnings) {
+      console.log(`  Warning types: ${topWarnings}`);
+    }
+  }
   if (needsEmbedding > 0) {
     console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'kindx embed')`);
   }
   if (mostRecent.latest) {
     const lastUpdate = new Date(mostRecent.latest);
     console.log(`  Updated:  ${formatTimeAgo(lastUpdate)}`);
+  }
+
+  if (Array.isArray((collections as any)) && (status.shards?.enabledCollections.length ?? 0) > 0) {
+    const shardStatus = status.shards!;
+    const shardHealth = getShardHealthSummary(db, dbPath, 16);
+    console.log(`  Shards:   ${shardStatus.enabledCollections.map((c) => `${c.collection}:${c.shardCount}`).join(", ")}`);
+    console.log(`  Queue:    ${shardStatus.checkpointExists ? "checkpoint present" : "no checkpoint"}`);
+    console.log(`  Health:   ${shardHealth.status}`);
   }
 
   // Get all contexts grouped by collection (from YAML)
@@ -503,10 +505,169 @@ async function showStatus(): Promise<void> {
     }
   }
 
+  if (opsStatus.warnings.length > 0) {
+    console.log(`\n${c.bold}Warnings${c.reset}`);
+    for (const warning of opsStatus.warnings) {
+      console.log(`  ${c.yellow}!${c.reset} ${warning}`);
+    }
+  }
+
   closeDb();
 }
 
-async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
+function runDoctor(output: OutputFormat, paritySampleSize: number = 16): number {
+  const db = getDb();
+  const dbPath = getDbPath();
+
+  const vec = checkSqliteVecCapability(db);
+  const models = checkModelReadiness();
+  const integrity = checkDatabaseIntegrity(db);
+  const wal = checkWalHealth(db);
+  const trust = checkTrustedUpdateCommands(dbPath);
+  const shardHealth = getShardHealthSummary(db, dbPath, Math.max(1, paritySampleSize));
+  const status = getStatus(db);
+
+  const checks = [
+    { id: "sqlite_vec", ok: vec.available, detail: vec.detail },
+    { id: "models", ok: models.ready, detail: models.ready ? "all default models present in cache" : `missing: ${models.missing.join(", ")}` },
+    { id: "db_integrity", ok: integrity.ok, detail: integrity.result },
+    { id: "wal_mode", ok: wal.walHealthy, detail: wal.journalMode },
+    {
+      id: "trusted_update_cmds",
+      ok: trust.untrustedCollections.length === 0,
+      detail: trust.untrustedCollections.length > 0
+        ? `untrusted collections: ${trust.untrustedCollections.join(", ")}`
+        : `${trust.trustedCommands}/${trust.configuredCommands} trusted`,
+    },
+    {
+      id: "shard_health",
+      ok: shardHealth.status !== "error",
+      detail: `status=${shardHealth.status} warnings=${shardHealth.warnings.length} parity_sample=${Math.max(1, paritySampleSize)} families=${Object.entries(shardHealth.families).map(([k, v]) => `${k}:${v.count}/${v.severity}`).join(",")}`,
+    },
+    {
+      id: "index_capabilities",
+      ok: Boolean(status.capabilities?.ann) && Boolean(status.capabilities?.extractors),
+      detail: Object.entries(status.capabilities || {}).map(([k, v]) => `${k}=${v}`).join(", "),
+    },
+    {
+      id: "ann_health",
+      ok: status.ann.state === "ready",
+      detail: `mode=${status.ann.mode} state=${status.ann.state} probes=${status.ann.probeCount} shortlist=${status.ann.shortlistLimit}`,
+    },
+    {
+      id: "encryption_state",
+      ok: !status.encryption.keyConfigured || status.encryption.encrypted,
+      detail: `encrypted=${status.encryption.encrypted} keyConfigured=${status.encryption.keyConfigured}`,
+    },
+    {
+      id: "ingestion_health",
+      ok: (status.ingestion?.warnedDocuments ?? 0) === 0,
+      detail: `${status.ingestion?.warnedDocuments ?? 0} documents with extractor warnings; types=${status.ingestion?.byWarning?.length ?? 0}`,
+    },
+    {
+      id: "metrics_surface",
+      ok: true,
+      detail: "HTTP daemon exposes /metrics in Prometheus format",
+    },
+  ];
+  const failed = checks.filter((check) => !check.ok);
+
+  if (output === "json") {
+    console.log(JSON.stringify({
+      status: failed.length === 0 ? "ok" : "failed",
+      checks,
+    }, null, 2));
+  } else {
+    console.log(`${c.bold}KINDX Doctor${c.reset}`);
+    for (const check of checks) {
+      const icon = check.ok ? `${c.green}✓${c.reset}` : `${c.yellow}!${c.reset}`;
+      console.log(`  ${icon} ${check.id}: ${check.detail}`);
+    }
+    if (failed.length === 0) {
+      console.log(`\n${c.green}All health checks passed.${c.reset}`);
+    } else {
+      console.log(`\n${c.yellow}${failed.length} check(s) need attention.${c.reset}`);
+    }
+  }
+
+  closeDb();
+  return failed.length === 0 ? 0 : 2;
+}
+
+function runRepairCheckOnly(output: OutputFormat): number {
+  const code = runDoctor(output);
+  if (output !== "json") {
+    if (code === 0) {
+      console.log(`${c.green}Repair check: no action required.${c.reset}`);
+    } else {
+      console.log(`${c.yellow}Repair check: run 'kindx cleanup' or 'kindx embed' depending on failed checks.${c.reset}`);
+    }
+  }
+  return code;
+}
+
+function runBackupCommand(args: string[], values: Record<string, unknown>, output: OutputFormat): number {
+  const sub = args[0];
+  const dbPath = getDbPath();
+
+  if (sub === "create") {
+    const requested = typeof values.path === "string" ? values.path : args[1];
+    const backupPath = requested || resolve(dirname(dbPath), getDefaultBackupName(dbPath));
+    const result = createBackup(dbPath, backupPath);
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`${c.green}✓${c.reset} Backup created: ${result.backupPath}`);
+      console.log(`  Size: ${formatBytes(result.bytes)}`);
+      console.log(`  WAL checkpoint: ${result.checkpointed ? "yes" : "no"}`);
+      console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}`);
+    }
+    return 0;
+  }
+
+  if (sub === "verify") {
+    const pathArg = typeof values.path === "string" ? values.path : args[1];
+    if (!pathArg) {
+      console.error("Usage: kindx backup verify <backup-file>");
+      return 1;
+    }
+    const result = verifyBackup(pathArg);
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.integrity === "ok") {
+      console.log(`${c.green}✓${c.reset} Backup verified: ${result.backupPath}`);
+      console.log(`  Size: ${formatBytes(result.bytes)}`);
+      console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}${result.keyRequired ? " (key required)" : ""}`);
+    } else {
+      console.error(`${c.yellow}!${c.reset} Backup verify failed: ${result.detail}`);
+    }
+    return result.integrity === "ok" ? 0 : 2;
+  }
+
+  if (sub === "restore") {
+    const pathArg = typeof values.path === "string" ? values.path : args[1];
+    if (!pathArg) {
+      console.error("Usage: kindx backup restore <backup-file> [--force]");
+      return 1;
+    }
+    const force = values.force === true || values.force === "true";
+    const result = restoreBackup(pathArg, dbPath, Boolean(force));
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`${c.green}✓${c.reset} Restored backup to ${result.restoredTo}`);
+    }
+    return 0;
+  }
+
+  console.error("Usage: kindx backup <create|verify|restore> [path] [--force]");
+  return 1;
+}
+
+async function updateCollections(
+  collectionFilter?: string | string[],
+  options: { pull?: boolean } = {}
+): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
 
@@ -543,10 +704,99 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
     if (!col) continue;
     console.log(`${c.cyan}[${i + 1}/${collections.length}]${c.reset} ${c.bold}${col.name}${c.reset} ${c.dim}(${col.glob_pattern})${c.reset}`);
 
+    if (options.pull) {
+      const pullResult = await new Promise<{ isGitRepo: boolean; output: string; error: string; code: number }>((resolve) => {
+        const proc = nodeSpawn("git", ["pull", "--ff-only"], {
+          cwd: col.pwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let out = "";
+        let err = "";
+        proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+        proc.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+        proc.on("close", (code) => {
+          const notRepo = /not a git repository|fatal: no upstream configured/i.test(err);
+          resolve({
+            isGitRepo: !notRepo,
+            output: out,
+            error: err,
+            code: code ?? 1,
+          });
+        });
+        proc.on("error", () => resolve({ isGitRepo: false, output: "", error: "", code: 1 }));
+      });
+
+      if (pullResult.isGitRepo) {
+        console.log(`${c.dim}    --pull: git pull --ff-only${c.reset}`);
+        if (pullResult.output.trim()) process.stdout.write(pullResult.output);
+        if (pullResult.error.trim()) process.stderr.write(pullResult.error);
+        if (pullResult.code !== 0) {
+          console.error(`${c.yellow}    ! --pull failed (exit ${pullResult.code}); continuing with local files.${c.reset}`);
+        }
+      } else {
+        console.log(`${c.dim}    --pull skipped (not a git repository).${c.reset}`);
+      }
+    }
+
     // Execute custom update command if specified in YAML
     const yamlCol = getCollectionFromYaml(col.name);
     if (yamlCol?.update) {
-      console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
+      console.log(`${c.dim}    Update command found: ${yamlCol.update}${c.reset}`);
+      
+      // P0-3: Trust gate for arbitrary shell execution
+      const isAutoTrusted = process.env.KINDX_TRUST_UPDATE_CMDS === "1" || process.env.KINDX_TRUST_UPDATE_CMDS === "true";
+      const trustFile = pathJoin(dirname(getDbPath()), "trusted-commands.json");
+      const cmdHash = createHash("sha256").update(`${col.name}|${col.pwd}|${yamlCol.update}`).digest("hex");
+      
+      let isTrusted = isAutoTrusted;
+      let trustedHashes: string[] = [];
+      
+      if (!isTrusted) {
+        try {
+          if (existsSync(trustFile)) {
+            trustedHashes = JSON.parse(readFileSync(trustFile, "utf-8"));
+            isTrusted = trustedHashes.includes(cmdHash);
+          }
+        } catch {
+          // File missing or malformed, will prompt
+        }
+      }
+
+      if (!isTrusted) {
+        if (!process.stdin.isTTY) {
+          console.error(`${c.yellow}✗ Cannot prompt in non-TTY environment. Set KINDX_TRUST_UPDATE_CMDS=1 to allow this command.${c.reset}`);
+          process.exit(1);
+        }
+
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
+        });
+
+        console.log(`\n${c.yellow}⚠️  Security Warning: Collection '${col.name}' has configured a shell command to run before indexing:${c.reset}`);
+        console.log(`\n  $ ${yamlCol.update}\n`);
+        console.log(`  Directory: ${col.pwd}`);
+
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(`Allow executing this command? [y/N]: `, resolve);
+        });
+        rl.close();
+
+        if (answer.trim().toLowerCase() !== "y") {
+          console.log(`${c.yellow}✗ Command execution cancelled.${c.reset}`);
+          process.exit(1);
+        }
+
+        trustedHashes.push(cmdHash);
+        try {
+          writeFileSync(trustFile, JSON.stringify(trustedHashes), "utf-8");
+          console.log(`${c.green}✓ Command trusted for future runs.${c.reset}`);
+        } catch (err) {
+          console.error(`Failed to save trust marker: ${err}`);
+        }
+      }
+
+      console.log(`${c.dim}    Executing...${c.reset}`);
       try {
         const proc = nodeSpawn("bash", ["-c", yamlCol.update], {
           cwd: col.pwd,
@@ -1567,8 +1817,15 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     seenPaths.add(path);
 
     let content: string;
+    let ingestWarnings: string[] = [];
+    let ingestFormat = "unknown";
+    let ingestExtractor = "unknown";
     try {
-      content = readFileSync(filepath, "utf-8");
+      const ingested = ingestFile(filepath);
+      content = ingested.text;
+      ingestWarnings = ingested.warnings;
+      ingestFormat = ingested.metadata.format;
+      ingestExtractor = ingested.metadata.extractor;
     } catch (err: any) {
       // Skip files that can't be read (e.g. iCloud evicted files returning EAGAIN)
       processed++;
@@ -1605,6 +1862,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
           stat ? new Date(stat.mtime).toISOString() : now);
         updated++;
       }
+      upsertDocumentIngestion(db, collectionName, path, {
+        format: ingestFormat,
+        extractor: ingestExtractor,
+        warnings: ingestWarnings,
+        contentHash: hash,
+        extractedAt: now,
+      });
     } else {
       // New document - insert content and document
       indexed++;
@@ -1613,6 +1877,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
       insertDocument(db, collectionName, path, title, hash,
         stat ? new Date(stat.birthtime).toISOString() : now,
         stat ? new Date(stat.mtime).toISOString() : now);
+      upsertDocumentIngestion(db, collectionName, path, {
+        format: ingestFormat,
+        extractor: ingestExtractor,
+        warnings: ingestWarnings,
+        contentHash: hash,
+        extractedAt: now,
+      });
     }
 
     processed++;
@@ -1653,14 +1924,9 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   closeDb();
 }
 
-function renderProgressBar(percent: number, width: number = 30): string {
-  const filled = Math.round((percent / 100) * width);
-  const empty = width - filled;
-  const bar = "█".repeat(filled) + "░".repeat(empty);
-  return bar;
-}
 
-async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
+
+async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false, resume: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
 
@@ -1844,6 +2110,27 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     }
   }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
 
+  // Phase 2: optional per-collection shard sync with resumable checkpointing.
+  const shardStatus = getShardRuntimeStatus(getDbPath());
+  if (shardStatus.enabledCollections.length > 0) {
+    console.log(`\n${c.bold}Shard Sync${c.reset}`);
+    const shardResult = await syncCollectionShardsFromMainDb(db, getDbPath(), {
+      resume,
+      onProgress: ({ collection, processed, total }) => {
+        if (processed % 250 === 0 || processed === total) {
+          process.stderr.write(`\r${c.dim}Syncing shards ${collection}: ${processed}/${total}${c.reset}   `);
+        }
+      },
+    });
+    process.stderr.write(`\n`);
+    for (const item of shardResult.collections) {
+      console.log(`  ${c.green}✓${c.reset} ${item.collection}: ${item.processed}/${item.total} vectors synced across ${item.shardCount} shards`);
+    }
+    if (shardResult.collections.length > 0) {
+      console.log(`  Checkpoint: ${shardResult.checkpointPath}`);
+    }
+  }
+
   closeDb();
 }
 
@@ -1901,6 +2188,12 @@ type OutputOptions = {
   explain?: boolean;     // Include retrieval score traces (query only)
   context?: string;      // Optional context for query expansion
   candidateLimit?: number;  // Max candidates to rerank (default: 40)
+  maxRerankCandidates?: number; // Hard rerank candidate ceiling
+  rerankTimeoutMs?: number; // Rerank timeout budget
+  rerankQueueLimit?: number; // Queue cap for rerank path
+  rerankConcurrency?: number; // Parallel rerank workers
+  rerankDropPolicy?: "timeout_fallback" | "wait"; // Queue backpressure policy
+  vectorFanoutWorkers?: number; // Vector fanout worker cap
   archHints?: boolean;  // Enable Arch hint augmentation
   archRefresh?: boolean; // Run Arch refresh during update
 };
@@ -2362,6 +2655,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
     scopeKey,
     () => withLLMSession(async () => {
     let results;
+    let structuredDiagnostics: { degradedMode?: boolean; fallbackReasons?: string[]; scaleWarnings?: string[] } | undefined;
 
     if (structuredQueries) {
       // Structured search — user provided their own query expansions
@@ -2376,11 +2670,13 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       }
       process.stderr.write(`${c.dim}└─ Searching...${c.reset}\n`);
 
-      results = await structuredSearch(store, structuredQueries, {
+      const withDiagnostics = await structuredSearchWithDiagnostics(store, structuredQueries, {
         collections: singleCollection ? [singleCollection] : undefined,
         limit: opts.all ? 500 : (opts.limit || 10),
         minScore: opts.minScore || 0,
         candidateLimit: opts.candidateLimit,
+        maxRerankCandidates: opts.maxRerankCandidates,
+        rerankTimeoutMs: opts.rerankTimeoutMs,
         explain: !!opts.explain,
         hooks: {
           onEmbedStart: (count) => {
@@ -2407,6 +2703,8 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
           },
         },
       });
+      results = withDiagnostics.results;
+      structuredDiagnostics = withDiagnostics.diagnostics;
     } else {
       // Standard hybrid query with automatic expansion
       results = await hybridQuery(store, query, {
@@ -2414,6 +2712,8 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         limit: opts.all ? 500 : (opts.limit || 10),
         minScore: opts.minScore || 0,
         candidateLimit: opts.candidateLimit,
+        maxRerankCandidates: opts.maxRerankCandidates,
+        rerankTimeoutMs: opts.rerankTimeoutMs,
         explain: !!opts.explain,
         hooks: {
           onStrongSignal: (score) => {
@@ -2518,6 +2818,15 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       graphHints,
     })), displayQuery, { ...opts, limit: results.length });
 
+    if (structuredDiagnostics?.degradedMode) {
+      const reasons = (structuredDiagnostics.fallbackReasons || []).join(", ") || "unknown";
+      process.stderr.write(`${c.yellow}KINDX degraded mode:${c.reset} ${reasons}\n`);
+      const warnings = structuredDiagnostics.scaleWarnings || [];
+      if (warnings.length > 0 && opts.explain) {
+        process.stderr.write(`${c.dim}scale warnings: ${warnings.join(", ")}${c.reset}\n`);
+      }
+    }
+
     timings.total_ms = Date.now() - totalStart;
     if (opts.explain) {
       process.stderr.write(
@@ -2535,6 +2844,9 @@ function parseCLI() {
     options: {
       // Global options
       index: {
+        type: "string",
+      },
+      workspace: {
         type: "string",
       },
       context: {
@@ -2557,6 +2869,7 @@ function parseCLI() {
       collection: { type: "string", short: "c", multiple: true },  // Filter by collection(s)
       // Collection options
       name: { type: "string" },  // collection name
+      role: { type: "string" },  // tenant role
       mask: { type: "string" },  // glob pattern
       // Embed options
       force: { type: "boolean", short: "f" },
@@ -2570,6 +2883,12 @@ function parseCLI() {
       "line-numbers": { type: "boolean" },  // add line numbers to output
       // Query options
       "candidate-limit": { type: "string", short: "C" },
+      "max-rerank-candidates": { type: "string" },
+      "rerank-timeout-ms": { type: "string" },
+      "rerank-queue-limit": { type: "string" },
+      "rerank-concurrency": { type: "string" },
+      "rerank-drop-policy": { type: "string" },
+      "vector-fanout-workers": { type: "string" },
       "arch-hints": { type: "boolean" },
       "arch-root": { type: "string" },
       "arch-refresh": { type: "boolean" },
@@ -2587,17 +2906,32 @@ function parseCLI() {
       http: { type: "boolean" },
       daemon: { type: "boolean" },
       port: { type: "string" },
+      "log-format": { type: "string" },
+      "log-level": { type: "string" },
+      "check-only": { type: "boolean" },
+      cache: { type: "boolean" },
+      "parity-sample": { type: "string" },
+      path: { type: "string" },
+      resume: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
   });
 
   // Select index name (default: "index")
-  const indexName = values.index as string | undefined;
+  const indexName = (values.workspace || values.index) as string | undefined;
   if (indexName) {
     setIndexName(indexName);
     setConfigIndexName(indexName);
   }
+
+  // Configure daemon/logger output early so protocol and MCP logs are consistent.
+  const logLevel = values["log-level"] ? String(values["log-level"]).toUpperCase() : undefined;
+  const logFormat = values["log-format"] ? String(values["log-format"]).toLowerCase() : undefined;
+  if (logLevel) process.env.KINDX_LOG_LEVEL = logLevel;
+  if (logFormat === "json") process.env.KINDX_LOG_JSON = "1";
+  if (logFormat === "text") process.env.KINDX_LOG_JSON = "0";
+  configureLogger({ level: logLevel, format: logFormat });
 
   // Determine output format
   let format: OutputFormat = "cli";
@@ -2621,6 +2955,12 @@ function parseCLI() {
     collection: values.collection as string[] | undefined,
     lineNumbers: !!values["line-numbers"],
     candidateLimit: values["candidate-limit"] ? parseInt(String(values["candidate-limit"]), 10) : undefined,
+    maxRerankCandidates: values["max-rerank-candidates"] ? parseInt(String(values["max-rerank-candidates"]), 10) : undefined,
+    rerankTimeoutMs: values["rerank-timeout-ms"] ? parseInt(String(values["rerank-timeout-ms"]), 10) : undefined,
+    rerankQueueLimit: values["rerank-queue-limit"] ? parseInt(String(values["rerank-queue-limit"]), 10) : undefined,
+    rerankConcurrency: values["rerank-concurrency"] ? parseInt(String(values["rerank-concurrency"]), 10) : undefined,
+    rerankDropPolicy: values["rerank-drop-policy"] === "wait" ? "wait" : values["rerank-drop-policy"] === "timeout_fallback" ? "timeout_fallback" : undefined,
+    vectorFanoutWorkers: values["vector-fanout-workers"] ? parseInt(String(values["vector-fanout-workers"]), 10) : undefined,
     explain: !!values.explain,
     archHints: values["arch-hints"] === undefined ? undefined : Boolean(values["arch-hints"]),
     archRefresh: values["arch-refresh"] === undefined ? undefined : Boolean(values["arch-refresh"]),
@@ -2716,7 +3056,12 @@ function showHelp(): void {
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
   console.log("                             --arch-refresh to rebuild/import Arch artifacts after update");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
+  console.log("                             --resume to continue shard sync from checkpoint");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
+  console.log("  kindx doctor                    - Run deterministic health diagnostics");
+  console.log("  kindx repair --check-only       - Dry-run integrity and repair checks");
+  console.log("  kindx backup <create|verify|restore> [path] - Manage SQLite backups");
+  console.log("  kindx scheduler status          - Show shard sync checkpoint and queue status");
   console.log("  kindx verify-wipe               - Scan for residual local index artifacts");
   console.log("  kindx memory embed [--scope S] [--force] - Backfill/regenerate memory embeddings");
   console.log("");
@@ -2761,6 +3106,8 @@ function showHelp(): void {
   console.log("Global options:");
   console.log("  --help | --version | --skill   - Show help, version, or the packaged skill file");
   console.log("  --index <name>             - Use a named index (default: index)");
+  console.log("  --log-format <text|json>   - Logging format for daemon/MCP logs");
+  console.log("  --log-level <DEBUG|INFO|WARN|ERROR> - Logging verbosity");
   console.log("");
   console.log("Search options:");
   console.log("  -n <num>                   - Max results (default 5, or 20 for --files/--json)");
@@ -2768,6 +3115,14 @@ function showHelp(): void {
   console.log("  --min-score <num>          - Minimum similarity score");
   console.log("  --full                     - Output full document instead of snippet");
   console.log("  -C, --candidate-limit <n>  - Max candidates to rerank (default 40, lower = faster)");
+  console.log("  --max-rerank-candidates <n> - Hard ceiling for rerank candidates");
+  console.log("  --rerank-timeout-ms <ms>   - Timeout budget for reranker before fallback");
+  console.log("  --rerank-queue-limit <n>   - Cap queued rerank requests before fallback");
+  console.log("  --rerank-concurrency <n>   - Parallel rerank workers (default 1)");
+  console.log("  --rerank-drop-policy <timeout_fallback|wait> - Queue backpressure behavior");
+  console.log("  --vector-fanout-workers <n> - Cap parallel vector fanout workers");
+  console.log("  --parity-sample <n>        - Doctor shard parity sample size (default 16)");
+  console.log("  --resume                   - Resume shard sync checkpoint during embed");
   console.log("  --line-numbers             - Include line numbers in output");
   console.log("  --explain                  - Include retrieval score traces (query --json/CLI)");
   console.log("  --arch-hints               - Add optional Arch architecture hints (requires Arch integration)");
@@ -2931,6 +3286,14 @@ function showHelp(): void {
   console.log("    KINDX_QUERY_TIMEOUT_MS      Query timeout guard (0 = disabled)");
   console.log("    KINDX_INFLIGHT_DEDUPE       In-flight query dedup: join|off (default: join)");
   console.log("    KINDX_QUERY_REPLAY_DIR      Write query replay artifacts to this directory");
+  console.log("    KINDX_ENCRYPTION_KEY        Enable SQLCipher keyed runtime and auto-migration");
+  console.log("    KINDX_SQLITE_DRIVER         Force sqlite driver module (default probes sqlcipher-capable first)");
+  console.log("    KINDX_ANN_ENABLE            Enable ANN routing for sharded collections (default: 1)");
+  console.log("    KINDX_ANN_PROBE_COUNT       ANN centroid probes per shard (default: 4)");
+  console.log("    KINDX_ANN_SHORTLIST         ANN shortlist size per shard (default: dynamic)");
+  console.log("    KINDX_EXTRACTOR_PDF         Enable PDF extractor (default: 1)");
+  console.log("    KINDX_EXTRACTOR_DOCX        Enable DOCX extractor (default: 1)");
+  console.log("    KINDX_EXTRACTOR_FALLBACK_POLICY fallback|strict for extractor fallback behavior");
   console.log("");
   console.log(`Index: ${getDbPath()}`);
 }
@@ -3505,8 +3868,55 @@ if (isMain) {
     }
 
     case "status":
-      await showStatus();
+      await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir });
       break;
+
+    case "scheduler": {
+      const code = runSchedulerStatusCommand({
+        subcommand: cli.args[0],
+        format: cli.opts.format,
+        color: c,
+        loadState: () => {
+          const dbPath = getDbPath();
+          const db = getDb();
+          const checkpoint = getSchedulerCheckpointState(dbPath);
+          return {
+            shard: getShardRuntimeStatus(dbPath),
+            checkpoint,
+            queueState: getSchedulerQueueState(db, dbPath),
+          };
+        },
+      });
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
+    case "doctor": {
+      const paritySample = cli.values["parity-sample"] ? parseInt(String(cli.values["parity-sample"]), 10) : 16;
+      const code = runDoctorCommand(
+        { getDb, getDbPath, closeDb },
+        cli.opts.format,
+        Number.isFinite(paritySample) && paritySample > 0 ? paritySample : 16,
+      );
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
+    case "repair": {
+      if (cli.values["check-only"] === true || cli.values["check-only"] === "true") {
+        const code = runRepairCheckCommand({ getDb, getDbPath, closeDb }, cli.opts.format);
+        if (code !== 0) process.exit(code);
+        break;
+      }
+      console.error("Usage: kindx repair --check-only");
+      process.exit(1);
+    }
+
+    case "backup": {
+      const code = runBackupCmd(cli.args, cli.values as Record<string, unknown>, cli.opts.format, getDbPath());
+      if (code !== 0) process.exit(code);
+      break;
+    }
 
     case "migrate": {
       const target = cli.args[0];
@@ -3561,6 +3971,12 @@ if (isMain) {
       break;
     }
 
+    case "tenant": {
+      const code = runTenantCommand(cli.args, cli.values as Record<string, unknown>, cli.opts.format);
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
     case "skill": {
       const subcommand = cli.args[0];
       if (subcommand === "install") {
@@ -3599,9 +4015,25 @@ if (isMain) {
       break;
     }
 
+    case "init": {
+      await runInitCommand(cli.args, cli.values as Record<string, unknown>, {
+        updateCollections,
+        vectorIndex,
+        defaultGlob: DEFAULT_GLOB,
+        defaultEmbedModel: DEFAULT_EMBED_MODEL,
+      });
+      break;
+    }
+
     case "update": {
       const collFilter = cli.values.collection as string | string[] | undefined;
-      await updateCollections(collFilter);
+      await updateCollections(collFilter, { pull: Boolean(cli.values.pull) });
+      
+      if (cli.values.embed === true || cli.values.embed === 'true') {
+        console.log(`\n${c.magenta}=== Embedding ===${c.reset}`);
+        await vectorIndex(DEFAULT_EMBED_MODEL, false, !!cli.values.resume);
+      }
+      
       try {
         const { getArchConfig } = await import("./integrations/arch/adapter.js");
         const archConfig = getArchConfig();
@@ -3616,8 +4048,15 @@ if (isMain) {
     }
 
     case "embed":
-      await vectorIndex(DEFAULT_EMBED_MODEL, !!cli.values.force);
+    {
+      const code = await executeEmbedCommand({
+        force: !!cli.values.force,
+        resume: !!cli.values.resume,
+        runVectorIndex: vectorIndex,
+      });
+      if (code !== 0) process.exit(code);
       break;
+    }
 
     case "pull": {
       const refresh = cli.values.refresh === undefined ? false : Boolean(cli.values.refresh);
@@ -3662,17 +4101,15 @@ if (isMain) {
 
     case "query":
     case "deep-search": // undocumented alias
-      if (!cli.query) {
-        console.error("Usage: kindx query [options] <query>");
-        process.exit(1);
-      }
-      try {
-        await querySearch(cli.query, cli.opts);
-      } catch (e: any) {
-        console.error(`Error: ${e?.message || e}`);
-        process.exit(1);
-      }
+    {
+      const code = await executeQueryCommand({
+        query: cli.query,
+        opts: cli.opts,
+        runQuerySearch: querySearch as (query: string, opts: unknown) => Promise<void>,
+      });
+      if (code !== 0) process.exit(code);
       break;
+    }
 
     case "mcp": {
       const sub = cli.args[0]; // stop | status | undefined
@@ -3720,11 +4157,15 @@ if (isMain) {
           const logPath = resolve(cacheDir, "mcp.log");
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const selfPath = fileURLToPath(import.meta.url);
-          const iName = cli.values.index as string | undefined;
-          const indexFlag = iName ? ["--index", iName] : [];
+          const iName = (cli.values.workspace || cli.values.index) as string | undefined;
+          const indexFlag = iName ? ["--workspace", iName] : [];
+          const logArgs = [
+            ...(cli.values["log-format"] ? ["--log-format", String(cli.values["log-format"])] : []),
+            ...(cli.values["log-level"] ? ["--log-level", String(cli.values["log-level"])] : []),
+          ];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...indexFlag]
-            : [selfPath, "mcp", "--http", "--port", String(port), ...indexFlag];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...logArgs, ...indexFlag]
+            : [selfPath, "mcp", "--http", "--port", String(port), ...logArgs, ...indexFlag];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -3763,6 +4204,17 @@ if (isMain) {
     case "cleanup": {
       const dbPath = getDbPath();
       const db = getDb();
+
+      if (cli.values.cache === true || cli.values.cache === "true") {
+        const cacheCount = deleteLLMCache(db);
+        closeDb();
+        if (cli.opts.format === "json") {
+          console.log(JSON.stringify({ cache_only: true, cleared: cacheCount }, null, 2));
+        } else {
+          console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
+        }
+        break;
+      }
 
       // 1. Clear llm_cache
       const cacheCount = deleteLLMCache(db);

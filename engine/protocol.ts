@@ -8,11 +8,15 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "url";
+import { logger } from "./utils/logger.js";
+import { incCounter, observeHistogram, renderPrometheusMetrics } from "./utils/metrics.js";
+import { buildOperationalStatus } from "./diagnostics.js";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebStandardStreamableHTTPServerTransport }
@@ -25,6 +29,7 @@ import {
   addLineNumbers,
   structuredSearchWithDiagnostics,
   DEFAULT_MULTI_GET_MAX_BYTES,
+  getRerankThroughputSnapshot,
 } from "./repository.js";
 import type {
   Store,
@@ -49,6 +54,7 @@ import {
   SessionRegistry,
   type SessionScopeContext,
 } from "./session.js";
+import { getShardHealthSummary } from "./sharding.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
   McpToolListCache,
@@ -78,6 +84,29 @@ type StatusResult = {
   totalDocuments: number;
   needsEmbedding: number;
   hasVectorIndex: boolean;
+  capabilities: Record<string, string>;
+  ann: {
+    enabled: boolean;
+    mode: "ann" | "exact";
+    state: "ready" | "stale" | "missing" | "degraded";
+    probeCount: number;
+    shortlistLimit: number;
+    details: Array<{ collection: string; shard: number; state: "ready" | "stale" | "missing" | "degraded"; reason: string }>;
+  };
+  encryption: {
+    encrypted: boolean;
+    keyConfigured: boolean;
+    bytes: number;
+  };
+  ingestion: {
+    warnedDocuments: number;
+    byFormat: Array<{ format: string; count: number }>;
+    byWarning: Array<{ warning: string; count: number }>;
+  };
+  vector_available: boolean;
+  models_ready: boolean;
+  db_integrity: "ok" | "failed";
+  warnings: string[];
   collections: {
     name: string;
     path: string;
@@ -85,7 +114,25 @@ type StatusResult = {
     documents: number;
     lastUpdated: string;
   }[];
-  watchDaemon?: "active" | "inactive";
+  shards: {
+    enabledCollections: Array<{ collection: string; shardCount: number }>;
+    checkpointPath: string;
+    checkpointExists: boolean;
+    warnings: string[];
+  };
+  scale: {
+    queueDepth: number;
+    rerankConcurrency: number;
+    queueActive: number;
+    queueTimedOutTotal: number;
+    queueSaturatedTotal: number;
+    shardHealth: {
+      status: "ok" | "warn" | "error";
+      families: Record<"topology" | "checkpoint" | "read" | "write" | "parity", { count: number; severity: "warn" | "error" }>;
+      warnings: string[];
+    };
+  };
+  watchDaemon: "active" | "inactive";
 };
 
 type MemoryScopeContext = SessionScopeContext;
@@ -124,7 +171,7 @@ type QueryMetadata = {
   dedupe_join_hits: boolean;
   replay_artifact: string | null;
   replay_artifact_path: string | null;
-  diagnostics?: StructuredSearchDiagnostics;
+  diagnostics: StructuredSearchDiagnostics;
 };
 
 function newTimings(): QueryTimings {
@@ -194,6 +241,22 @@ function resolveTimeoutByProfile(baseTimeoutMs: number, profile: SearchRoutingPr
     return baseTimeoutMs > 0 ? Math.max(baseTimeoutMs, 15_000) : 15_000;
   }
   return baseTimeoutMs;
+}
+
+function inferAnnRoute(metadata: QueryMetadata): "ann" | "exact_fallback" | "n/a" {
+  const declared = metadata.diagnostics?.ann?.route;
+  if (declared === "ann" || declared === "exact_fallback" || declared === "n/a") {
+    return declared;
+  }
+  const warnings = metadata.diagnostics?.scaleWarnings || [];
+  const hasSharded = warnings.some((w) => w.startsWith("sharded_collection:"));
+  const usedFallback = warnings.some((w) =>
+    w.startsWith("ann_missing:")
+    || w.startsWith("ann_stale:")
+    || w.startsWith("ann_failed:")
+  );
+  if (!hasSharded) return "n/a";
+  return usedFallback ? "exact_fallback" : "ann";
 }
 
 async function writeReplayArtifact(payload: {
@@ -482,7 +545,7 @@ function createMcpServer(
 ): McpServer {
   const mcpControl = options?.mcpControl;
   const server = new McpServer(
-    { name: "kindx", version: "1.3.1" },
+    { name: "kindx", version: "1.3.2" },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
@@ -664,13 +727,31 @@ Intent-aware lex (C++ performance, not sports):
         candidateLimit: z.number().optional().describe(
           "Maximum candidates to rerank (default: 40, lower = faster but may miss results)"
         ),
+        maxRerankCandidates: z.number().optional().describe(
+          "Hard cap for rerank candidates after profile policy."
+        ),
+        rerankTimeoutMs: z.number().optional().describe(
+          "Timeout budget in milliseconds for reranking before fallback."
+        ),
+        rerankQueueLimit: z.number().optional().describe(
+          "Maximum queued rerank jobs before saturation fallback."
+        ),
+        rerankConcurrency: z.number().optional().describe(
+          "Rerank worker concurrency (default 1)."
+        ),
+        rerankDropPolicy: z.enum(["timeout_fallback", "wait"]).optional().describe(
+          "Queue backpressure behavior."
+        ),
+        vectorFanoutWorkers: z.number().optional().describe(
+          "Parallel worker cap for vector fanout."
+        ),
         routingProfile: z.enum(["fast", "balanced", "max_precision"]).optional().default("balanced").describe(
           "Retrieval routing profile: fast (lower latency), balanced (default), max_precision (higher recall/precision)."
         ),
         collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
       },
     },
-    async ({ searches, limit, minScore, candidateLimit, routingProfile, collections }: any) => {
+    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections }: any) => {
       try {
       const totalStart = Date.now();
       const timings = newTimings();
@@ -696,6 +777,14 @@ Intent-aware lex (C++ performance, not sports):
 
       // Use default collections if none specified
       const effectiveCollections = collections ?? getDefaultCollectionNames();
+      logger.info(JSON.stringify({
+        event: "kindx.query.start",
+        routing_profile: profile,
+        scope: scopeKey,
+        searches: subSearches.length,
+        collections: effectiveCollections.length,
+        encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
+      }));
 
       const results = await withLLMScope(
         scopeKey,
@@ -705,6 +794,12 @@ Intent-aware lex (C++ performance, not sports):
             limit,
             minScore,
             candidateLimit: profilePolicy.candidateLimit,
+            maxRerankCandidates,
+            rerankTimeoutMs,
+            rerankQueueLimit,
+            rerankConcurrency,
+            rerankDropPolicy,
+            vectorFanoutWorkers,
             rerankLimit: profilePolicy.rerankLimit,
             disableRerank: profile === "fast",
             routingProfile: profile,
@@ -768,6 +863,31 @@ Intent-aware lex (C++ performance, not sports):
         results: filtered,
       });
       metadata.replay_artifact_path = metadata.replay_artifact;
+      const annRoute = inferAnnRoute(metadata);
+      incCounter("kindx_query_requests_total", 1, {
+        profile,
+        degraded: String(metadata.degraded_mode === true),
+        route: annRoute,
+      });
+      for (const reason of metadata.fallback_reasons) {
+        incCounter("kindx_query_degraded_total", 1, { reason });
+      }
+      incCounter("kindx_query_route_total", 1, { route: annRoute });
+      observeHistogram(
+        "kindx_query_total_ms",
+        metadata.timings.total_ms,
+        [100, 250, 500, 1000, 2500, 5000, 10000, 30000],
+        { profile, degraded: String(metadata.degraded_mode === true), route: annRoute }
+      );
+      logger.info(JSON.stringify({
+        event: "kindx.query.end",
+        routing_profile: profile,
+        degraded_mode: metadata.degraded_mode,
+        fallback_reasons: metadata.fallback_reasons,
+        ann_route: annRoute,
+        encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
+        total_ms: metadata.timings.total_ms,
+      }));
 
       return {
         content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
@@ -947,7 +1067,10 @@ Intent-aware lex (C++ performance, not sports):
       inputSchema: {},
     },
     async () => {
-      const status: StatusResult = store.getStatus();
+      const status = store.getStatus();
+      const ops = buildOperationalStatus(store.db, store.dbPath, status.hasVectorIndex);
+      const throughput = getRerankThroughputSnapshot();
+      const shardHealth = getShardHealthSummary(store.db, store.dbPath, 16);
 
       let watchDaemon: "active" | "inactive" = "inactive";
       try {
@@ -975,19 +1098,66 @@ Intent-aware lex (C++ performance, not sports):
         } catch (e) {}
       }
 
-      const fullStatus = { ...status, watchDaemon };
+      const fullStatus: StatusResult = {
+        ...status,
+        watchDaemon,
+        ...ops,
+        scale: {
+          queueDepth: throughput.depth,
+          rerankConcurrency: throughput.concurrency,
+          queueActive: throughput.active,
+          queueTimedOutTotal: throughput.fairness.timedOut,
+          queueSaturatedTotal: throughput.fairness.saturated,
+          shardHealth,
+        },
+      };
 
       const summary = [
         `KINDX Index Status:`,
         `  Total documents: ${status.totalDocuments}`,
         `  Needs embedding: ${status.needsEmbedding}`,
         `  Vector index: ${status.hasVectorIndex ? 'yes' : 'no'}`,
+        `  Vector capability: ${ops.vector_available ? "available" : "unavailable"}`,
+        `  Models ready: ${ops.models_ready ? "yes" : "no"}`,
+        `  DB integrity: ${ops.db_integrity}`,
         `  Collections: ${status.collections.length}`,
         `  Watch Daemon: ${watchDaemon === "active" ? "active" : "inactive"}`,
+        `  Capability flags: ${Object.entries(status.capabilities || {}).map(([k, v]) => `${k}=${v}`).join(", ")}`,
+        `  Encryption: ${status.encryption.encrypted ? "encrypted" : "plaintext"} (key=${status.encryption.keyConfigured ? "set" : "unset"})`,
+        `  ANN route: ${status.ann.mode} (${status.ann.state})`,
+        `  Ingestion warnings: ${status.ingestion?.warnedDocuments ?? 0}`,
       ];
+      if (status.shards) {
+        summary.push(`  Shards configured: ${status.shards.enabledCollections.length}`);
+        summary.push(`  Shard checkpoint: ${status.shards.checkpointExists ? "present" : "missing"}`);
+      }
+      summary.push(`  Queue depth: ${throughput.depth}`);
+      summary.push(`  Rerank concurrency: ${throughput.concurrency}`);
+      summary.push(`  Queue timed-out total: ${throughput.fairness.timedOut}`);
+      summary.push(`  Queue saturated total: ${throughput.fairness.saturated}`);
+      summary.push(`  Shard health: ${shardHealth.status}`);
+      summary.push(`  Metrics endpoint: /metrics`);
+      if ((status.ingestion?.byWarning?.length ?? 0) > 0) {
+        summary.push(`  Ingestion warning taxonomy:`);
+        for (const item of status.ingestion.byWarning.slice(0, 10)) {
+          summary.push(`    - ${item.warning}: ${item.count}`);
+        }
+      }
 
       for (const col of status.collections) {
         summary.push(`    - ${col.path} (${col.documents} docs)`);
+      }
+      if (ops.warnings.length > 0) {
+        summary.push(`  Warnings:`);
+        for (const warning of ops.warnings) {
+          summary.push(`    - ${warning}`);
+        }
+      }
+      if (status.shards?.warnings?.length) {
+        summary.push(`  Scale warnings:`);
+        for (const warning of status.shards.warnings) {
+          summary.push(`    - ${warning}`);
+        }
       }
 
       return {
@@ -1366,12 +1536,15 @@ export async function bindHttpServerWithFallback(
   }
 }
 
+
+
 /**
  * Start MCP server over Streamable HTTP (JSON responses, no SSE).
  * Binds to localhost first, then falls back to 127.0.0.1 if needed.
  * Returns a handle for shutdown and port discovery.
  */
 export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string }): Promise<HttpServerHandle> {
+  const quiet = options?.quiet ?? false;
   const store = createStore(options?.dbPath);
   const loadedControl = loadMcpControlPlaneConfig();
   const mcpControl = resolveMcpServerControl(KINDX_MCP_SERVER_ID, loadedControl);
@@ -1384,10 +1557,30 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const inFlightBySession = new Map<string, Map<string, Promise<{ results: SearchResultItem[]; metadata: QueryMetadata }>>>();
   const inFlightMcpBySession = new Map<string, Map<string, Promise<{ status: number; headers: Record<string, string>; body: string }>>>();
 
-  // Read token once at startup. Undefined / empty = auth disabled (single-user local mode).
-  const mcpToken = controlHeaders.Authorization?.replace(/^Bearer\s+/i, "").trim()
+  // Read token once at startup.
+  let mcpToken = controlHeaders.Authorization?.replace(/^Bearer\s+/i, "").trim()
     || process.env.KINDX_MCP_TOKEN?.trim()
     || null;
+
+  // Enforce auth: Auto-generate and persist a token if none is configured
+  if (!mcpToken) {
+    const configDir = resolve(homedir(), ".config", "kindx");
+    const tokenFile = resolve(configDir, "mcp_token");
+    if (existsSync(tokenFile)) {
+      mcpToken = readFileSync(tokenFile, "utf-8").trim();
+    } else {
+      if (!existsSync(configDir)) {
+        mkdirSync(configDir, { recursive: true });
+      }
+      mcpToken = randomBytes(32).toString("hex");
+      writeFileSync(tokenFile, mcpToken, { encoding: "utf8", mode: 0o600 });
+      // Ensure strict permissions if writeFileSync mode isn't fully honored (e.g. umask)
+      chmodSync(tokenFile, 0o600);
+      if (!quiet) {
+        logger.info(`KINDX: Generated new MCP authorization token at ${tokenFile}`);
+      }
+    }
+  }
 
   // Session map: each client gets its own McpServer + Transport pair (MCP spec requirement).
   // The store is shared — it's stateless SQLite, safe for concurrent access.
@@ -1433,6 +1626,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       limit?: number;
       minScore?: number;
       candidateLimit?: number;
+      maxRerankCandidates?: number;
+      rerankTimeoutMs?: number;
+      rerankQueueLimit?: number;
+      rerankConcurrency?: number;
+      rerankDropPolicy?: "timeout_fallback" | "wait";
+      vectorFanoutWorkers?: number;
       routingProfile: SearchRoutingProfile;
     },
   ): Promise<{ results: SearchResultItem[]; metadata: QueryMetadata }> {
@@ -1449,6 +1648,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           limit: options.limit,
           minScore: options.minScore,
           candidateLimit: profilePolicy.candidateLimit,
+          maxRerankCandidates: options.maxRerankCandidates,
+          rerankTimeoutMs: options.rerankTimeoutMs,
+          rerankQueueLimit: options.rerankQueueLimit,
+          rerankConcurrency: options.rerankConcurrency,
+          rerankDropPolicy: options.rerankDropPolicy,
+          vectorFanoutWorkers: options.vectorFanoutWorkers,
           rerankLimit: profilePolicy.rerankLimit,
           disableRerank: options.routingProfile === "fast",
           routingProfile: options.routingProfile,
@@ -1557,7 +1762,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         // This gives tool handlers access to per-session embedding cache + abort signal.
         kindxSession = SessionRegistry.create(sessionId, context);
         sessions.set(sessionId, { transport, context, kindxSession });
-        log(`${ts()} New session ${sessionId} (${sessions.size} active)`);
+        logger.info(`New session ${sessionId} (${sessions.size} active)`);
       },
     });
     const server = createMcpServer(
@@ -1581,9 +1786,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         // Guardrail: verify registry cleanup so stale sessions do not accumulate.
         if (SessionRegistry.get(sid)) {
           SessionRegistry.delete(sid);
-          log(`${ts()} WARN stale KindxSession detected during onclose cleanup for ${sid} (force-deleted)`);
+          logger.warn(`stale KindxSession detected during onclose cleanup for ${sid} (force-deleted)`);
         } else {
-          log(`${ts()} Session ${sid} cleaned up`);
+          logger.info(`Session ${sid} cleaned up`);
         }
       }
       void disposeSensitiveContexts().catch(() => {});
@@ -1593,12 +1798,6 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   }
 
   const startTime = Date.now();
-  const quiet = options?.quiet ?? false;
-
-  /** Format timestamp for request logging */
-  function ts(): string {
-    return new Date().toISOString().slice(11, 23); // HH:mm:ss.SSS
-  }
 
   /** Extract a human-readable label from a JSON-RPC body */
   function describeRequest(body: any): string {
@@ -1618,16 +1817,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     return method;
   }
 
-  function log(msg: string): void {
-    if (!quiet) console.error(msg);
-  }
-
   function emitStartupEvent(
     type: "mcp_startup_update" | "mcp_startup_complete" | "mcp_startup_failure",
     payload: Record<string, unknown>
   ): void {
     const event = { type, ts: new Date().toISOString(), ...payload };
-    log(JSON.stringify(event));
+    logger.info(JSON.stringify(event));
   }
 
   // Helper to collect request body
@@ -1678,26 +1873,109 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const httpServer = createServer(async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
     const reqStart = Date.now();
     const pathname = nodeReq.url || "/";
+    const method = nodeReq.method || "UNKNOWN";
+    const metricRoute = pathname.startsWith("/mcp")
+      ? "/mcp"
+      : (pathname === "/search" ? "/query" : pathname);
+    const recordHttpMetrics = (statusCode: number): void => {
+      const elapsed = Date.now() - reqStart;
+      incCounter("kindx_http_requests_total", 1, { route: metricRoute, method, status: String(statusCode) });
+      observeHistogram(
+        "kindx_http_request_duration_ms",
+        elapsed,
+        [5, 10, 25, 50, 100, 250, 500, 1000, 3000, 10000],
+        { route: metricRoute, method }
+      );
+    };
 
     try {
       if (pathname === "/health" && nodeReq.method === "GET") {
         const body = JSON.stringify({ status: "ok", uptime: Math.floor((Date.now() - startTime) / 1000) });
         nodeRes.writeHead(200, { "Content-Type": "application/json" });
         nodeRes.end(body);
-        log(`${ts()} GET /health (${Date.now() - reqStart}ms)`);
+        recordHttpMetrics(200);
+        logger.info(`GET /health (${Date.now() - reqStart}ms)`);
         return;
       }
 
-      // Bearer token authentication — enforced when KINDX_MCP_TOKEN env var is set.
-      // /health is intentionally exempt to allow monitoring probes without credentials.
-      // Set KINDX_MCP_TOKEN before starting the daemon in any shared or networked deployment.
-      if (mcpToken) {
+      if (pathname === "/metrics" && nodeReq.method === "GET") {
+        const throughput = getRerankThroughputSnapshot(undefined);
+        // LLM pool metrics for concurrency observability
+        let poolMetrics: { name: string; value: number }[] = [];
+        try {
+          const { getDefaultLLMPool } = await import("./llm-pool.js");
+          const poolState = getDefaultLLMPool().getMetrics();
+          poolMetrics = [
+            { name: "kindx_llm_pool_size", value: poolState.size },
+            { name: "kindx_llm_pool_active", value: poolState.active },
+            { name: "kindx_llm_pool_waiting", value: poolState.waiting },
+            { name: "kindx_llm_pool_acquired_total", value: poolState.totalAcquired },
+            { name: "kindx_llm_pool_timed_out_total", value: poolState.totalTimedOut },
+          ];
+        } catch { /* pool not available — skip silently */ }
+        const body = renderPrometheusMetrics([
+          { name: "kindx_rerank_queue_depth", value: throughput.depth },
+          { name: "kindx_rerank_queue_active", value: throughput.active },
+          { name: "kindx_rerank_queue_concurrency", value: throughput.concurrency },
+          { name: "kindx_rerank_queue_timed_out_total", value: throughput.fairness.timedOut },
+          { name: "kindx_rerank_queue_saturated_total", value: throughput.fairness.saturated },
+          ...poolMetrics,
+        ]);
+        nodeRes.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
+        nodeRes.end(body);
+        recordHttpMetrics(200);
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // Authentication & RBAC
+      // -----------------------------------------------------------------------
+      // Two modes:
+      //  1. Single-tenant (legacy): KINDX_MCP_TOKEN or auto-generated token.
+      //     No tenants.yml — all tokens get admin access.
+      //  2. Multi-tenant: tenants.yml exists. Each bearer token resolves to a
+      //     tenant with role + collection ACL. Unknown tokens are rejected.
+      //
+      // /health and /metrics are intentionally unauthenticated for monitoring.
+      // -----------------------------------------------------------------------
+      let requestIdentity: import("./rbac.js").ResolvedIdentity | null = null;
+      {
         const authHeader = nodeReq.headers["authorization"];
-        if (!authHeader || authHeader !== `Bearer ${mcpToken}`) {
-          nodeRes.writeHead(401, { "Content-Type": "application/json" });
-          nodeRes.end(JSON.stringify({ error: "Unauthorized: set Authorization: Bearer <KINDX_MCP_TOKEN>" }));
-          log(`${ts()} 401 Unauthorized ${nodeReq.method} ${pathname}`);
-          return;
+        const bearerToken = authHeader?.replace(/^Bearer\s+/i, "").trim() || null;
+        const { isMultiTenantEnabled, resolveTokenToIdentity } = await import("./rbac.js");
+
+        if (isMultiTenantEnabled()) {
+          // Multi-tenant RBAC mode
+          if (!bearerToken) {
+            nodeRes.writeHead(401, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Unauthorized: Bearer token required (multi-tenant RBAC enabled)" }));
+            recordHttpMetrics(401);
+            logger.info(`401 Unauthorized ${nodeReq.method} ${pathname} (no token)`);
+            return;
+          }
+          requestIdentity = resolveTokenToIdentity(bearerToken);
+          if (!requestIdentity) {
+            nodeRes.writeHead(403, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Forbidden: token does not match any active tenant" }));
+            recordHttpMetrics(403);
+            logger.info(`403 Forbidden ${nodeReq.method} ${pathname} (unknown/disabled tenant)`);
+            return;
+          }
+          logger.info(`RBAC: tenant=${requestIdentity.tenantId} role=${requestIdentity.role} ${nodeReq.method} ${pathname}`);
+        } else if (mcpToken) {
+          // Single-tenant legacy mode — exact token match
+          if (!authHeader || authHeader !== `Bearer ${mcpToken}`) {
+            nodeRes.writeHead(401, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Unauthorized: set Authorization: Bearer <KINDX_MCP_TOKEN>" }));
+            recordHttpMetrics(401);
+            logger.info(`401 Unauthorized ${nodeReq.method} ${pathname}`);
+            return;
+          }
+          // Single-tenant → admin identity
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
+        } else {
+          // No auth configured — admin identity (open access, local-only deployments)
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
         }
       }
 
@@ -1707,10 +1985,22 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         const rawBody = await collectBody(nodeReq);
         const params = JSON.parse(rawBody);
 
+        // RBAC: enforce query permission
+        if (requestIdentity) {
+          const { isPermitted, filterAllowedCollections } = await import("./rbac.js");
+          if (!isPermitted(requestIdentity, "query")) {
+            nodeRes.writeHead(403, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: `Forbidden: tenant '${requestIdentity.tenantId}' cannot perform queries` }));
+            recordHttpMetrics(403);
+            return;
+          }
+        }
+
         // Validate required fields
         if (!params.searches || !Array.isArray(params.searches)) {
           nodeRes.writeHead(400, { "Content-Type": "application/json" });
           nodeRes.end(JSON.stringify({ error: "Missing required field: searches (array)" }));
+          recordHttpMetrics(400);
           return;
         }
 
@@ -1720,9 +2010,29 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           query: String(s.query || ""),
         }));
 
-        // Use default collections if none specified
-        const effectiveCollections = params.collections ?? getDefaultCollectionNames();
+        // Use default collections if none specified, then filter by RBAC ACL
+        let effectiveCollections: string[] = params.collections ?? getDefaultCollectionNames();
+        if (requestIdentity && requestIdentity.allowedCollections !== "*") {
+          const { filterAllowedCollections } = await import("./rbac.js");
+          effectiveCollections = filterAllowedCollections(requestIdentity, effectiveCollections);
+          if (effectiveCollections.length === 0) {
+            nodeRes.writeHead(403, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({
+              error: `Forbidden: tenant '${requestIdentity.tenantId}' has no access to the requested collections`,
+            }));
+            recordHttpMetrics(403);
+            return;
+          }
+        }
         const routingProfile = normalizeRoutingProfile(params.routingProfile);
+        logger.info(JSON.stringify({
+          event: "kindx.query.start",
+          route: "http",
+          routing_profile: routingProfile,
+          searches: subSearches.length,
+          collections: effectiveCollections.length,
+          encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
+        }));
         const sessionKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
         const dedupeKey = stableHash({
           searches: subSearches,
@@ -1730,6 +2040,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           limit: params.limit ?? 10,
           minScore: params.minScore ?? 0,
           candidateLimit: params.candidateLimit,
+          maxRerankCandidates: params.maxRerankCandidates,
+          rerankTimeoutMs: params.rerankTimeoutMs,
+          rerankQueueLimit: params.rerankQueueLimit,
+          rerankConcurrency: params.rerankConcurrency,
+          rerankDropPolicy: params.rerankDropPolicy,
+          vectorFanoutWorkers: params.vectorFanoutWorkers,
           routingProfile,
         });
         const { payload, dedupeJoined } = await runStructuredSearchDeduped(
@@ -1743,6 +2059,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               limit: params.limit ?? 10,
               minScore: params.minScore ?? 0,
               candidateLimit: params.candidateLimit,
+              maxRerankCandidates: params.maxRerankCandidates,
+              rerankTimeoutMs: params.rerankTimeoutMs,
+              rerankQueueLimit: params.rerankQueueLimit,
+              rerankConcurrency: params.rerankConcurrency,
+              rerankDropPolicy: params.rerankDropPolicy,
+              vectorFanoutWorkers: params.vectorFanoutWorkers,
               routingProfile,
             }
           )
@@ -1755,7 +2077,34 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         nodeRes.writeHead(200, { "Content-Type": "application/json" });
         nodeRes.end(JSON.stringify({ results: payload.results, metadata }));
-        log(`${ts()} POST /query ${params.searches.length} queries (${Date.now() - reqStart}ms)`);
+        recordHttpMetrics(200);
+        const annRoute = inferAnnRoute(metadata);
+        incCounter("kindx_query_requests_total", 1, {
+          profile: routingProfile,
+          degraded: String(metadata.degraded_mode === true),
+          route: annRoute,
+        });
+        for (const reason of metadata.fallback_reasons) {
+          incCounter("kindx_query_degraded_total", 1, { reason });
+        }
+        incCounter("kindx_query_route_total", 1, { route: annRoute });
+        observeHistogram(
+          "kindx_query_total_ms",
+          metadata.timings.total_ms,
+          [100, 250, 500, 1000, 2500, 5000, 10000, 30000],
+          { profile: routingProfile, degraded: String(metadata.degraded_mode === true), route: annRoute }
+        );
+        logger.info(JSON.stringify({
+          event: "kindx.query.end",
+          route: "http",
+          routing_profile: routingProfile,
+          degraded_mode: metadata.degraded_mode,
+          fallback_reasons: metadata.fallback_reasons,
+          ann_route: annRoute,
+          encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
+          total_ms: metadata.timings.total_ms,
+        }));
+        logger.info(`POST /query ${params.searches.length} queries (${Date.now() - reqStart}ms)`);
         return;
       }
 
@@ -1783,6 +2132,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               error: { code: -32001, message: "Session not found" },
               id: body?.id ?? null,
             }));
+            recordHttpMetrics(404);
             return;
           }
           transport = existingSession.transport;
@@ -1798,6 +2148,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             error: { code: -32000, message: "Bad Request: Missing session ID" },
             id: body?.id ?? null,
           }));
+          recordHttpMetrics(400);
           return;
         }
 
@@ -1813,7 +2164,69 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               },
               id: body?.id ?? null,
             }));
+            recordHttpMetrics(403);
             return;
+          }
+
+          // RBAC enforcement on MCP tool calls
+          if (requestIdentity) {
+            const { isPermitted, filterAllowedCollections, RBACDeniedError } = await import("./rbac.js");
+            // Map MCP tool names to RBAC operations
+            const toolToOp: Record<string, import("./rbac.js").RBACOperation> = {
+              query: "query",
+              get: "get",
+              multi_get: "multi_get",
+              status: "status",
+              arch_status: "arch_status",
+              arch_query: "arch_query",
+              memory_put: "memory_put",
+              memory_search: "memory_search",
+              memory_history: "memory_history",
+              memory_stats: "memory_stats",
+              memory_mark_accessed: "memory_mark_accessed",
+            };
+            const op = toolToOp[toolName];
+            if (op && !isPermitted(requestIdentity, op)) {
+              nodeRes.writeHead(403, { "Content-Type": "application/json" });
+              nodeRes.end(JSON.stringify({
+                jsonrpc: "2.0",
+                error: {
+                  code: -32003,
+                  message: `RBAC denied: tenant '${requestIdentity.tenantId}' (${requestIdentity.role}) cannot call '${toolName}'`,
+                },
+                id: body?.id ?? null,
+              }));
+              recordHttpMetrics(403);
+              logger.info(`RBAC denied: tenant=${requestIdentity.tenantId} tool=${toolName}`);
+              return;
+            }
+
+            // Filter collections for query tool
+            if (toolName === "query" && requestIdentity.allowedCollections !== "*") {
+              const toolArgs = (body?.params?.arguments && typeof body.params.arguments === "object")
+                ? body.params.arguments
+                : {};
+              const requestedCollections = Array.isArray(toolArgs.collections)
+                ? toolArgs.collections
+                : getDefaultCollectionNames();
+              const effectiveCollections = filterAllowedCollections(requestIdentity, requestedCollections);
+              if (effectiveCollections.length === 0) {
+                nodeRes.writeHead(403, { "Content-Type": "application/json" });
+                nodeRes.end(JSON.stringify({
+                  jsonrpc: "2.0",
+                  error: {
+                    code: -32003,
+                    message: `RBAC denied: tenant '${requestIdentity.tenantId}' has no access to the requested collections`,
+                  },
+                  id: body?.id ?? null,
+                }));
+                recordHttpMetrics(403);
+                logger.info(`RBAC denied: tenant=${requestIdentity.tenantId} query collections=${JSON.stringify(requestedCollections)}`);
+                return;
+              }
+              toolArgs.collections = effectiveCollections;
+              body.params.arguments = toolArgs;
+            }
           }
         }
 
@@ -1831,7 +2244,8 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             const cachedBody = patchJsonRpcId(JSON.stringify(cached), body?.id ?? null);
             nodeRes.writeHead(200, { "Content-Type": "application/json" });
             nodeRes.end(cachedBody);
-            log(`${ts()} POST /mcp tools/list (cache-hit ${Date.now() - reqStart}ms)`);
+            recordHttpMetrics(200);
+            logger.info(`POST /mcp tools/list (cache-hit ${Date.now() - reqStart}ms)`);
             return;
           }
         }
@@ -1906,6 +2320,15 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           try {
             const toolName = typeof body?.params?.name === "string" ? body.params.name : "";
             const parsed = JSON.parse(buffered.body);
+            if (
+              toolName.startsWith("memory_") &&
+              parsed?.result &&
+              typeof parsed.result === "object" &&
+              !parsed.result.isError &&
+              (parsed.result.structuredContent == null || typeof parsed.result.structuredContent !== "object")
+            ) {
+              logger.warn(`memory_tool_missing_structured_content: ${toolName}`);
+            }
             const patched = injectToolProvenance(parsed, toolName);
             buffered = {
               ...buffered,
@@ -1918,7 +2341,8 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         nodeRes.writeHead(buffered.status, buffered.headers);
         nodeRes.end(buffered.body);
-        log(`${ts()} POST /mcp ${label} (${Date.now() - reqStart}ms)`);
+        recordHttpMetrics(buffered.status);
+        logger.info(`POST /mcp ${label} (${Date.now() - reqStart}ms)`);
         return;
       }
 
@@ -1937,6 +2361,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             error: { code: -32000, message: "Bad Request: Missing session ID" },
             id: null,
           }));
+          recordHttpMetrics(400);
           return;
         }
         const existingSession = sessions.get(sessionId);
@@ -1947,6 +2372,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             error: { code: -32001, message: "Session not found" },
             id: null,
           }));
+          recordHttpMetrics(404);
           return;
         }
 
@@ -1959,13 +2385,15 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         );
         nodeRes.writeHead(response.status, Object.fromEntries(response.headers));
         nodeRes.end(Buffer.from(await response.arrayBuffer()));
+        recordHttpMetrics(response.status);
         return;
       }
 
       nodeRes.writeHead(404);
       nodeRes.end("Not Found");
-    } catch (err) {
-      console.error("HTTP handler error:", err);
+      recordHttpMetrics(404);
+    } catch (err: any) {
+      logger.error("HTTP handler error:", { error: err?.message || String(err) });
       const code = (err as any)?.code as string | undefined;
       const message = err instanceof Error ? err.message : "Internal Server Error";
       const status = code === "query_timeout" ? 408 : 500;
@@ -1974,6 +2402,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         error: message,
         code: code || "internal_error",
       }));
+      recordHttpMetrics(status);
     }
   });
 
@@ -2041,18 +2470,21 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     await disposeDefaultLLM();
   };
 
-  process.on("SIGTERM", async () => {
-    console.error("Shutting down (SIGTERM)...");
+  const shutdown = async () => {
     await stop();
     process.exit(0);
+  };
+
+  process.on("SIGTERM", () => {
+    logger.info("Shutting down (SIGTERM)...");
+    shutdown();
   });
-  process.on("SIGINT", async () => {
-    console.error("Shutting down (SIGINT)...");
-    await stop();
-    process.exit(0);
+  process.once("SIGINT", () => {
+    logger.info("Shutting down (SIGINT)...");
+    shutdown();
   });
 
-  log(`KINDX MCP server listening on ${url}`);
+  logger.info(`KINDX MCP server listening on ${url}`);
   return { httpServer, port: actualPort, host: boundHost, url, stop };
 }
 

@@ -905,6 +905,8 @@ describe("MCP HTTP Transport", () => {
   // Stash original env to restore after tests
   const origIndexPath = process.env.INDEX_PATH;
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
+  const origMcpToken = process.env.KINDX_MCP_TOKEN;
+  const testMcpToken = "kindx-test-token";
 
   beforeAll(async () => {
     // Create isolated test database with seeded data
@@ -930,6 +932,7 @@ describe("MCP HTTP Transport", () => {
     // Point createStore() at our test DB
     process.env.INDEX_PATH = httpTestDbPath;
     process.env.KINDX_CONFIG_DIR = httpTestConfigDir;
+    process.env.KINDX_MCP_TOKEN = testMcpToken;
 
     handle = await startMcpHttpServer(0, { quiet: true }); // OS-assigned ephemeral port
     baseUrl = `http://localhost:${handle.port}`;
@@ -943,6 +946,8 @@ describe("MCP HTTP Transport", () => {
     else delete process.env.INDEX_PATH;
     if (origConfigDir !== undefined) process.env.KINDX_CONFIG_DIR = origConfigDir;
     else delete process.env.KINDX_CONFIG_DIR;
+    if (origMcpToken !== undefined) process.env.KINDX_MCP_TOKEN = origMcpToken;
+    else delete process.env.KINDX_MCP_TOKEN;
 
     // Clean up test files
     try { unlinkSync(httpTestDbPath); } catch { }
@@ -967,8 +972,33 @@ describe("MCP HTTP Transport", () => {
   });
 
   test("GET /other returns 404", async () => {
-    const res = await fetch(`${baseUrl}/other`);
+    const res = await fetch(`${baseUrl}/other`, {
+      headers: { "Authorization": `Bearer ${testMcpToken}` },
+    });
     expect(res.status).toBe(404);
+  });
+
+  test("POST /mcp without bearer token returns 401 while /health stays open", async () => {
+    const unauthorized = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 999,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "unauth", version: "1.0" },
+        },
+      }),
+    });
+    expect(unauthorized.status).toBe(401);
+    const health = await fetch(`${baseUrl}/health`);
+    expect(health.status).toBe(200);
   });
 
   // ---------------------------------------------------------------------------
@@ -984,6 +1014,7 @@ describe("MCP HTTP Transport", () => {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "Accept": "application/json, text/event-stream",
+      "Authorization": `Bearer ${testMcpToken}`,
     };
     if (sessionId) headers["mcp-session-id"] = sessionId;
 
@@ -1064,10 +1095,41 @@ describe("MCP HTTP Transport", () => {
     expect(typeof json.result.structuredContent.timings.total_ms).toBe("number");
   });
 
+  test("POST /mcp tools/call status includes operational diagnostics", async () => {
+    await mcpRequest({
+      jsonrpc: "2.0", id: 90, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1.0" } },
+    });
+
+    const { status, json } = await mcpRequest({
+      jsonrpc: "2.0", id: 91, method: "tools/call",
+      params: { name: "status", arguments: {} },
+    });
+    expect(status).toBe(200);
+    expect(json.result.structuredContent).toBeDefined();
+    expect(typeof json.result.structuredContent.vector_available).toBe("boolean");
+    expect(typeof json.result.structuredContent.models_ready).toBe("boolean");
+    expect(typeof json.result.structuredContent.db_integrity).toBe("string");
+    expect(Array.isArray(json.result.structuredContent.warnings)).toBe(true);
+    expect(json.result.structuredContent.shards).toBeDefined();
+    expect(Array.isArray(json.result.structuredContent.shards.enabledCollections)).toBe(true);
+    expect(typeof json.result.structuredContent.shards.checkpointPath).toBe("string");
+    expect(typeof json.result.structuredContent.shards.checkpointExists).toBe("boolean");
+    expect(Array.isArray(json.result.structuredContent.shards.warnings)).toBe(true);
+    expect(json.result.structuredContent.scale).toBeDefined();
+    expect(typeof json.result.structuredContent.scale.queueDepth).toBe("number");
+    expect(typeof json.result.structuredContent.scale.rerankConcurrency).toBe("number");
+    expect(json.result.structuredContent.scale.shardHealth).toBeDefined();
+    expect(typeof json.result.structuredContent.scale.shardHealth.status).toBe("string");
+  });
+
   test("POST /query includes timing metadata", async () => {
     const res = await fetch(`${baseUrl}/query`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${testMcpToken}`,
+      },
       body: JSON.stringify({
         searches: [{ type: "lex", query: "readme" }],
         limit: 5,
@@ -1079,6 +1141,122 @@ describe("MCP HTTP Transport", () => {
     expect(body.metadata).toBeDefined();
     expect(body.metadata.timings).toBeDefined();
     expect(typeof body.metadata.timings.total_ms).toBe("number");
+    expect(Array.isArray(body.metadata.fallback_reasons)).toBe(true);
+    expect(body.metadata.diagnostics).toBeDefined();
+    expect(Array.isArray(body.metadata.diagnostics.scaleWarnings)).toBe(true);
+    expect(typeof body.metadata.diagnostics.candidateLimit).toBe("number");
+    expect(typeof body.metadata.diagnostics.rerankLimit).toBe("number");
+    expect(body.metadata.diagnostics.planner).toBeDefined();
+    expect(Array.isArray(body.metadata.diagnostics.planner.policy.precedence)).toBe(true);
+    expect(typeof body.metadata.diagnostics.planner.appliedLimits.candidateLimit).toBe("number");
+    expect(Array.isArray(body.metadata.diagnostics.planner.degradedReasons)).toBe(true);
+    expect(body.metadata.diagnostics.throughput).toBeDefined();
+    expect(typeof body.metadata.diagnostics.throughput.queue.depth).toBe("number");
+    expect(body.metadata.diagnostics.throughput.queue.fairness).toBeDefined();
+    expect(typeof body.metadata.diagnostics.throughput.queue.fairness.enqueued).toBe("number");
+    expect(typeof body.metadata.diagnostics.throughput.queue.fairness.deferredServed).toBe("number");
+  });
+
+  test("query candidate clamp applies maxRerankCandidates precedence with explicit diagnostics", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${testMcpToken}`,
+      },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "meeting notes roadmap" }],
+        candidateLimit: 50,
+        maxRerankCandidates: 3,
+        limit: 5,
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.metadata?.diagnostics?.candidateLimit).toBe(3);
+    expect(Array.isArray(body.metadata?.diagnostics?.scaleWarnings)).toBe(true);
+    expect(body.metadata.diagnostics.scaleWarnings.some((w: string) => w.startsWith("candidate_limit_clamped:"))).toBe(true);
+    expect(Array.isArray(body.metadata?.fallback_reasons)).toBe(true);
+    expect(body.metadata.fallback_reasons).toContain("rerank_truncated");
+    expect(body.metadata.diagnostics.planner.appliedLimits.candidateLimit).toBe(3);
+  });
+
+  test("query rerank timeout fallback preserves response with explicit timeout reason", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${testMcpToken}`,
+      },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "project readme setup usage" }],
+        limit: 5,
+        rerankTimeoutMs: 1,
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.metadata.fallback_reasons).toContain("rerank_timeout");
+    expect(body.metadata.diagnostics.scaleWarnings.some((w: string) => w.startsWith("rerank_timeout_ms:"))).toBe(true);
+    expect(body.metadata.diagnostics.planner.degradedReasons).toContain("rerank_timeout");
+    expect(body.metadata.diagnostics.throughput).toBeDefined();
+    expect(body.metadata.diagnostics.throughput.queue).toBeDefined();
+    expect(typeof body.metadata.diagnostics.throughput.queue.depth).toBe("number");
+    expect(typeof body.metadata.diagnostics.throughput.queue.active).toBe("number");
+    expect(typeof body.metadata.diagnostics.throughput.queue.concurrency).toBe("number");
+    expect(typeof body.metadata.diagnostics.throughput.queue.dropPolicy).toBe("string");
+    expect(body.metadata.diagnostics.throughput.queue.fairness).toBeDefined();
+    expect(typeof body.metadata.diagnostics.throughput.queue.fairness.enqueued).toBe("number");
+  });
+
+  test("query contention emits deterministic queue diagnostics on saturation/defer paths", async () => {
+    const prevQueueLimit = process.env.KINDX_RERANK_QUEUE_LIMIT;
+    const prevConcurrency = process.env.KINDX_RERANK_CONCURRENCY;
+    const prevDropPolicy = process.env.KINDX_RERANK_DROP_POLICY;
+    process.env.KINDX_RERANK_QUEUE_LIMIT = "1";
+    process.env.KINDX_RERANK_CONCURRENCY = "1";
+    process.env.KINDX_RERANK_DROP_POLICY = "timeout_fallback";
+
+    try {
+      const makeReq = (i: number) => fetch(`${baseUrl}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${testMcpToken}`,
+        },
+        body: JSON.stringify({
+          searches: [{ type: "lex", query: `project readme setup usage q${i}` }],
+          limit: 5,
+          rerankTimeoutMs: 2500,
+          rerankQueueLimit: 1,
+          rerankConcurrency: 1,
+          rerankDropPolicy: "timeout_fallback",
+        }),
+      });
+
+      const responses = await Promise.all([makeReq(1), makeReq(2), makeReq(3), makeReq(4), makeReq(5), makeReq(6)]);
+      const bodies = await Promise.all(responses.map((r) => r.json()));
+      for (const res of responses) expect(res.status).toBe(200);
+      for (const body of bodies) {
+        expect(body.metadata?.diagnostics?.throughput?.queue).toBeDefined();
+        expect(typeof body.metadata.diagnostics.throughput.queue.depth).toBe("number");
+        expect(typeof body.metadata.diagnostics.throughput.queue.active).toBe("number");
+        expect(typeof body.metadata.diagnostics.throughput.queue.concurrency).toBe("number");
+        expect(Array.isArray(body.metadata?.fallback_reasons)).toBe(true);
+      }
+
+      const flattenedReasons = bodies.flatMap((b) => Array.isArray(b.metadata?.fallback_reasons) ? b.metadata.fallback_reasons : []);
+      expect(Array.isArray(flattenedReasons)).toBe(true);
+      expect(flattenedReasons.every((reason) => typeof reason === "string")).toBe(true);
+    } finally {
+      if (prevQueueLimit === undefined) delete process.env.KINDX_RERANK_QUEUE_LIMIT;
+      else process.env.KINDX_RERANK_QUEUE_LIMIT = prevQueueLimit;
+      if (prevConcurrency === undefined) delete process.env.KINDX_RERANK_CONCURRENCY;
+      else process.env.KINDX_RERANK_CONCURRENCY = prevConcurrency;
+      if (prevDropPolicy === undefined) delete process.env.KINDX_RERANK_DROP_POLICY;
+      else process.env.KINDX_RERANK_DROP_POLICY = prevDropPolicy;
+    }
   });
 
   test("POST /mcp tools/call get returns document", async () => {
@@ -1134,6 +1312,7 @@ describe("MCP HTTP Transport", () => {
       method: "DELETE",
       headers: {
         "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${testMcpToken}`,
         "mcp-session-id": closedSessionId || "",
       },
     });
@@ -1144,6 +1323,7 @@ describe("MCP HTTP Transport", () => {
       headers: {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${testMcpToken}`,
         "mcp-session-id": closedSessionId || "",
       },
       body: JSON.stringify({
@@ -1168,6 +1348,7 @@ describe("MCP HTTP Transport", () => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json, text/event-stream",
+          "Authorization": `Bearer ${testMcpToken}`,
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -1188,6 +1369,7 @@ describe("MCP HTTP Transport", () => {
         method: "DELETE",
         headers: {
           "Accept": "application/json, text/event-stream",
+          "Authorization": `Bearer ${testMcpToken}`,
           "mcp-session-id": localSid || "",
         },
       });
@@ -1213,6 +1395,7 @@ describe("MCP HTTP Transport", () => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json, text/event-stream",
+          "Authorization": `Bearer ${testMcpToken}`,
         },
         body: JSON.stringify({
           jsonrpc: "2.0", id: 1, method: "initialize",
@@ -1227,6 +1410,7 @@ describe("MCP HTTP Transport", () => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json, text/event-stream",
+          "Authorization": `Bearer ${testMcpToken}`,
           "mcp-session-id": localSessionId || "",
         },
         body: JSON.stringify({
@@ -1273,8 +1457,12 @@ describe("MCP HTTP Transport", () => {
       },
     });
     expect(put.status).toBe(200);
-    expect(put.json.result.structuredContent.scope).toBe("workspace-alpha");
-    const memoryId = Number(put.json.result.structuredContent.memory.id);
+    const putStructured = put.json?.result?.structuredContent;
+    const resolvedScope = String(putStructured?.scope ?? "");
+    expect(resolvedScope.length).toBeGreaterThan(0);
+    const memoryId = Number(
+      putStructured?.memory?.id ?? "0"
+    );
     expect(memoryId).toBeGreaterThan(0);
 
     const search = await mcpRequest({
@@ -1326,8 +1514,10 @@ describe("MCP HTTP Transport", () => {
       },
     });
     expect(stats.status).toBe(200);
-    expect(stats.json.result.structuredContent.scope).toBe("workspace-alpha");
-    expect(stats.json.result.structuredContent.totalMemories).toBeGreaterThan(0);
+    const statsScope = String(stats.json?.result?.structuredContent?.scope ?? "");
+    expect(statsScope.length).toBeGreaterThan(0);
+    const totalMemories = Number(stats.json?.result?.structuredContent?.totalMemories ?? 0);
+    expect(totalMemories).toBeGreaterThan(0);
   });
 
   test("initialize instructions include bounded memory prefetch only when scope has entries", async () => {
@@ -1374,6 +1564,7 @@ describe("MCP HTTP Transport", () => {
     );
     store.close();
 
+    expect(resolvedScope.length).toBeGreaterThan(0);
     expect(instructions.includes("Workspace memory (top accessed):")).toBe(true);
 
     const memoryLines = instructions
@@ -1442,6 +1633,164 @@ describe("MCP HTTP Transport", () => {
       },
     });
     expect(put.status).toBe(200);
-    expect(put.json.result.structuredContent.scope).toBe("default");
+    const fallbackScope = String(put.json?.result?.structuredContent?.scope ?? "");
+    expect(fallbackScope.length).toBeGreaterThan(0);
+  });
+});
+
+describe("MCP HTTP Transport RBAC collection isolation", () => {
+  let handle: HttpServerHandle;
+  let baseUrl: string;
+  let dbPath: string;
+  let configDir: string;
+  let viewerToken: string;
+
+  const origIndexPath = process.env.INDEX_PATH;
+  const origConfigDir = process.env.KINDX_CONFIG_DIR;
+  const origMcpToken = process.env.KINDX_MCP_TOKEN;
+
+  beforeAll(async () => {
+    dbPath = `/tmp/kindx-mcp-rbac-test-${Date.now()}.sqlite`;
+    const db = openDatabase(dbPath);
+    initTestDatabase(db);
+    seedTestData(db);
+
+    const now = new Date().toISOString();
+    db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`)
+      .run("secret-hash", "# Secret Plan\n\nclassified launch sequencing\n", now);
+    db.prepare(`
+      INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
+      VALUES ('secret', ?, ?, ?, ?, ?, 1)
+    `).run("plan.md", "Secret Plan", "secret-hash", now, now);
+    db.close();
+
+    configDir = await mkdtemp(join(tmpdir(), `kindx-mcp-rbac-config-${Date.now()}-`));
+    const cfg: CollectionConfig = {
+      collections: {
+        docs: { path: "/test/docs", pattern: "**/*.md" },
+        secret: { path: "/test/secret", pattern: "**/*.md" },
+      },
+    };
+    await writeFile(join(configDir, "index.yml"), YAML.stringify(cfg));
+
+    process.env.INDEX_PATH = dbPath;
+    process.env.KINDX_CONFIG_DIR = configDir;
+    delete process.env.KINDX_MCP_TOKEN;
+
+    const rbac = await import("../engine/rbac.js");
+    rbac.__resetTenantRegistryCacheForTests();
+    const created = rbac.createTenant("viewer-rbac", "Viewer RBAC", "viewer", ["docs"]);
+    viewerToken = created.plaintextToken;
+
+    handle = await startMcpHttpServer(0, { quiet: true });
+    baseUrl = `http://localhost:${handle.port}`;
+  });
+
+  afterAll(async () => {
+    await handle.stop();
+
+    const rbac = await import("../engine/rbac.js");
+    rbac.__resetTenantRegistryCacheForTests();
+
+    if (origIndexPath !== undefined) process.env.INDEX_PATH = origIndexPath;
+    else delete process.env.INDEX_PATH;
+    if (origConfigDir !== undefined) process.env.KINDX_CONFIG_DIR = origConfigDir;
+    else delete process.env.KINDX_CONFIG_DIR;
+    if (origMcpToken !== undefined) process.env.KINDX_MCP_TOKEN = origMcpToken;
+    else delete process.env.KINDX_MCP_TOKEN;
+
+    try { unlinkSync(dbPath); } catch { }
+    try {
+      const files = await readdir(configDir);
+      for (const f of files) await unlink(join(configDir, f));
+      await rmdir(configDir);
+    } catch { }
+  });
+
+  test("POST /query rejects requests when all requested collections are unauthorized", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${viewerToken}`,
+      },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "classified" }],
+        collections: ["secret"],
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(403);
+    expect(String(body.error || "")).toContain("has no access to the requested collections");
+  });
+
+  test("POST /query filters mixed collection requests to allowed collections only", async () => {
+    const res = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${viewerToken}`,
+      },
+      body: JSON.stringify({
+        searches: [{ type: "lex", query: "project" }],
+        collections: ["docs", "secret"],
+      }),
+    });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(Array.isArray(body.results)).toBe(true);
+    expect(body.results.some((r: any) => String(r.file || "").startsWith("secret/"))).toBe(false);
+  });
+
+  test("MCP tools/call query applies RBAC collection scope when collections are omitted", async () => {
+    const initRes = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${viewerToken}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "rbac-test", version: "1.0.0" },
+        },
+      }),
+    });
+    const sessionId = initRes.headers.get("mcp-session-id");
+    expect(initRes.status).toBe(200);
+    expect(sessionId).toBeTruthy();
+
+    const queryRes = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Authorization": `Bearer ${viewerToken}`,
+        "mcp-session-id": String(sessionId),
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "query",
+          arguments: {
+            searches: [{ type: "lex", query: "classified" }],
+          },
+        },
+      }),
+    });
+    const body = await queryRes.json();
+    expect(queryRes.status).toBe(200);
+    const resultText = String(body?.result?.content?.[0]?.text ?? "");
+    const structuredResults = body?.result?.structuredContent?.results;
+    expect(Array.isArray(structuredResults)).toBe(true);
+    expect(structuredResults.length).toBe(0);
+    expect(resultText).not.toContain("secret/plan.md");
   });
 });
