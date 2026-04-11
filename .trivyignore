@@ -1,0 +1,11 @@
+# KINDX Trivy ignore policy
+#
+# Keep this file tightly scoped:
+# - Only add reviewed false positives.
+# - Prefer adding expiry dates and links to triage notes.
+# - Do not suppress first-party package vulnerabilities.
+#
+# Format examples:
+# CVE-2024-12345
+# CVE-2024-12345 exp:2026-12-31 # false positive in vendored prebuilt binary
+

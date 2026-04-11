@@ -254,7 +254,7 @@ export class RemoteLLM implements LLM {
       let parsed = [];
       try {
         // In case the model wrapped it in markdown codeblocks
-        const cleaned = jsonText.replace(/^[\\s\\S]*?\\[\\s*/, "[").replace(/\\][\\s\\S]*?$/, "]");
+        const cleaned = jsonText.replace(/^[\s\S]*?\[\s*/, "[").replace(/\][\s\S]*?$/, "]");
         parsed = JSON.parse(cleaned);
       } catch (parseErr) {
         try {

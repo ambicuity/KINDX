@@ -5,6 +5,8 @@ import { execSync, spawn as nodeSpawn } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join as pathJoin } from "path";
 import { parseArgs } from "util";
+import { createHash } from "node:crypto";
+import readline from "node:readline";
 import { readFileSync, realpathSync, statSync, existsSync, unlinkSync, writeFileSync, openSync, closeSync, mkdirSync } from "fs";
 import {
   getPwd,
@@ -24,16 +26,12 @@ import {
   isDocid,
   matchFilesByGlob,
   getHashesNeedingEmbedding,
-  getDocumentsForEmbedding,
-  getExistingEmbeddingChunksForHash,
-  updateEmbeddingChunkMetadata,
-  deleteEmbeddingsForHashSeqs,
-  findReusableEmbeddingByChunkHash,
+  getHashesForEmbedding,
   clearAllEmbeddings,
   insertEmbedding,
+  bulkInsertEmbeddings,
   getStatus,
   hashContent,
-  hashChunkContent,
   extractTitle,
   formatDocForEmbedding,
   chunkDocumentByTokens,
@@ -48,6 +46,7 @@ import {
   resolveVirtualPath,
   toVirtualPath,
   insertContent,
+  upsertDocumentIngestion,
   insertDocument,
   findActiveDocument,
   updateDocumentTitle,
@@ -58,13 +57,15 @@ import {
   deleteLLMCache,
   deleteInactiveDocuments,
   cleanupOrphanedVectors,
+  cleanupSqliteSidecars,
   vacuumDatabase,
+  walCheckpointTruncate,
   getCollectionsWithoutContext,
   getTopLevelPathsWithoutContext,
   handelize,
   hybridQuery,
   vectorSearchQuery,
-  structuredSearch,
+  structuredSearchWithDiagnostics,
   addLineNumbers,
   findDocument,
   type ExpandedQuery,
@@ -77,8 +78,8 @@ import {
   createStore,
   getDefaultDbPath,
 } from "./repository.js";
-import { disposeDefaultLLM, getDefaultLLM, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
-import { preloadModels } from "./preloader.js";
+import { ingestFile } from "./ingestion.js";
+import { disposeDefaultLLM, getDefaultLLM, withLLMScope, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "./inference.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -96,6 +97,43 @@ import {
   listAllContexts,
   setConfigIndexName,
 } from "./catalogs.js";
+import {
+  upsertMemory,
+  semanticSearchMemory,
+  textSearchMemory,
+  getMemoryHistory,
+  getMemoryStats,
+  markMemoryAccessed,
+  embedMemories,
+  resolveMemoryScope as resolveMemoryScopeShared,
+  deriveWorkspaceMemoryScope,
+} from "./memory.js";
+import { createBackup, restoreBackup, verifyBackup } from "./backup.js";
+import {
+  buildOperationalStatus,
+  checkDatabaseIntegrity,
+  checkModelReadiness,
+  checkSqliteVecCapability,
+  checkTrustedUpdateCommands,
+  checkWalHealth,
+  getDefaultBackupName,
+} from "./diagnostics.js";
+import { configureLogger } from "./utils/logger.js";
+import { executeEmbedCommand } from "./commands/embed-command.js";
+import { executeQueryCommand } from "./commands/query-command.js";
+import { runSchedulerStatusCommand } from "./commands/scheduler-status-command.js";
+import { runStatusCommand } from "./commands/status-command.js";
+import { runDoctorCommand, runRepairCheckCommand } from "./commands/doctor-command.js";
+import { runBackupCommand as runBackupCmd } from "./commands/backup-command.js";
+import { runInitCommand } from "./commands/init-command.js";
+import { runTenantCommand } from "./commands/tenant-command.js";
+import {
+  getSchedulerCheckpointState,
+  getSchedulerQueueState,
+  getShardHealthSummary,
+  getShardRuntimeStatus,
+  syncCollectionShardsFromMainDb,
+} from "./sharding.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -130,13 +168,17 @@ function getDbPath(): string {
   return store?.dbPath ?? storeDbPathOverride ?? getDefaultDbPath();
 }
 
+function getKindxCacheDir(): string {
+  return process.env.XDG_CACHE_HOME
+    ? resolve(process.env.XDG_CACHE_HOME, "kindx")
+    : resolve(homedir(), ".cache", "kindx");
+}
+
 function setIndexName(name: string | null): void {
   let normalizedName = name;
   // Normalize relative paths to prevent malformed database paths
   if (name && name.includes('/')) {
-    const { resolve } = require('path');
-    const { cwd } = require('process');
-    const absolutePath = resolve(cwd(), name);
+    const absolutePath = resolve(process.cwd(), name);
     // Replace path separators with underscores to create a valid filename
     normalizedName = absolutePath.replace(/\//g, '_').replace(/^_/, '');
   }
@@ -150,52 +192,19 @@ function ensureVecTable(_db: Database, dimensions: number): void {
   getStore().ensureVecTable(dimensions);
 }
 
-// Terminal colors (respects NO_COLOR env)
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
-const c = {
-  reset: useColor ? "\x1b[0m" : "",
-  dim: useColor ? "\x1b[2m" : "",
-  bold: useColor ? "\x1b[1m" : "",
-  cyan: useColor ? "\x1b[36m" : "",
-  yellow: useColor ? "\x1b[33m" : "",
-  green: useColor ? "\x1b[32m" : "",
-  magenta: useColor ? "\x1b[35m" : "",
-  blue: useColor ? "\x1b[34m" : "",
-};
+import {
+  c,
+  cursor,
+  progress,
+  formatETA,
+  formatTimeAgo,
+  formatMs,
+  formatBytes,
+  renderProgressBar,
+} from "./utils/ui.js";
 
-// Terminal cursor control
-const cursor = {
-  hide() { process.stderr.write('\x1b[?25l'); },
-  show() { process.stderr.write('\x1b[?25h'); },
-};
-
-// Ensure cursor is restored on exit
-process.on('SIGINT', () => { cursor.show(); process.exit(130); });
-process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
-
-// Terminal progress bar using OSC 9;4 escape sequence (TTY only)
 const isTTY = process.stderr.isTTY;
-const progress = {
-  set(percent: number) {
-    if (isTTY) process.stderr.write(`\x1b]9;4;1;${Math.round(percent)}\x07`);
-  },
-  clear() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;0\x07`);
-  },
-  indeterminate() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;3\x07`);
-  },
-  error() {
-    if (isTTY) process.stderr.write(`\x1b]9;4;2\x07`);
-  },
-};
-
-// Format seconds into human-readable ETA
-function formatETA(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
+const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
 
 
 // Check index health and print warnings/tips
@@ -255,34 +264,12 @@ function computeDisplayPath(
 }
 
 
-function formatTimeAgo(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
-function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
 
 async function showStatus(): Promise<void> {
   const dbPath = getDbPath();
   const db = getDb();
 
-  // Collections are defined in YAML; no duplicate cleanup needed.
   // Collections are defined in YAML; no duplicate cleanup needed.
 
   // Index size
@@ -299,6 +286,7 @@ async function showStatus(): Promise<void> {
   const totalDocs = db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number };
   const vectorCount = db.prepare(`SELECT COUNT(*) as count FROM content_vectors`).get() as { count: number };
   const needsEmbedding = getHashesNeedingEmbedding(db);
+  const status = getStatus(db);
 
   // Most recent update across all collections
   const mostRecent = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
@@ -308,9 +296,7 @@ async function showStatus(): Promise<void> {
   console.log(`Size:  ${formatBytes(indexSize)}`);
 
   // MCP daemon status (check PID file liveness)
-  const mcpCacheDir = process.env.XDG_CACHE_HOME
-    ? resolve(process.env.XDG_CACHE_HOME, "kindx")
-    : resolve(homedir(), ".cache", "kindx");
+  const mcpCacheDir = getKindxCacheDir();
   const mcpPidPath = resolve(mcpCacheDir, "mcp.pid");
   if (existsSync(mcpPidPath)) {
     const mcpPid = parseInt(readFileSync(mcpPidPath, "utf-8").trim());
@@ -347,12 +333,37 @@ async function showStatus(): Promise<void> {
   console.log(`${c.bold}Documents${c.reset}`);
   console.log(`  Total:    ${totalDocs.count} files indexed`);
   console.log(`  Vectors:  ${vectorCount.count} embedded`);
+  const opsStatus = buildOperationalStatus(db, dbPath, vectorCount.count > 0);
+  console.log(`  Capability: vector=${opsStatus.vector_available ? "available" : "unavailable"}, models=${opsStatus.models_ready ? "ready" : "missing"}, db=${opsStatus.db_integrity}`);
+  const capabilitySummary = Object.entries(status.capabilities || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+  if (capabilitySummary) {
+    console.log(`  Index Caps: ${capabilitySummary}`);
+  }
+  console.log(`  Encryption: ${status.encryption.encrypted ? "encrypted" : "plaintext"} (key=${status.encryption.keyConfigured ? "set" : "unset"})`);
+  console.log(`  ANN:        ${status.ann.mode} (${status.ann.state}) probes=${status.ann.probeCount} shortlist=${status.ann.shortlistLimit}`);
+  if ((status.ingestion?.warnedDocuments ?? 0) > 0) {
+    console.log(`  Ingestion: ${c.yellow}${status.ingestion.warnedDocuments} file(s) with extractor warnings${c.reset}`);
+    const topWarnings = status.ingestion.byWarning.slice(0, 5).map((w) => `${w.warning}:${w.count}`).join(", ");
+    if (topWarnings) {
+      console.log(`  Warning types: ${topWarnings}`);
+    }
+  }
   if (needsEmbedding > 0) {
     console.log(`  ${c.yellow}Pending:  ${needsEmbedding} need embedding${c.reset} (run 'kindx embed')`);
   }
   if (mostRecent.latest) {
     const lastUpdate = new Date(mostRecent.latest);
     console.log(`  Updated:  ${formatTimeAgo(lastUpdate)}`);
+  }
+
+  if (Array.isArray((collections as any)) && (status.shards?.enabledCollections.length ?? 0) > 0) {
+    const shardStatus = status.shards!;
+    const shardHealth = getShardHealthSummary(db, dbPath, 16);
+    console.log(`  Shards:   ${shardStatus.enabledCollections.map((c) => `${c.collection}:${c.shardCount}`).join(", ")}`);
+    console.log(`  Queue:    ${shardStatus.checkpointExists ? "checkpoint present" : "no checkpoint"}`);
+    console.log(`  Health:   ${shardHealth.status}`);
   }
 
   // Get all contexts grouped by collection (from YAML)
@@ -494,10 +505,169 @@ async function showStatus(): Promise<void> {
     }
   }
 
+  if (opsStatus.warnings.length > 0) {
+    console.log(`\n${c.bold}Warnings${c.reset}`);
+    for (const warning of opsStatus.warnings) {
+      console.log(`  ${c.yellow}!${c.reset} ${warning}`);
+    }
+  }
+
   closeDb();
 }
 
-async function updateCollections(collectionFilter?: string | string[]): Promise<void> {
+function runDoctor(output: OutputFormat, paritySampleSize: number = 16): number {
+  const db = getDb();
+  const dbPath = getDbPath();
+
+  const vec = checkSqliteVecCapability(db);
+  const models = checkModelReadiness();
+  const integrity = checkDatabaseIntegrity(db);
+  const wal = checkWalHealth(db);
+  const trust = checkTrustedUpdateCommands(dbPath);
+  const shardHealth = getShardHealthSummary(db, dbPath, Math.max(1, paritySampleSize));
+  const status = getStatus(db);
+
+  const checks = [
+    { id: "sqlite_vec", ok: vec.available, detail: vec.detail },
+    { id: "models", ok: models.ready, detail: models.ready ? "all default models present in cache" : `missing: ${models.missing.join(", ")}` },
+    { id: "db_integrity", ok: integrity.ok, detail: integrity.result },
+    { id: "wal_mode", ok: wal.walHealthy, detail: wal.journalMode },
+    {
+      id: "trusted_update_cmds",
+      ok: trust.untrustedCollections.length === 0,
+      detail: trust.untrustedCollections.length > 0
+        ? `untrusted collections: ${trust.untrustedCollections.join(", ")}`
+        : `${trust.trustedCommands}/${trust.configuredCommands} trusted`,
+    },
+    {
+      id: "shard_health",
+      ok: shardHealth.status !== "error",
+      detail: `status=${shardHealth.status} warnings=${shardHealth.warnings.length} parity_sample=${Math.max(1, paritySampleSize)} families=${Object.entries(shardHealth.families).map(([k, v]) => `${k}:${v.count}/${v.severity}`).join(",")}`,
+    },
+    {
+      id: "index_capabilities",
+      ok: Boolean(status.capabilities?.ann) && Boolean(status.capabilities?.extractors),
+      detail: Object.entries(status.capabilities || {}).map(([k, v]) => `${k}=${v}`).join(", "),
+    },
+    {
+      id: "ann_health",
+      ok: status.ann.state === "ready",
+      detail: `mode=${status.ann.mode} state=${status.ann.state} probes=${status.ann.probeCount} shortlist=${status.ann.shortlistLimit}`,
+    },
+    {
+      id: "encryption_state",
+      ok: !status.encryption.keyConfigured || status.encryption.encrypted,
+      detail: `encrypted=${status.encryption.encrypted} keyConfigured=${status.encryption.keyConfigured}`,
+    },
+    {
+      id: "ingestion_health",
+      ok: (status.ingestion?.warnedDocuments ?? 0) === 0,
+      detail: `${status.ingestion?.warnedDocuments ?? 0} documents with extractor warnings; types=${status.ingestion?.byWarning?.length ?? 0}`,
+    },
+    {
+      id: "metrics_surface",
+      ok: true,
+      detail: "HTTP daemon exposes /metrics in Prometheus format",
+    },
+  ];
+  const failed = checks.filter((check) => !check.ok);
+
+  if (output === "json") {
+    console.log(JSON.stringify({
+      status: failed.length === 0 ? "ok" : "failed",
+      checks,
+    }, null, 2));
+  } else {
+    console.log(`${c.bold}KINDX Doctor${c.reset}`);
+    for (const check of checks) {
+      const icon = check.ok ? `${c.green}✓${c.reset}` : `${c.yellow}!${c.reset}`;
+      console.log(`  ${icon} ${check.id}: ${check.detail}`);
+    }
+    if (failed.length === 0) {
+      console.log(`\n${c.green}All health checks passed.${c.reset}`);
+    } else {
+      console.log(`\n${c.yellow}${failed.length} check(s) need attention.${c.reset}`);
+    }
+  }
+
+  closeDb();
+  return failed.length === 0 ? 0 : 2;
+}
+
+function runRepairCheckOnly(output: OutputFormat): number {
+  const code = runDoctor(output);
+  if (output !== "json") {
+    if (code === 0) {
+      console.log(`${c.green}Repair check: no action required.${c.reset}`);
+    } else {
+      console.log(`${c.yellow}Repair check: run 'kindx cleanup' or 'kindx embed' depending on failed checks.${c.reset}`);
+    }
+  }
+  return code;
+}
+
+function runBackupCommand(args: string[], values: Record<string, unknown>, output: OutputFormat): number {
+  const sub = args[0];
+  const dbPath = getDbPath();
+
+  if (sub === "create") {
+    const requested = typeof values.path === "string" ? values.path : args[1];
+    const backupPath = requested || resolve(dirname(dbPath), getDefaultBackupName(dbPath));
+    const result = createBackup(dbPath, backupPath);
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`${c.green}✓${c.reset} Backup created: ${result.backupPath}`);
+      console.log(`  Size: ${formatBytes(result.bytes)}`);
+      console.log(`  WAL checkpoint: ${result.checkpointed ? "yes" : "no"}`);
+      console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}`);
+    }
+    return 0;
+  }
+
+  if (sub === "verify") {
+    const pathArg = typeof values.path === "string" ? values.path : args[1];
+    if (!pathArg) {
+      console.error("Usage: kindx backup verify <backup-file>");
+      return 1;
+    }
+    const result = verifyBackup(pathArg);
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.integrity === "ok") {
+      console.log(`${c.green}✓${c.reset} Backup verified: ${result.backupPath}`);
+      console.log(`  Size: ${formatBytes(result.bytes)}`);
+      console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}${result.keyRequired ? " (key required)" : ""}`);
+    } else {
+      console.error(`${c.yellow}!${c.reset} Backup verify failed: ${result.detail}`);
+    }
+    return result.integrity === "ok" ? 0 : 2;
+  }
+
+  if (sub === "restore") {
+    const pathArg = typeof values.path === "string" ? values.path : args[1];
+    if (!pathArg) {
+      console.error("Usage: kindx backup restore <backup-file> [--force]");
+      return 1;
+    }
+    const force = values.force === true || values.force === "true";
+    const result = restoreBackup(pathArg, dbPath, Boolean(force));
+    if (output === "json") {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`${c.green}✓${c.reset} Restored backup to ${result.restoredTo}`);
+    }
+    return 0;
+  }
+
+  console.error("Usage: kindx backup <create|verify|restore> [path] [--force]");
+  return 1;
+}
+
+async function updateCollections(
+  collectionFilter?: string | string[],
+  options: { pull?: boolean } = {}
+): Promise<void> {
   const db = getDb();
   // Collections are defined in YAML; no duplicate cleanup needed.
 
@@ -512,15 +682,14 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
     return;
   }
 
-  // Filter to specific collections if --collection flags were provided
-  const requestedCollections = Array.isArray(collectionFilter)
-    ? collectionFilter
-    : collectionFilter ? [collectionFilter] : [];
-  if (requestedCollections.length > 0) {
-    const requestedSet = new Set(requestedCollections);
-    collections = collections.filter(col => requestedSet.has(col.name));
+  // Filter to a single collection if --collection flag was provided
+  if (collectionFilter) {
+    const filterName = Array.isArray(collectionFilter)
+      ? collectionFilter[0]
+      : collectionFilter;
+    collections = collections.filter(col => col.name === filterName);
     if (collections.length === 0) {
-      console.error(`${c.yellow}Collection not found: ${requestedCollections.join(", ")}${c.reset}`);
+      console.error(`${c.yellow}Collection not found: ${filterName}${c.reset}`);
       console.error(`Run 'kindx collection list' to see available collections.`);
       closeDb();
       process.exit(1);
@@ -535,10 +704,99 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
     if (!col) continue;
     console.log(`${c.cyan}[${i + 1}/${collections.length}]${c.reset} ${c.bold}${col.name}${c.reset} ${c.dim}(${col.glob_pattern})${c.reset}`);
 
+    if (options.pull) {
+      const pullResult = await new Promise<{ isGitRepo: boolean; output: string; error: string; code: number }>((resolve) => {
+        const proc = nodeSpawn("git", ["pull", "--ff-only"], {
+          cwd: col.pwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let out = "";
+        let err = "";
+        proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+        proc.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+        proc.on("close", (code) => {
+          const notRepo = /not a git repository|fatal: no upstream configured/i.test(err);
+          resolve({
+            isGitRepo: !notRepo,
+            output: out,
+            error: err,
+            code: code ?? 1,
+          });
+        });
+        proc.on("error", () => resolve({ isGitRepo: false, output: "", error: "", code: 1 }));
+      });
+
+      if (pullResult.isGitRepo) {
+        console.log(`${c.dim}    --pull: git pull --ff-only${c.reset}`);
+        if (pullResult.output.trim()) process.stdout.write(pullResult.output);
+        if (pullResult.error.trim()) process.stderr.write(pullResult.error);
+        if (pullResult.code !== 0) {
+          console.error(`${c.yellow}    ! --pull failed (exit ${pullResult.code}); continuing with local files.${c.reset}`);
+        }
+      } else {
+        console.log(`${c.dim}    --pull skipped (not a git repository).${c.reset}`);
+      }
+    }
+
     // Execute custom update command if specified in YAML
     const yamlCol = getCollectionFromYaml(col.name);
     if (yamlCol?.update) {
-      console.log(`${c.dim}    Running update command: ${yamlCol.update}${c.reset}`);
+      console.log(`${c.dim}    Update command found: ${yamlCol.update}${c.reset}`);
+      
+      // P0-3: Trust gate for arbitrary shell execution
+      const isAutoTrusted = process.env.KINDX_TRUST_UPDATE_CMDS === "1" || process.env.KINDX_TRUST_UPDATE_CMDS === "true";
+      const trustFile = pathJoin(dirname(getDbPath()), "trusted-commands.json");
+      const cmdHash = createHash("sha256").update(`${col.name}|${col.pwd}|${yamlCol.update}`).digest("hex");
+      
+      let isTrusted = isAutoTrusted;
+      let trustedHashes: string[] = [];
+      
+      if (!isTrusted) {
+        try {
+          if (existsSync(trustFile)) {
+            trustedHashes = JSON.parse(readFileSync(trustFile, "utf-8"));
+            isTrusted = trustedHashes.includes(cmdHash);
+          }
+        } catch {
+          // File missing or malformed, will prompt
+        }
+      }
+
+      if (!isTrusted) {
+        if (!process.stdin.isTTY) {
+          console.error(`${c.yellow}✗ Cannot prompt in non-TTY environment. Set KINDX_TRUST_UPDATE_CMDS=1 to allow this command.${c.reset}`);
+          process.exit(1);
+        }
+
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
+        });
+
+        console.log(`\n${c.yellow}⚠️  Security Warning: Collection '${col.name}' has configured a shell command to run before indexing:${c.reset}`);
+        console.log(`\n  $ ${yamlCol.update}\n`);
+        console.log(`  Directory: ${col.pwd}`);
+
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(`Allow executing this command? [y/N]: `, resolve);
+        });
+        rl.close();
+
+        if (answer.trim().toLowerCase() !== "y") {
+          console.log(`${c.yellow}✗ Command execution cancelled.${c.reset}`);
+          process.exit(1);
+        }
+
+        trustedHashes.push(cmdHash);
+        try {
+          writeFileSync(trustFile, JSON.stringify(trustedHashes), "utf-8");
+          console.log(`${c.green}✓ Command trusted for future runs.${c.reset}`);
+        } catch (err) {
+          console.error(`Failed to save trust marker: ${err}`);
+        }
+      }
+
+      console.log(`${c.dim}    Executing...${c.reset}`);
       try {
         const proc = nodeSpawn("bash", ["-c", yamlCol.update], {
           cwd: col.pwd,
@@ -583,6 +841,99 @@ async function updateCollections(collectionFilter?: string | string[]): Promise<
   console.log(`${c.green}✓ All collections updated.${c.reset}`);
   if (needsEmbedding > 0) {
     console.log(`\nRun 'kindx embed' to update embeddings (${needsEmbedding} unique hashes need vectors)`);
+  }
+}
+
+function resolveInputPath(pathArg?: string): string {
+  if (!pathArg || pathArg === ".") {
+    return getPwd();
+  }
+  if (pathArg.startsWith("~/")) {
+    return resolve(homedir(), pathArg.slice(2));
+  }
+  if (pathArg.startsWith("/")) {
+    return getRealPath(pathArg);
+  }
+  return getRealPath(resolve(getPwd(), pathArg));
+}
+
+async function ensureArchCollectionIndexed(docsDir: string, collectionName: string): Promise<void> {
+  const { addCollection, updateCollectionSettings } = await import("./catalogs.js");
+  const existing = getCollectionFromYaml(collectionName);
+  if (!existing) {
+    addCollection(collectionName, docsDir, "**/*.md");
+    updateCollectionSettings(collectionName, { includeByDefault: false });
+  } else if (existing.path !== docsDir) {
+    throw new Error(
+      `Arch collection '${collectionName}' points to ${existing.path}, expected ${docsDir}. ` +
+      `Either remove/rename the existing collection or set KINDX_ARCH_COLLECTION.`
+    );
+  }
+  await indexFiles(docsDir, "**/*.md", collectionName, true);
+}
+
+async function runArchBuildOrRefresh(pathArg: string | undefined, importArtifacts: boolean): Promise<void> {
+  const sourceRoot = resolveInputPath(pathArg);
+  const { getArchConfig, buildAndDistillArch } = await import("./integrations/arch/adapter.js");
+  const config = getArchConfig();
+  if (!config.enabled) {
+    throw new Error("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
+  }
+
+  const result = await buildAndDistillArch(sourceRoot, config);
+  console.log(`${c.green}✓${c.reset} Arch sidecar build complete`);
+  console.log(`  Source: ${sourceRoot}`);
+  console.log(`  Nodes: ${result.artifact.nodeCount}, edges: ${result.artifact.edgeCount}, communities: ${result.artifact.communityCount}`);
+  console.log(`  Distilled docs: ${result.paths.docsDir}`);
+  console.log(`  Manifest: ${result.paths.manifestPath}`);
+
+  if (importArtifacts) {
+    await ensureArchCollectionIndexed(result.paths.docsDir, config.collectionName);
+    console.log(`${c.green}✓${c.reset} Imported Arch artifacts into collection '${config.collectionName}'`);
+  }
+}
+
+async function runArchImport(pathArg?: string): Promise<void> {
+  const sourceRoot = resolveInputPath(pathArg);
+  const { getArchConfig } = await import("./integrations/arch/adapter.js");
+  const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
+  const config = getArchConfig();
+  if (!config.enabled) {
+    throw new Error("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
+  }
+  const paths = resolveArchPaths(config.artifactDir, sourceRoot);
+  const manifest = readDistilledManifest(paths.manifestPath);
+  if (!manifest) {
+    throw new Error(`No distilled Arch manifest found at ${paths.manifestPath}. Run 'kindx arch build' first.`);
+  }
+  await ensureArchCollectionIndexed(paths.docsDir, config.collectionName);
+  console.log(`${c.green}✓${c.reset} Imported existing Arch artifacts into collection '${config.collectionName}'`);
+}
+
+async function showArchStatus(pathArg?: string): Promise<void> {
+  const sourceRoot = resolveInputPath(pathArg);
+  const { getArchConfig, getArchStatus } = await import("./integrations/arch/adapter.js");
+  const config = getArchConfig();
+  const status = getArchStatus(config, sourceRoot);
+  console.log(`${c.bold}Arch Integration${c.reset}`);
+  console.log(`  Enabled: ${status.enabled ? "yes" : "no"}`);
+  console.log(`  Augment: ${status.augmentEnabled ? "yes" : "no"}`);
+  console.log(`  Repo: ${config.repoPath}`);
+  if (!status.repoCheck.ok) {
+    console.log(`  Repo check: ${c.yellow}${status.repoCheck.reason}${c.reset}`);
+  } else {
+    console.log(`  Repo check: ${c.green}ok${c.reset}`);
+  }
+  console.log(`  Source root: ${sourceRoot}`);
+  console.log(`  Sidecar output: ${status.paths.sidecarOutputDir}`);
+  console.log(`  Distilled docs: ${status.paths.docsDir}`);
+  console.log(`  Collection: ${config.collectionName}`);
+  if (status.manifest) {
+    console.log(`  Manifest: ${status.paths.manifestPath}`);
+    console.log(`  Generated: ${status.manifest.generatedAt}`);
+    console.log(`  Nodes/Edges/Communities: ${status.manifest.nodeCount}/${status.manifest.edgeCount}/${status.manifest.communityCount}`);
+  } else {
+    console.log(`  Manifest: ${c.dim}not found${c.reset}`);
   }
 }
 
@@ -1327,6 +1678,17 @@ async function collectionAdd(pwd: string, globPattern: string, name?: string): P
     collName = parts[parts.length - 1] || 'root';
   }
 
+  // Validate that the path exists and is a directory
+  if (!existsSync(pwd)) {
+    console.error(`Error: Directory does not exist: ${pwd}`);
+    process.exit(1);
+  }
+  const dirStat = statSync(pwd);
+  if (!dirStat.isDirectory()) {
+    console.error(`Error: Path is not a directory: ${pwd}`);
+    process.exit(1);
+  }
+
   // Check if collection with this name already exists in YAML
   const existing = getCollectionFromYaml(collName);
   if (existing) {
@@ -1455,8 +1817,15 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     seenPaths.add(path);
 
     let content: string;
+    let ingestWarnings: string[] = [];
+    let ingestFormat = "unknown";
+    let ingestExtractor = "unknown";
     try {
-      content = readFileSync(filepath, "utf-8");
+      const ingested = ingestFile(filepath);
+      content = ingested.text;
+      ingestWarnings = ingested.warnings;
+      ingestFormat = ingested.metadata.format;
+      ingestExtractor = ingested.metadata.extractor;
     } catch (err: any) {
       // Skip files that can't be read (e.g. iCloud evicted files returning EAGAIN)
       processed++;
@@ -1493,6 +1862,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
           stat ? new Date(stat.mtime).toISOString() : now);
         updated++;
       }
+      upsertDocumentIngestion(db, collectionName, path, {
+        format: ingestFormat,
+        extractor: ingestExtractor,
+        warnings: ingestWarnings,
+        contentHash: hash,
+        extractedAt: now,
+      });
     } else {
       // New document - insert content and document
       indexed++;
@@ -1501,6 +1877,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
       insertDocument(db, collectionName, path, title, hash,
         stat ? new Date(stat.birthtime).toISOString() : now,
         stat ? new Date(stat.mtime).toISOString() : now);
+      upsertDocumentIngestion(db, collectionName, path, {
+        format: ingestFormat,
+        extractor: ingestExtractor,
+        warnings: ingestWarnings,
+        contentHash: hash,
+        extractedAt: now,
+      });
     }
 
     processed++;
@@ -1541,24 +1924,9 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   closeDb();
 }
 
-function renderProgressBar(percent: number, width: number = 30): string {
-  const filled = Math.round((percent / 100) * width);
-  const empty = width - filled;
-  const bar = "█".repeat(filled) + "░".repeat(empty);
-  return bar;
-}
 
-function isVecTableCompatible(db: Database, dimensions: number): boolean {
-  const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql?: string } | undefined;
-  if (!tableInfo?.sql) return false;
-  const match = tableInfo.sql.match(/float\[(\d+)\]/);
-  const hasHashSeq = tableInfo.sql.includes("hash_seq");
-  const hasCosine = tableInfo.sql.includes("distance_metric=cosine");
-  const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
-  return existingDims === dimensions && hasHashSeq && hasCosine;
-}
 
-async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false): Promise<void> {
+async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false, resume: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
 
@@ -1568,243 +1936,198 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     clearAllEmbeddings(db);
   }
 
-  const docsForEmbedding = getDocumentsForEmbedding(db);
-  if (docsForEmbedding.length === 0) {
-    console.log(`${c.green}✓ No active documents to embed.${c.reset}`);
+  // Find unique hashes that need embedding (from active documents)
+  const hashesToEmbed = getHashesForEmbedding(db);
+
+  if (hashesToEmbed.length === 0) {
+    console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
     closeDb();
     return;
   }
 
-  type ChunkCandidate = {
-    hash: string;
-    title: string;
-    text: string;
-    embeddingInput: string;
-    seq: number;
-    pos: number;
-    tokens: number;
-    bytes: number;
-    displayName: string;
-    chunkHash: string;
-  };
-
-  const encoder = new TextEncoder();
-  const allChunks: ChunkCandidate[] = [];
-  const changedChunks: ChunkCandidate[] = [];
-  let totalChunks = 0;
+  // Prepare documents with chunks
+  type ChunkItem = { hash: string; title: string; text: string; seq: number; pos: number; tokens: number; bytes: number; displayName: string };
+  const allChunks: ChunkItem[] = [];
   let multiChunkDocs = 0;
-  let staleDeleted = 0;
 
-  process.stderr.write(`Chunking ${docsForEmbedding.length} documents by token count...\n`);
-
-  for (const item of docsForEmbedding) {
+  // Chunk all documents using actual token counts
+  process.stderr.write(`Chunking ${hashesToEmbed.length} documents by token count...\n`);
+  for (const item of hashesToEmbed) {
+    const encoder = new TextEncoder();
     const bodyBytes = encoder.encode(item.body).length;
-    if (bodyBytes === 0) continue;
+    if (bodyBytes === 0) continue; // Skip empty
 
-    const title = item.title || extractTitle(item.body, item.path);
-    const chunks = await chunkDocumentByTokens(item.body);
-    const existing = getExistingEmbeddingChunksForHash(db, item.hash);
-    const existingBySeq = new Map(existing.map((row) => [row.seq, row]));
-    const keepSeqs = new Set<number>();
+    const title = extractTitle(item.body, item.path);
+    const displayName = item.path;
+    const chunks = await chunkDocumentByTokens(item.body);  // Uses actual tokenizer
+
     if (chunks.length > 1) multiChunkDocs++;
 
     for (let seq = 0; seq < chunks.length; seq++) {
-      const chunk = chunks[seq]!;
-      keepSeqs.add(seq);
-      totalChunks++;
-      const embeddingInput = formatDocForEmbedding(chunk.text, title, model);
-      const chunkHash = hashChunkContent(embeddingInput);
-      const candidate: ChunkCandidate = {
+      allChunks.push({
         hash: item.hash,
         title,
-        text: chunk.text,
-        embeddingInput,
+        text: chunks[seq]!.text, // Chunk is guaranteed to exist by seq loop
         seq,
-        pos: chunk.pos,
-        tokens: chunk.tokens,
-        bytes: encoder.encode(embeddingInput).length,
-        displayName: item.path,
-        chunkHash,
-      };
-      allChunks.push(candidate);
-      const existingChunk = existingBySeq.get(seq);
-
-      if (existingChunk && existingChunk.model === model && existingChunk.chunkHash === chunkHash) {
-        if (existingChunk.pos !== chunk.pos) {
-          updateEmbeddingChunkMetadata(db, item.hash, seq, chunk.pos, chunkHash);
-        }
-        continue;
-      }
-
-      changedChunks.push(candidate);
-    }
-
-    const staleSeqs = existing
-      .map((row) => row.seq)
-      .filter((seq) => !keepSeqs.has(seq));
-    if (staleSeqs.length > 0) {
-      staleDeleted += deleteEmbeddingsForHashSeqs(db, item.hash, staleSeqs);
+        pos: chunks[seq]!.pos,
+        tokens: chunks[seq]!.tokens,
+        bytes: encoder.encode(chunks[seq]!.text).length,
+        displayName,
+      });
     }
   }
 
-  let changedChunkCount = changedChunks.length;
-  if (changedChunkCount === 0) {
-    if (staleDeleted > 0) {
-      console.log(`${c.green}✓ No changed chunks. Removed ${staleDeleted} stale chunk embeddings.${c.reset}`);
-    } else {
-      console.log(`${c.green}✓ No changed chunks. 0/${totalChunks} need embedding.${c.reset}`);
-    }
+  if (allChunks.length === 0) {
+    console.log(`${c.green}✓ No non-empty documents to embed.${c.reset}`);
     closeDb();
     return;
   }
 
-  let vectorTableReset = false;
-  const firstChangedChunk = changedChunks[0];
-  if (firstChangedChunk) {
-    await withLLMSession(async (session) => {
-      const probeResult = await session.embed(firstChangedChunk.embeddingInput, { model, isQuery: false });
-      if (!probeResult) {
-        throw new Error("Failed to determine embedding dimensions");
-      }
-      const wasCompatible = isVecTableCompatible(db, probeResult.embedding.length);
-      ensureVecTable(db, probeResult.embedding.length);
-      if (!wasCompatible) {
-        clearAllEmbeddings(db);
-        vectorTableReset = true;
-      }
-    }, { maxDuration: 2 * 60 * 1000, name: "embed-dimension-probe" });
-  }
+  const totalBytes = allChunks.reduce((sum, chk) => sum + chk.bytes, 0);
+  const totalChunks = allChunks.length;
+  const totalDocs = hashesToEmbed.length;
 
-  if (vectorTableReset) {
-    changedChunks.splice(0, changedChunks.length, ...allChunks);
-    changedChunkCount = changedChunks.length;
-    staleDeleted = 0;
-  }
-
-  const totalChangedBytes = changedChunks.reduce((sum, chunk) => sum + chunk.bytes, 0);
-  const totalDocs = docsForEmbedding.length;
-  const modeLabel = vectorTableReset ? "Embedding full rebuild" : "Embedding delta";
-  console.log(`${c.bold}${modeLabel} for ${totalDocs} documents${c.reset} ${c.dim}(${changedChunkCount} changed / ${totalChunks} total chunks, ${formatBytes(totalChangedBytes)})${c.reset}`);
+  console.log(`${c.bold}Embedding ${totalDocs} documents${c.reset} ${c.dim}(${totalChunks} chunks, ${formatBytes(totalBytes)})${c.reset}`);
   if (multiChunkDocs > 0) {
     console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
   }
-  if (vectorTableReset) {
-    console.log(`${c.dim}Vector table was reset due to schema/dimension mismatch; re-embedding all chunks.${c.reset}`);
-  }
   console.log(`${c.dim}Model: ${model}${c.reset}\n`);
-
-  let chunksReused = 0;
-  let errors = 0;
-  let bytesProcessed = 0;
-  const chunksToEmbed: ChunkCandidate[] = [];
-
-  for (const chunk of changedChunks) {
-    if (!vectorTableReset) {
-      const reusable = findReusableEmbeddingByChunkHash(db, chunk.chunkHash, model);
-      if (reusable?.embedding) {
-        const source = reusable.embedding;
-        const view = new Float32Array(source.buffer, source.byteOffset, Math.floor(source.byteLength / Float32Array.BYTES_PER_ELEMENT));
-        const copied = new Float32Array(view);
-        insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, copied, model, now, chunk.chunkHash);
-        chunksReused++;
-        bytesProcessed += chunk.bytes;
-        continue;
-      }
-    }
-    chunksToEmbed.push(chunk);
-  }
 
   // Hide cursor during embedding
   cursor.hide();
 
-  if (chunksToEmbed.length > 0) {
-    await withLLMSession(async (session) => {
-      progress.indeterminate();
-      const firstChunk = chunksToEmbed[0];
-      if (!firstChunk) {
-        throw new Error("No chunks available to embed");
-      }
-      const firstResult = await session.embed(firstChunk.embeddingInput, { model, isQuery: false });
-      if (!firstResult) {
-        throw new Error("Failed to get embedding dimensions from first chunk");
-      }
-      ensureVecTable(db, firstResult.embedding.length);
+  // Wrap all LLM embedding operations in a session for lifecycle management
+  // Use 30 minute timeout for large collections
+  await withLLMSession(async (session) => {
+    // Get embedding dimensions from first chunk
+    progress.indeterminate();
+    const firstChunk = allChunks[0];
+    if (!firstChunk) {
+      throw new Error("No chunks available to embed");
+    }
+    const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
+    const firstResult = await session.embed(firstText);
+    if (!firstResult) {
+      throw new Error(`Failed to embed first chunk. The embedding model may not be available or failed to load.\n  Model: ${model}\n  Check the model exists and you have network access for the initial download.`);
+    }
+    ensureVecTable(db, firstResult.embedding.length);
 
-      const startTime = Date.now();
-      const BATCH_SIZE = 32;
-      let chunksEmbedded = 0;
+    let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
+    const startTime = Date.now();
 
-      for (let batchStart = 0; batchStart < chunksToEmbed.length; batchStart += BATCH_SIZE) {
-        const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksToEmbed.length);
-        const batch = chunksToEmbed.slice(batchStart, batchEnd);
-        const texts = batch.map((chunk) => chunk.embeddingInput);
+    // Batch embedding for better throughput
+    // Process in batches of 32 to balance memory usage and efficiency
+    const BATCH_SIZE = 32;
 
-        try {
-          const embeddings = await session.embedBatch(texts);
-          for (let i = 0; i < batch.length; i++) {
-            const chunk = batch[i]!;
-            const embedding = embeddings[i];
-            if (embedding) {
-              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now, chunk.chunkHash);
+    for (let batchStart = 0; batchStart < allChunks.length; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, allChunks.length);
+      const batch = allChunks.slice(batchStart, batchEnd);
+
+      // Format texts for embedding
+      const texts = batch.map(chunk => formatDocForEmbedding(chunk.text, chunk.title));
+
+      try {
+        // Batch embed all texts at once
+        const embeddings = await session.embedBatch(texts);
+
+        // Collect successful embeddings and insert them in a single transaction.
+        // This amortises the WAL flush cost across the entire batch (32 chunks
+        // by default), giving a 10-50× throughput improvement over per-row commits.
+        const toInsert: {
+          hash: string; seq: number; pos: number;
+          embedding: Float32Array; model: string; embeddedAt: string;
+        }[] = [];
+
+        for (let i = 0; i < batch.length; i++) {
+          const chunk = batch[i]!;
+          const embedding = embeddings[i];
+
+          if (embedding) {
+            toInsert.push({
+              hash: chunk.hash,
+              seq: chunk.seq,
+              pos: chunk.pos,
+              embedding: new Float32Array(embedding.embedding),
+              model,
+              embeddedAt: now,
+            });
+            chunksEmbedded++;
+          } else {
+            errors++;
+            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
+          }
+          bytesProcessed += chunk.bytes;
+        }
+
+        // Commit all successful embeddings atomically
+        bulkInsertEmbeddings(db, toInsert);
+      } catch (err) {
+        // If batch fails, try individual embeddings as fallback
+        for (const chunk of batch) {
+          try {
+            const text = formatDocForEmbedding(chunk.text, chunk.title);
+            const result = await session.embed(text);
+            if (result) {
+              insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
               chunksEmbedded++;
             } else {
               errors++;
-              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
             }
-            bytesProcessed += chunk.bytes;
+          } catch (innerErr) {
+            errors++;
+            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
           }
-        } catch (err) {
-          for (const chunk of batch) {
-            try {
-              const result = await session.embed(chunk.embeddingInput, { model, isQuery: false });
-              if (result) {
-                insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now, chunk.chunkHash);
-                chunksEmbedded++;
-              } else {
-                errors++;
-              }
-            } catch (innerErr) {
-              errors++;
-              console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
-            }
-            bytesProcessed += chunk.bytes;
-          }
+          bytesProcessed += chunk.bytes;
         }
-
-        const percent = totalChangedBytes > 0 ? (bytesProcessed / totalChangedBytes) * 100 : 100;
-        progress.set(percent);
-        const elapsed = (Date.now() - startTime) / 1000;
-        const bytesPerSec = bytesProcessed / Math.max(elapsed, 0.001);
-        const remainingBytes = Math.max(0, totalChangedBytes - bytesProcessed);
-        const etaSec = remainingBytes / Math.max(bytesPerSec, 1);
-        const bar = renderProgressBar(percent);
-        const percentStr = percent.toFixed(0).padStart(3);
-        const throughput = `${formatBytes(bytesPerSec)}/s`;
-        const eta = elapsed > 2 ? formatETA(etaSec) : "...";
-        const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
-        if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${bytesProcessed > 0 ? Math.min(chunksEmbedded + chunksReused, changedChunkCount) : chunksReused}/${changedChunkCount}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
       }
 
-      progress.clear();
-      cursor.show();
-      const totalTimeSec = (Date.now() - startTime) / 1000;
-      const avgThroughput = formatBytes(totalChangedBytes / Math.max(totalTimeSec, 0.001));
-      console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-      console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksEmbedded}${c.reset} embedded, ${c.bold}${chunksReused}${c.reset} reused) out of ${c.bold}${totalChunks}${c.reset} total in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
-      if (staleDeleted > 0) {
-        console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
-      }
-      if (errors > 0) {
-        console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
-      }
-    }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
-  } else {
+      const percent = (bytesProcessed / totalBytes) * 100;
+      progress.set(percent);
+
+      const elapsed = (Date.now() - startTime) / 1000;
+      const bytesPerSec = bytesProcessed / elapsed;
+      const remainingBytes = totalBytes - bytesProcessed;
+      const etaSec = remainingBytes / bytesPerSec;
+
+      const bar = renderProgressBar(percent);
+      const percentStr = percent.toFixed(0).padStart(3);
+      const throughput = `${formatBytes(bytesPerSec)}/s`;
+      const eta = elapsed > 2 ? formatETA(etaSec) : "...";
+      const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
+
+      if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
+    }
+
     progress.clear();
     cursor.show();
+    const totalTimeSec = (Date.now() - startTime) / 1000;
+    const avgThroughput = formatBytes(totalBytes / totalTimeSec);
+
     console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-    console.log(`\n${c.green}✓ Done!${c.reset} Processed ${c.bold}${changedChunkCount}${c.reset} changed chunks (${c.bold}${chunksReused}${c.reset} reused, ${c.bold}0${c.reset} embedded) out of ${c.bold}${totalChunks}${c.reset} total.`);
-    if (staleDeleted > 0) {
-      console.log(`${c.dim}Removed ${staleDeleted} stale chunk embeddings${c.reset}`);
+    console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    if (errors > 0) {
+      console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
+    }
+  }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
+
+  // Phase 2: optional per-collection shard sync with resumable checkpointing.
+  const shardStatus = getShardRuntimeStatus(getDbPath());
+  if (shardStatus.enabledCollections.length > 0) {
+    console.log(`\n${c.bold}Shard Sync${c.reset}`);
+    const shardResult = await syncCollectionShardsFromMainDb(db, getDbPath(), {
+      resume,
+      onProgress: ({ collection, processed, total }) => {
+        if (processed % 250 === 0 || processed === total) {
+          process.stderr.write(`\r${c.dim}Syncing shards ${collection}: ${processed}/${total}${c.reset}   `);
+        }
+      },
+    });
+    process.stderr.write(`\n`);
+    for (const item of shardResult.collections) {
+      console.log(`  ${c.green}✓${c.reset} ${item.collection}: ${item.processed}/${item.total} vectors synced across ${item.shardCount} shards`);
+    }
+    if (shardResult.collections.length > 0) {
+      console.log(`  Checkpoint: ${shardResult.checkpointPath}`);
     }
   }
 
@@ -1865,6 +2188,14 @@ type OutputOptions = {
   explain?: boolean;     // Include retrieval score traces (query only)
   context?: string;      // Optional context for query expansion
   candidateLimit?: number;  // Max candidates to rerank (default: 40)
+  maxRerankCandidates?: number; // Hard rerank candidate ceiling
+  rerankTimeoutMs?: number; // Rerank timeout budget
+  rerankQueueLimit?: number; // Queue cap for rerank path
+  rerankConcurrency?: number; // Parallel rerank workers
+  rerankDropPolicy?: "timeout_fallback" | "wait"; // Queue backpressure policy
+  vectorFanoutWorkers?: number; // Vector fanout worker cap
+  archHints?: boolean;  // Enable Arch hint augmentation
+  archRefresh?: boolean; // Run Arch refresh during update
 };
 
 // Highlight query terms in text (skip short words < 3 chars)
@@ -1939,6 +2270,13 @@ type OutputRow = {
   hash?: string;
   docid?: string;
   explain?: HybridQueryExplain;
+  graphHints?: {
+    title: string;
+    kind: string;
+    body: string;
+    sourceFiles: string[];
+    confidence?: string;
+  }[];
 };
 
 function outputResults(results: OutputRow[], query: string, opts: OutputOptions): void {
@@ -1971,6 +2309,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         ...(body && { body }),
         ...(snippet && { snippet }),
         ...(opts.explain && row.explain && { explain: row.explain }),
+        ...(row.graphHints && row.graphHints.length > 0 && { graph_hints: row.graphHints }),
       };
     });
     console.log(JSON.stringify(output, null, 2));
@@ -2030,6 +2369,13 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         console.log(`${c.dim}  Blend: ${Math.round(explain.rrf.weight * 100)}%*${formatExplainNumber(explain.rrf.positionScore)} + ${Math.round((1 - explain.rrf.weight) * 100)}%*${formatExplainNumber(explain.rerankScore)} = ${formatExplainNumber(explain.blendedScore)}${c.reset}`);
         if (contribSummary.length > 0) {
           console.log(`${c.dim}  Top RRF contributions: ${contribSummary}${c.reset}`);
+        }
+      }
+      if (row.graphHints && row.graphHints.length > 0) {
+        console.log(`${c.dim}Arch hints:${c.reset}`);
+        for (const hint of row.graphHints.slice(0, 3)) {
+          const source = hint.sourceFiles.length > 0 ? ` [${hint.sourceFiles[0]}]` : "";
+          console.log(`${c.dim}  - (${hint.kind}) ${hint.title}${source}${c.reset}`);
         }
       }
       console.log();
@@ -2180,159 +2526,6 @@ function parseStructuredQuery(query: string): StructuredSubSearch[] | null {
   return typed.length > 0 ? typed : null;
 }
 
-// =============================================================================
-// Demo command – one-command wow demo
-// =============================================================================
-
-function runDemo(): void {
-  const evalDocsDir = pathJoin(dirname(__filename), "..", "specs", "eval-docs");
-  const hasEvalDocs = existsSync(evalDocsDir);
-
-  console.log(`\n${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║              KINDX — Interactive Demo                        ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║       The Local Memory Node for MCP Agents                   ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
-
-  // Step 1: Setup
-  console.log(`${c.bold}Step 1: Collection Setup${c.reset}`);
-  console.log(`${c.dim}─────────────────────────${c.reset}`);
-  if (hasEvalDocs) {
-    console.log(`  Found eval-docs corpus at: ${evalDocsDir}`);
-    console.log(`  6 markdown documents covering API design, distributed systems,`);
-    console.log(`  machine learning, product launches, remote work, and fundraising.\n`);
-  } else {
-    console.log(`  ${c.yellow}eval-docs corpus not found at expected path.${c.reset}`);
-    console.log(`  Demo will show simulated results.\n`);
-  }
-  console.log(`  ${c.dim}$ kindx collection add ${hasEvalDocs ? evalDocsDir : './specs/eval-docs'} --name kindx-demo${c.reset}`);
-  console.log(`  ${c.green}✓${c.reset} Registered collection 'kindx-demo' (6 documents)\n`);
-
-  // Step 2: Embedding
-  console.log(`${c.bold}Step 2: Embedding${c.reset}`);
-  console.log(`${c.dim}──────────────────${c.reset}`);
-  console.log(`  ${c.dim}$ kindx embed${c.reset}`);
-  console.log(`  ${c.dim}Model: nomic-embed-text-v1.5 (137M params, Q8_0)${c.reset}`);
-  console.log(`  ${c.dim}Chunking 6 documents → 42 chunks${c.reset}`);
-  console.log(`  ${c.dim}████████████████████████████████████████ 42/42 chunks  2.1s${c.reset}`);
-  console.log(`  ${c.green}✓${c.reset} Embedded 42 chunks from 6 documents\n`);
-  console.log(`  ${c.dim}Note: embed processes pending content across collections; it is not scoped by -c.${c.reset}\n`);
-
-  // Step 3: BM25 search (real if eval-docs available)
-  console.log(`${c.bold}Step 3: BM25 Search (Lexical)${c.reset}`);
-  console.log(`${c.dim}──────────────────────────────${c.reset}`);
-  const bm25Query = "API versioning best practices";
-  console.log(`  ${c.dim}$ kindx search "${bm25Query}"${c.reset}\n`);
-
-  // Always show simulated results to avoid leaking user's private indexed data
-  showSimulatedBM25Results();
-
-  // Step 4: Vector search (simulated)
-  console.log(`${c.bold}Step 4: Vector Search (Semantic)${c.reset}`);
-  console.log(`${c.dim}─────────────────────────────────${c.reset}`);
-  const vectorQuery = "how to prevent models from memorizing training data";
-  console.log(`  ${c.dim}$ kindx vsearch "${vectorQuery}"${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/machine-learning-primer.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Machine Learning: A Beginner's Guide${c.reset}`);
-  console.log(`  Score: ${c.bold}0.82${c.reset}`);
-  console.log(`  ${c.dim}## Key Concepts${c.reset}`);
-  console.log(`  ${c.dim}### Overfitting vs Underfitting${c.reset}`);
-  console.log(`  ${c.dim}**Overfitting**: Model memorizes training data, performs poorly on new data${c.reset}`);
-  console.log(`  ${c.dim}- Solution: More data, regularization, simpler model${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
-  console.log(`  Score: ${c.bold}0.54${c.reset}`);
-  console.log(`  ${c.dim}## Replication Strategies${c.reset}`);
-  console.log(`  ${c.dim}### Single-Leader Replication${c.reset}`);
-  console.log(`  ${c.dim}- One node accepts writes${c.reset}`);
-  console.log(`  ${c.dim}- Followers replicate from leader${c.reset}\n`);
-
-  // Step 5: Hybrid query (simulated)
-  console.log(`${c.bold}Step 5: Hybrid Query (BM25 + Vector + Reranking)${c.reset}`);
-  console.log(`${c.dim}──────────────────────────────────────────────────${c.reset}`);
-  const hybridQuery = "raising money for startup Series A";
-  console.log(`  ${c.dim}$ kindx query "${hybridQuery}"${c.reset}\n`);
-
-  console.log(`  ${c.dim}├─ ${hybridQuery}${c.reset}`);
-  console.log(`  ${c.dim}├─ expand: startup fundraising Series A venture capital${c.reset}`);
-  console.log(`  ${c.dim}└─ hyde: strategies for raising Series A funding round${c.reset}`);
-  console.log(`  ${c.dim}Searching 3 vector queries + BM25...${c.reset}`);
-  console.log(`  ${c.dim}Reranking 12 candidates...${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/startup-fundraising-memo.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Series A Fundraising Strategy Memo${c.reset}`);
-  console.log(`  Score: ${c.bold}0.94${c.reset}`);
-  console.log(`  ${c.dim}## Executive Summary${c.reset}`);
-  console.log(`  ${c.dim}We are targeting a $15M Series A raise at a $60M pre-money valuation.${c.reset}`);
-  console.log(`  ${c.dim}## Current Metrics${c.reset}`);
-  console.log(`  ${c.dim}- ARR: $2.4M (growing 15% MoM)${c.reset}`);
-  console.log(`  ${c.dim}- Customers: 127 paying companies${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
-  console.log(`  Score: ${c.bold}0.61${c.reset}`);
-  console.log(`  ${c.dim}## Key Metrics Post-Launch${c.reset}`);
-  console.log(`  ${c.dim}MAU: 12,400 (exceeded target)${c.reset}`);
-  console.log(`  ${c.dim}Avg Session Duration: 7.2 min${c.reset}\n`);
-
-  // Step 6: Agent output formats
-  console.log(`${c.bold}Step 6: Agent-Friendly Output Formats${c.reset}`);
-  console.log(`${c.dim}───────────────────────────────────────${c.reset}`);
-  console.log(`  KINDX supports structured output for LLM agents:\n`);
-  console.log(`  ${c.dim}$ kindx search "API design" --json${c.reset}     → JSON array with scores + snippets`);
-  console.log(`  ${c.dim}$ kindx search "API design" --csv${c.reset}      → CSV for spreadsheet import`);
-  console.log(`  ${c.dim}$ kindx search "API design" --xml${c.reset}      → XML for enterprise pipelines`);
-  console.log(`  ${c.dim}$ kindx search "API design" --files${c.reset}    → docid,score,path for context injection`);
-  console.log(`  ${c.dim}$ kindx search "API design" --md${c.reset} → Markdown table\n`);
-
-  // Step 7: MCP configuration
-  console.log(`${c.bold}Step 7: Add KINDX to Claude Desktop${c.reset}`);
-  console.log(`${c.dim}─────────────────────────────────────${c.reset}`);
-  console.log(`  Add to ~/Library/Application Support/Claude/claude_desktop_config.json:\n`);
-  console.log(`  ${c.green}{${c.reset}`);
-  console.log(`  ${c.green}  "mcpServers": {${c.reset}`);
-  console.log(`  ${c.green}    "kindx": {${c.reset}`);
-  console.log(`  ${c.green}      "command": "kindx",${c.reset}`);
-  console.log(`  ${c.green}      "args": ["mcp"]${c.reset}`);
-  console.log(`  ${c.green}    }${c.reset}`);
-  console.log(`  ${c.green}  }${c.reset}`);
-  console.log(`  ${c.green}}${c.reset}\n`);
-
-  // Summary
-  console.log(`${c.bold}${c.cyan}╔══════════════════════════════════════════════════════════════╗${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Demo complete!                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Get started:                                                ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    1. kindx collection add ~/Documents --name my-docs        ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    2. kindx embed                                            ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║    3. kindx query "your question here" -c my-docs            ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║                                                              ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}║  Docs: https://github.com/ambicuity/KINDX                    ║${c.reset}`);
-  console.log(`${c.bold}${c.cyan}╚══════════════════════════════════════════════════════════════╝${c.reset}\n`);
-}
-
-function showSimulatedBM25Results(): void {
-  console.log(`  ${c.cyan}kindx://kindx-demo/api-design-principles.md${c.reset}`);
-  console.log(`  ${c.bold}Title: API Design Principles${c.reset}`);
-  console.log(`  Score: ${c.bold}5.23${c.reset}`);
-  console.log(`  ${c.dim}## Principle 5: Versioning${c.reset}`);
-  console.log(`  ${c.dim}Always version your APIs. We prefer URL versioning.${c.reset}`);
-  console.log(`  ${c.dim}- /v1/users${c.reset}`);
-  console.log(`  ${c.dim}- /v2/users${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/distributed-systems-overview.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Distributed Systems: A Practical Overview${c.reset}`);
-  console.log(`  Score: ${c.bold}2.87${c.reset}`);
-  console.log(`  ${c.dim}## Consistency Models${c.reset}`);
-  console.log(`  ${c.dim}From strongest to weakest:${c.reset}`);
-  console.log(`  ${c.dim}1. Linearizability - Operations appear instantaneous${c.reset}\n`);
-
-  console.log(`  ${c.cyan}kindx://kindx-demo/product-launch-retrospective.md${c.reset}`);
-  console.log(`  ${c.bold}Title: Product Launch Retrospective: Project Phoenix${c.reset}`);
-  console.log(`  Score: ${c.bold}1.42${c.reset}\n`);
-}
-
 function search(query: string, opts: OutputOptions): void {
   const db = getDb();
 
@@ -2394,7 +2587,8 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
 
   checkIndexHealth(store.db);
 
-  await withLLMSession(async () => {
+  const scopeKey = `cli:${collectionNames.sort().join(",") || "default"}:${opts.context || "default"}`;
+  await withLLMScope(scopeKey, () => withLLMSession(async () => {
     let results = await vectorSearchQuery(store, query, {
       collection: singleCollection,
       limit: opts.all ? 500 : (opts.limit || 10),
@@ -2431,11 +2625,20 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
       context: r.context,
       docid: r.docid,
     })), query, { ...opts, limit: results.length });
-  }, { maxDuration: 10 * 60 * 1000, name: 'vectorSearch' });
+  }, { maxDuration: 10 * 60 * 1000, name: 'vectorSearch' }));
 }
 
 async function querySearch(query: string, opts: OutputOptions, _embedModel: string = DEFAULT_EMBED_MODEL, _rerankModel: string = DEFAULT_RERANK_MODEL): Promise<void> {
   const store = getStore();
+  const timings = {
+    expand_ms: 0,
+    embed_ms: 0,
+    retrieval_ms: 0,
+    rerank_init_ms: 0,
+    rerank_ms: 0,
+    total_ms: 0,
+  };
+  const totalStart = Date.now();
 
   // Validate collection filter (supports multiple -c flags)
   // Use default collections if none specified
@@ -2447,8 +2650,12 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
   // Check for structured query syntax (lex:/vec:/hyde: prefixes)
   const structuredQueries = parseStructuredQuery(query);
 
-  await withLLMSession(async () => {
+  const scopeKey = `cli:${collectionNames.sort().join(",") || "default"}:${opts.context || "default"}`;
+  await withLLMScope(
+    scopeKey,
+    () => withLLMSession(async () => {
     let results;
+    let structuredDiagnostics: { degradedMode?: boolean; fallbackReasons?: string[]; scaleWarnings?: string[] } | undefined;
 
     if (structuredQueries) {
       // Structured search — user provided their own query expansions
@@ -2463,29 +2670,41 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       }
       process.stderr.write(`${c.dim}└─ Searching...${c.reset}\n`);
 
-      results = await structuredSearch(store, structuredQueries, {
+      const withDiagnostics = await structuredSearchWithDiagnostics(store, structuredQueries, {
         collections: singleCollection ? [singleCollection] : undefined,
         limit: opts.all ? 500 : (opts.limit || 10),
         minScore: opts.minScore || 0,
         candidateLimit: opts.candidateLimit,
+        maxRerankCandidates: opts.maxRerankCandidates,
+        rerankTimeoutMs: opts.rerankTimeoutMs,
         explain: !!opts.explain,
         hooks: {
           onEmbedStart: (count) => {
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
           },
           onEmbedDone: (ms) => {
+            timings.embed_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+          },
+          onRetrievalDone: (ms) => {
+            timings.retrieval_ms = ms;
+          },
+          onRerankInitDone: (ms) => {
+            timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
             process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
+            timings.rerank_ms += ms;
             progress.clear();
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
           },
         },
       });
+      results = withDiagnostics.results;
+      structuredDiagnostics = withDiagnostics.diagnostics;
     } else {
       // Standard hybrid query with automatic expansion
       results = await hybridQuery(store, query, {
@@ -2493,6 +2712,8 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         limit: opts.all ? 500 : (opts.limit || 10),
         minScore: opts.minScore || 0,
         candidateLimit: opts.candidateLimit,
+        maxRerankCandidates: opts.maxRerankCandidates,
+        rerankTimeoutMs: opts.rerankTimeoutMs,
         explain: !!opts.explain,
         hooks: {
           onStrongSignal: (score) => {
@@ -2502,6 +2723,7 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             process.stderr.write(`${c.dim}Expanding query...${c.reset}`);
           },
           onExpand: (original, expanded, ms) => {
+            timings.expand_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
             logExpansionTree(original, expanded);
             process.stderr.write(`${c.dim}Searching ${expanded.length + 1} queries...${c.reset}\n`);
@@ -2510,13 +2732,21 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
           },
           onEmbedDone: (ms) => {
+            timings.embed_ms += ms;
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+          },
+          onRetrievalDone: (ms) => {
+            timings.retrieval_ms = ms;
+          },
+          onRerankInitDone: (ms) => {
+            timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
             process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
+            timings.rerank_ms += ms;
             progress.clear();
             process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
           },
@@ -2532,17 +2762,47 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       });
     }
 
+    // Use first lex/vec query for output context, or original query
+    const displayQuery = structuredQueries
+      ? (structuredQueries.find(s => s.type === 'lex')?.query || structuredQueries.find(s => s.type === 'vec')?.query || query)
+      : query;
+
+    let graphHints: {
+      title: string;
+      kind: string;
+      body: string;
+      sourceFiles: string[];
+      confidence?: string;
+    }[] | undefined;
+
+    try {
+      const { getArchConfig } = await import("./integrations/arch/adapter.js");
+      const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
+      const { selectArchHints } = await import("./integrations/arch/augment.js");
+
+      const archConfig = getArchConfig();
+      const shouldUseGraphHints = archConfig.enabled
+        && (opts.archHints ?? archConfig.augmentEnabled);
+      if (shouldUseGraphHints) {
+        const paths = resolveArchPaths(archConfig.artifactDir, getPwd());
+        const manifest = readDistilledManifest(paths.manifestPath);
+        if (manifest) {
+          const selected = selectArchHints(displayQuery, manifest.hintsPath, archConfig.maxHints);
+          if (selected.length > 0) {
+            graphHints = selected;
+          }
+        }
+      }
+    } catch {
+      // Arch augmentation is best-effort and must never break core query flow.
+    }
+
     closeDb();
 
     if (results.length === 0) {
       printEmptySearchResults(opts.format);
       return;
     }
-
-    // Use first lex/vec query for output context, or original query
-    const displayQuery = structuredQueries
-      ? (structuredQueries.find(s => s.type === 'lex')?.query || structuredQueries.find(s => s.type === 'vec')?.query || query)
-      : query;
 
     // Map to CLI output format — use bestChunk for snippet display
     outputResults(results.map(r => ({
@@ -2555,8 +2815,26 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       context: r.context,
       docid: r.docid,
       explain: r.explain,
+      graphHints,
     })), displayQuery, { ...opts, limit: results.length });
-  }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' });
+
+    if (structuredDiagnostics?.degradedMode) {
+      const reasons = (structuredDiagnostics.fallbackReasons || []).join(", ") || "unknown";
+      process.stderr.write(`${c.yellow}KINDX degraded mode:${c.reset} ${reasons}\n`);
+      const warnings = structuredDiagnostics.scaleWarnings || [];
+      if (warnings.length > 0 && opts.explain) {
+        process.stderr.write(`${c.dim}scale warnings: ${warnings.join(", ")}${c.reset}\n`);
+      }
+    }
+
+    timings.total_ms = Date.now() - totalStart;
+    if (opts.explain) {
+      process.stderr.write(
+        `${c.dim}timings: expand=${formatMs(timings.expand_ms)}, embed=${formatMs(timings.embed_ms)}, retrieval=${formatMs(timings.retrieval_ms)}, rerank_init=${formatMs(timings.rerank_init_ms)}, rerank=${formatMs(timings.rerank_ms)}, total=${formatMs(timings.total_ms)}${c.reset}\n`
+      );
+    }
+    }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' })
+  );
 }
 
 // Parse CLI arguments using util.parseArgs
@@ -2566,6 +2844,9 @@ function parseCLI() {
     options: {
       // Global options
       index: {
+        type: "string",
+      },
+      workspace: {
         type: "string",
       },
       context: {
@@ -2588,6 +2869,7 @@ function parseCLI() {
       collection: { type: "string", short: "c", multiple: true },  // Filter by collection(s)
       // Collection options
       name: { type: "string" },  // collection name
+      role: { type: "string" },  // tenant role
       mask: { type: "string" },  // glob pattern
       // Embed options
       force: { type: "boolean", short: "f" },
@@ -2601,27 +2883,55 @@ function parseCLI() {
       "line-numbers": { type: "boolean" },  // add line numbers to output
       // Query options
       "candidate-limit": { type: "string", short: "C" },
-      // Feedback options
-      query: { type: "string" },
-      chunk: { type: "string" },
-      relevant: { type: "boolean" },
-      irrelevant: { type: "boolean" },
+      "max-rerank-candidates": { type: "string" },
+      "rerank-timeout-ms": { type: "string" },
+      "rerank-queue-limit": { type: "string" },
+      "rerank-concurrency": { type: "string" },
+      "rerank-drop-policy": { type: "string" },
+      "vector-fanout-workers": { type: "string" },
+      "arch-hints": { type: "boolean" },
+      "arch-root": { type: "string" },
+      "arch-refresh": { type: "boolean" },
+      // Memory options
+      scope: { type: "string" },
+      key: { type: "string" },
+      value: { type: "string" },
+      tag: { type: "string", multiple: true },
+      source: { type: "string" },
+      id: { type: "string" },
+      semantic: { type: "boolean" },
+      text: { type: "boolean" },
+      threshold: { type: "string" },
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
-      watch: { type: "boolean" },
       port: { type: "string" },
+      "log-format": { type: "string" },
+      "log-level": { type: "string" },
+      "check-only": { type: "boolean" },
+      cache: { type: "boolean" },
+      "parity-sample": { type: "string" },
+      path: { type: "string" },
+      resume: { type: "boolean" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
   });
 
   // Select index name (default: "index")
-  const indexName = values.index as string | undefined;
+  const indexName = (values.workspace || values.index) as string | undefined;
   if (indexName) {
     setIndexName(indexName);
     setConfigIndexName(indexName);
   }
+
+  // Configure daemon/logger output early so protocol and MCP logs are consistent.
+  const logLevel = values["log-level"] ? String(values["log-level"]).toUpperCase() : undefined;
+  const logFormat = values["log-format"] ? String(values["log-format"]).toLowerCase() : undefined;
+  if (logLevel) process.env.KINDX_LOG_LEVEL = logLevel;
+  if (logFormat === "json") process.env.KINDX_LOG_JSON = "1";
+  if (logFormat === "text") process.env.KINDX_LOG_JSON = "0";
+  configureLogger({ level: logLevel, format: logFormat });
 
   // Determine output format
   let format: OutputFormat = "cli";
@@ -2645,7 +2955,15 @@ function parseCLI() {
     collection: values.collection as string[] | undefined,
     lineNumbers: !!values["line-numbers"],
     candidateLimit: values["candidate-limit"] ? parseInt(String(values["candidate-limit"]), 10) : undefined,
+    maxRerankCandidates: values["max-rerank-candidates"] ? parseInt(String(values["max-rerank-candidates"]), 10) : undefined,
+    rerankTimeoutMs: values["rerank-timeout-ms"] ? parseInt(String(values["rerank-timeout-ms"]), 10) : undefined,
+    rerankQueueLimit: values["rerank-queue-limit"] ? parseInt(String(values["rerank-queue-limit"]), 10) : undefined,
+    rerankConcurrency: values["rerank-concurrency"] ? parseInt(String(values["rerank-concurrency"]), 10) : undefined,
+    rerankDropPolicy: values["rerank-drop-policy"] === "wait" ? "wait" : values["rerank-drop-policy"] === "timeout_fallback" ? "timeout_fallback" : undefined,
+    vectorFanoutWorkers: values["vector-fanout-workers"] ? parseInt(String(values["vector-fanout-workers"]), 10) : undefined,
     explain: !!values.explain,
+    archHints: values["arch-hints"] === undefined ? undefined : Boolean(values["arch-hints"]),
+    archRefresh: values["arch-refresh"] === undefined ? undefined : Boolean(values["arch-refresh"]),
   };
 
   return {
@@ -2713,10 +3031,10 @@ function showHelp(): void {
   console.log("  kindx vsearch <query>           - Vector similarity only");
   console.log("  kindx get <file>[:line] [--from <line>] [-l N] [--line-numbers]  - Show a single document from specific line, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
-  console.log("  kindx feedback --irrelevant ... - Store corrective relevance feedback for retrieval");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
+  console.log("  kindx memory <subcommand>       - Store and retrieve scoped agent memories");
+  console.log("  kindx arch <subcommand>         - Build/import Arch sidecar artifacts");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
-  console.log("  kindx preload                   - Warm local GGUF models + context pools");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
   console.log("Collections & context:");
@@ -2731,18 +3049,21 @@ function showHelp(): void {
   console.log("");
   console.log("  kindx status                    - View index + collection health");
   console.log("  kindx watch [collections...]    - Real-time incremental indexing daemon");
-  console.log("  kindx mcp --http [--daemon] [--watch] - Run the shared MCP HTTP server");
+  console.log("  kindx mcp --http [--daemon]     - Run the shared MCP HTTP server");
   console.log("  kindx mcp stop                  - Stop the MCP HTTP daemon");
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
+  console.log("                             --arch-refresh to rebuild/import Arch artifacts after update");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
+  console.log("                             --resume to continue shard sync from checkpoint");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
-  console.log("");
-  console.log("Corrective feedback:");
-  console.log("  kindx feedback --irrelevant --query \"deploy k8s\" --chunk \"#abc123:2\"");
-  console.log("  kindx feedback --relevant --query \"deploy k8s\" --chunk \"#def456:0\"");
-  console.log("  kindx feedback list --query \"deploy\"");
+  console.log("  kindx doctor                    - Run deterministic health diagnostics");
+  console.log("  kindx repair --check-only       - Dry-run integrity and repair checks");
+  console.log("  kindx backup <create|verify|restore> [path] - Manage SQLite backups");
+  console.log("  kindx scheduler status          - Show shard sync checkpoint and queue status");
+  console.log("  kindx verify-wipe               - Scan for residual local index artifacts");
+  console.log("  kindx memory embed [--scope S] [--force] - Backfill/regenerate memory embeddings");
   console.log("");
   console.log("Query syntax (kindx query):");
   console.log("  KINDX queries are either a single expand query (no prefix) or a multi-line");
@@ -2785,6 +3106,8 @@ function showHelp(): void {
   console.log("Global options:");
   console.log("  --help | --version | --skill   - Show help, version, or the packaged skill file");
   console.log("  --index <name>             - Use a named index (default: index)");
+  console.log("  --log-format <text|json>   - Logging format for daemon/MCP logs");
+  console.log("  --log-level <DEBUG|INFO|WARN|ERROR> - Logging verbosity");
   console.log("");
   console.log("Search options:");
   console.log("  -n <num>                   - Max results (default 5, or 20 for --files/--json)");
@@ -2792,18 +3115,185 @@ function showHelp(): void {
   console.log("  --min-score <num>          - Minimum similarity score");
   console.log("  --full                     - Output full document instead of snippet");
   console.log("  -C, --candidate-limit <n>  - Max candidates to rerank (default 40, lower = faster)");
+  console.log("  --max-rerank-candidates <n> - Hard ceiling for rerank candidates");
+  console.log("  --rerank-timeout-ms <ms>   - Timeout budget for reranker before fallback");
+  console.log("  --rerank-queue-limit <n>   - Cap queued rerank requests before fallback");
+  console.log("  --rerank-concurrency <n>   - Parallel rerank workers (default 1)");
+  console.log("  --rerank-drop-policy <timeout_fallback|wait> - Queue backpressure behavior");
+  console.log("  --vector-fanout-workers <n> - Cap parallel vector fanout workers");
+  console.log("  --parity-sample <n>        - Doctor shard parity sample size (default 16)");
+  console.log("  --resume                   - Resume shard sync checkpoint during embed");
   console.log("  --line-numbers             - Include line numbers in output");
   console.log("  --explain                  - Include retrieval score traces (query --json/CLI)");
+  console.log("  --arch-hints               - Add optional Arch architecture hints (requires Arch integration)");
+  console.log("  --arch-refresh             - Run Arch refresh after 'kindx update'");
   console.log("  --files | --json | --csv | --md | --xml  - Output format");
   console.log("  -c, --collection <name>    - Filter by one or more collections");
-  console.log("  --query <text>             - Feedback query text (for kindx feedback)");
-  console.log("  --chunk <id>               - Feedback chunk id (#docid[:seq], hash[:seq], or hash_seq)");
-  console.log("  --relevant/--irrelevant    - Feedback signal for kindx feedback");
   console.log("");
   console.log("Multi-get options:");
   console.log("  -l <num>                   - Maximum lines per file");
   console.log("  --max-bytes <num>          - Skip files larger than N bytes (default 10240)");
   console.log("  --json/--csv/--md/--xml/--files - Same formats as search");
+  console.log("");
+  console.log("Memory commands:");
+  console.log("  kindx memory put --scope <scope> --key <k> --value <v> [--tag t ...] [--source s]");
+  console.log("  kindx memory search --scope <scope> <query> [--semantic|--text] [--threshold <n>] [-n <num>]");
+  console.log("  kindx memory history --scope <scope> --key <k>");
+  console.log("  kindx memory stats --scope <scope>");
+  console.log("  kindx memory mark-accessed --scope <scope> --id <id>");
+  console.log("  kindx memory embed --scope <scope> [--force]");
+  console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
+  console.log("");
+  console.log("Arch commands:");
+  console.log("  kindx arch status [path]             - Inspect feature flag, repo/artifact paths, and manifest stats");
+  console.log("  kindx arch build [path]              - Run Arch sidecar + distill artifacts only (no KINDX import)");
+  console.log("  kindx arch import [path]             - Import existing distilled artifacts into KINDX collection");
+  console.log("  kindx arch refresh [path]            - Build + distill + import in one step");
+  console.log("  Usage: kindx arch <status|build|import|refresh> [path] [--arch-root <path>]");
+  console.log("  Options:");
+  console.log("    --arch-root <path>                 - Override source root (codebase to analyze) for this command");
+  console.log("  Related query/update flags:");
+  console.log("    --arch-hints                       - Include Arch graph hints in query/query --json output");
+  console.log("    --arch-refresh                     - Rebuild/import Arch artifacts after 'kindx update'");
+  console.log("  Environment:");
+  console.log("    KINDX_ARCH_ENABLED=1               - Required to run arch build/import/refresh (default: off)");
+  console.log("    KINDX_ARCH_AUGMENT_ENABLED=1       - Enable Arch hints in query results");
+  console.log("    KINDX_ARCH_REPO_PATH               - Path to Arch repository (default: ./tmp/arch)");
+  console.log("    KINDX_ARCH_ARTIFACT_DIR            - Distilled artifact root directory (default: <cache>/arch)");
+  console.log("    KINDX_ARCH_COLLECTION              - Collection name for imported artifacts (default: __arch)");
+  console.log("    KINDX_ARCH_MIN_CONFIDENCE          - Min confidence: EXTRACTED|INFERRED|AMBIGUOUS (default: INFERRED)");
+  console.log("    KINDX_ARCH_MAX_HINTS               - Max graph hints per query (default: 3)");
+  console.log("    KINDX_ARCH_AUTO_REFRESH_ON_UPDATE  - Auto-rebuild on 'kindx update' (default: off)");
+  console.log("");
+  console.log("Architecture:");
+  console.log("");
+  console.log("  KINDX is an on-device hybrid search engine for markdown documents. It runs");
+  console.log("  entirely locally — no cloud APIs, no network calls — using SQLite for storage,");
+  console.log("  local GGUF models for inference, and the Model Context Protocol (MCP) for");
+  console.log("  AI agent integration.");
+  console.log("");
+  console.log("  Engine Modules:");
+  console.log("    ┌──────────────┐  ┌─────────────┐  ┌──────────────┐  ┌────────────┐");
+  console.log("    │   kindx.ts   │  │ protocol.ts │  │ repository.ts│  │ inference.ts│");
+  console.log("    │   (CLI)      │  │ (MCP Server)│  │ (Data Layer) │  │ (LLM/GGUF) │");
+  console.log("    └──────┬───────┘  └──────┬──────┘  └──────┬───────┘  └─────┬──────┘");
+  console.log("           │                 │                │                │");
+  console.log("           └────────┬────────┘                │                │");
+  console.log("                    │                         │                │");
+  console.log("              ┌─────▼─────┐            ┌─────▼─────┐    ┌─────▼─────┐");
+  console.log("              │ session.ts │            │ memory.ts │    │ runtime.ts │");
+  console.log("              │ (Lifecycle)│            │ (Scoped)  │    │ (SQLite)   │");
+  console.log("              └───────────┘            └───────────┘    └───────────┘");
+  console.log("");
+  console.log("    kindx.ts          CLI entry point. Parses args, dispatches to commands.");
+  console.log("    protocol.ts       MCP server (stdio + HTTP/SSE). Registers tools, resources,");
+  console.log("                      and prompts. Handles session init, scope resolution.");
+  console.log("    repository.ts     Core data access: indexing, FTS5 search, vector search,");
+  console.log("                      smart chunking, structured queries, and reranking.");
+  console.log("    inference.ts      Local LLM management. Loads GGUF models via node-llama-cpp.");
+  console.log("                      Embedding (GTE-based), reranking (Qwen3), query expansion.");
+  console.log("    session.ts        Per-connection lifecycle: embedding cache, AbortController");
+  console.log("                      for cooperative cancellation, query log for enrichment.");
+  console.log("    memory.ts         Scoped agent memory: upsert with semantic dedup, text/vector");
+  console.log("                      search, supersession chains, tag system, hit-rate tracking.");
+  console.log("    catalogs.ts       Collection registry (YAML-backed in ~/.config/kindx/).");
+  console.log("                      Manages paths, glob patterns, contexts, update commands.");
+  console.log("    runtime.ts        SQLite wrapper: better-sqlite3 + sqlite-vec extension loading.");
+  console.log("    watcher.ts        Real-time incremental indexing daemon (chokidar-based).");
+  console.log("    renderer.ts       Output formatting: CLI, JSON, CSV, Markdown, XML, files.");
+  console.log("    instruction-layering.ts");
+  console.log("                      Multi-layer instruction loading (global → project AGENTS.md).");
+  console.log("    mcp-control-plane.ts");
+  console.log("                      Tool policy enforcement, provenance registry, HTTP headers.");
+  console.log("");
+  console.log("  Storage Layer:");
+  console.log("    Single SQLite database (WAL mode, busy_timeout=30s) at ~/.cache/kindx/index.sqlite");
+  console.log("    ┌─────────────────────────────────────────────────────────────────────┐");
+  console.log("    │  content         Content-addressable store (hash → doc text)        │");
+  console.log("    │  documents       File→hash mapping with collection, path, active    │");
+  console.log("    │  documents_fts   FTS5 full-text index (porter + unicode61 tokenizer)│");
+  console.log("    │  content_vectors Embedding metadata (hash, seq, model, pos)         │");
+  console.log("    │  vectors_vec     sqlite-vec virtual table (cosine distance)          │");
+  console.log("    │  llm_cache       LLM response cache (query expansion, reranking)    │");
+  console.log("    │  memories        Scoped key-value store with supersession chains     │");
+  console.log("    │  memory_tags     Tag associations for memories                       │");
+  console.log("    │  memory_links    Bidirectional memory relationships                  │");
+  console.log("    │  memory_embeddings  Vector embeddings for semantic memory search     │");
+  console.log("    └─────────────────────────────────────────────────────────────────────┘");
+  console.log("");
+  console.log("  Retrieval Pipeline:");
+  console.log("    1. Query parsing: structured (lex:/vec:/hyde:) or auto-expand via LLM");
+  console.log("    2. BM25 retrieval: FTS5 keyword search with porter stemming");
+  console.log("    3. Vector retrieval: cosine similarity via sqlite-vec (if embeddings exist)");
+  console.log("    4. Score fusion: weighted combination of BM25 + vector scores");
+  console.log("    5. Reranking: cross-encoder LLM reranker (Qwen3 0.6B, up to 40 candidates)");
+  console.log("    6. Strong-signal bypass: skips LLM expansion when BM25 score ≥ 0.85");
+  console.log("    7. Routing profiles: fast (20 candidates, no rerank), balanced, max_precision (60)");
+  console.log("");
+  console.log("  Smart Chunking:");
+  console.log("    Documents are split at natural boundaries (headings, code fences, paragraphs)");
+  console.log("    using scored break-point detection with distance decay.");
+  console.log("    Chunk size: ~900 tokens with 15% overlap. Code fences are never split.");
+  console.log("");
+  console.log("  Inference Stack (Local GGUF):");
+  console.log("    Embedding:   GTE-based model (embeddinggemma) via node-llama-cpp");
+  console.log("    Reranking:   Qwen3-Reranker 0.6B Q8_0 — cross-encoder scoring");
+  console.log("    Expansion:   Qwen3 1.7B — query-to-subquery generation");
+  console.log("    Runtime:     LLM sessions with cooperative cancellation (AbortSignal)");
+  console.log("    Caching:     Query expansion + rerank results cached in llm_cache table");
+  console.log("    Models:      Downloaded to ~/.cache/kindx/models/ via 'kindx pull'");
+  console.log("");
+  console.log("  MCP Protocol:");
+  console.log("    Transports:  stdio (default, for AI agents) or HTTP/SSE (--http, multi-client)");
+  console.log("    Tools:       query, get, multi_get, status, arch_status, arch_query,");
+  console.log("                 memory_put, memory_search, memory_history, memory_stats,");
+  console.log("                 memory_mark_accessed");
+  console.log("    Resources:   kindx://{collection}/{path} — document access by virtual path");
+  console.log("    Sessions:    Per-connection KindxSession with embedding cache, abort signal,");
+  console.log("                 query log. SessionRegistry for HTTP transport multiplexing.");
+  console.log("    Instructions: Dynamic server instructions injected on initialize,");
+  console.log("                 including collection list, instruction layers, memory prefetch.");
+  console.log("    Control:     MCP control plane for tool policy, provenance, HTTP headers.");
+  console.log("");
+  console.log("  Memory Subsystem:");
+  console.log("    Scoped key-value store for AI agent state persistence across sessions.");
+  console.log("    Scope resolution: explicit > session > workspace > default.");
+  console.log("    Dedup: exact match → semantic supersession (cosine ≥ 0.92) → single-cardinality.");
+  console.log("    Supersession chains preserve full history (memory_history command).");
+  console.log("    Vector embeddings enable semantic search across stored memories.");
+  console.log("    Memory prefetch: top-3 accessed memories surfaced in MCP initialize response.");
+  console.log("");
+  console.log("  Arch Integration (Sidecar):");
+  console.log("    Optional architecture analysis via external Python-based Arch tool.");
+  console.log("    Pipeline: source scan → graph.json → distill → hints + manifest.");
+  console.log("    Artifacts: community clusters, god-node detection, surprising edges, reports.");
+  console.log("    Augmentation: graph hints injected into query results (--arch-hints).");
+  console.log("    Confidence: EXTRACTED (code-level) > INFERRED (heuristic) > AMBIGUOUS.");
+  console.log("    Import: distilled artifacts indexed as a KINDX collection (__arch).");
+  console.log("");
+  console.log("  Collection System:");
+  console.log("    YAML-backed registry at ~/.config/kindx/index.yml.");
+  console.log("    Each collection maps a filesystem path + glob pattern to indexed documents.");
+  console.log("    Virtual paths: kindx://{collection}/{relative-path} for cross-collection access.");
+  console.log("    Context annotations: per-path human-written summaries injected into results.");
+  console.log("    Default query behavior: collections can be included/excluded individually.");
+  console.log("    Update commands: per-collection pre-index hooks (e.g., 'git pull').");
+  console.log("");
+  console.log("  Environment:");
+  console.log("    INDEX_PATH                  Override database location");
+  console.log("    KINDX_CONFIG_DIR            Override config directory (default: ~/.config/kindx)");
+  console.log("    XDG_CACHE_HOME              Override cache root (default: ~/.cache)");
+  console.log("    KINDX_QUERY_TIMEOUT_MS      Query timeout guard (0 = disabled)");
+  console.log("    KINDX_INFLIGHT_DEDUPE       In-flight query dedup: join|off (default: join)");
+  console.log("    KINDX_QUERY_REPLAY_DIR      Write query replay artifacts to this directory");
+  console.log("    KINDX_ENCRYPTION_KEY        Enable SQLCipher keyed runtime and auto-migration");
+  console.log("    KINDX_SQLITE_DRIVER         Force sqlite driver module (default probes sqlcipher-capable first)");
+  console.log("    KINDX_ANN_ENABLE            Enable ANN routing for sharded collections (default: 1)");
+  console.log("    KINDX_ANN_PROBE_COUNT       ANN centroid probes per shard (default: 4)");
+  console.log("    KINDX_ANN_SHORTLIST         ANN shortlist size per shard (default: dynamic)");
+  console.log("    KINDX_EXTRACTOR_PDF         Enable PDF extractor (default: 1)");
+  console.log("    KINDX_EXTRACTOR_DOCX        Enable DOCX extractor (default: 1)");
+  console.log("    KINDX_EXTRACTOR_FALLBACK_POLICY fallback|strict for extractor fallback behavior");
   console.log("");
   console.log(`Index: ${getDbPath()}`);
 }
@@ -2824,32 +3314,47 @@ async function showVersion(): Promise<void> {
   console.log(`kindx ${versionStr}`);
 }
 
-function resolveFeedbackChunkToHashSeq(db: Database, chunkRaw: string): string {
-  const chunk = chunkRaw.trim().replace(/^#/, "");
-  if (!chunk) {
-    throw new Error("chunk is required");
+function outputMemoryPayload(payload: unknown, format: OutputFormat): void {
+  if (format === "json") {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
   }
+  console.log(payload);
+}
 
-  const hashSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]*)_(\d+)$/i);
-  if (hashSeqMatch) {
-    return `${hashSeqMatch[1]}_${hashSeqMatch[2]}`;
-  }
+type VerifyWipeReport = {
+  cacheRoot: string;
+  configRoot: string;
+  indexPath: string;
+  residualFiles: string[];
+};
 
-  const docidWithSeqMatch = chunk.match(/^([a-z0-9]{4,8})(?::(\d+))?$/i);
-  if (docidWithSeqMatch) {
-    const doc = findDocumentByDocid(db, docidWithSeqMatch[1]);
-    if (!doc) {
-      throw new Error(`Unknown docid: #${docidWithSeqMatch[1]}`);
-    }
-    return `${doc.hash}_${docidWithSeqMatch[2] ?? "0"}`;
-  }
+function verifyWipe(): VerifyWipeReport {
+  const cacheRoot = getKindxCacheDir();
+  const configRoot = process.env.KINDX_CONFIG_DIR
+    ? resolve(process.env.KINDX_CONFIG_DIR)
+    : resolve(homedir(), ".config", "kindx");
+  const indexPath = getDbPath();
+  const candidates = [
+    indexPath,
+    `${indexPath}-wal`,
+    `${indexPath}-shm`,
+    resolve(cacheRoot, "index.sqlite"),
+    resolve(cacheRoot, "index.sqlite-wal"),
+    resolve(cacheRoot, "index.sqlite-shm"),
+  ];
 
-  const hashWithSeqMatch = chunk.match(/^([a-z0-9][a-z0-9._-]{8,})(?::(\d+))?$/i);
-  if (hashWithSeqMatch) {
-    return `${hashWithSeqMatch[1]}_${hashWithSeqMatch[2] ?? "0"}`;
-  }
+  const globbed = fastGlob.sync([
+    `${cacheRoot}/**/index.sqlite*`,
+    `${configRoot}/**/index.sqlite*`,
+  ], { onlyFiles: true, followSymbolicLinks: false });
 
-  throw new Error("Invalid chunk format. Use #docid[:seq], full-hash[:seq], or hash_seq.");
+  const residualFiles = Array.from(new Set([
+    ...candidates.filter((file) => existsSync(file)),
+    ...globbed,
+  ]));
+
+  return { cacheRoot, configRoot, indexPath, residualFiles };
 }
 
 // Main CLI - only run if this is the main module
@@ -2860,6 +3365,29 @@ const isMain = argv1 === __filename
   || argv1?.endsWith("/kindx.js")
   || (argv1 != null && realpathSync(argv1) === __filename);
 if (isMain) {
+  // Global error handlers — catch unhandled errors with user-friendly messages
+  process.on('uncaughtException', (err: any) => {
+    const code = err?.code;
+    if (code === 'SQLITE_NOTADB') {
+      console.error(`Error: Index file is corrupted or not a valid database.`);
+      console.error(`Path: ${process.env.INDEX_PATH || '~/.cache/kindx/index.sqlite'}`);
+      console.error(`Try removing the file and re-indexing your collections.`);
+    } else if (code === 'SQLITE_CANTOPEN') {
+      console.error(`Error: Cannot open database file. Check that the path exists and is writable.`);
+      console.error(`Path: ${process.env.INDEX_PATH || '~/.cache/kindx/index.sqlite'}`);
+    } else if (code === 'SQLITE_BUSY') {
+      console.error(`Error: Database is locked by another process. Retry in a moment.`);
+    } else {
+      console.error(`Error: ${err?.message || err}`);
+    }
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason: any) => {
+    console.error(`Error: ${reason instanceof Error ? reason.message : reason}`);
+    process.exit(1);
+  });
+
   const cli = parseCLI();
 
   if (cli.values.version) {
@@ -2951,63 +3479,6 @@ if (isMain) {
           console.error(`Unknown subcommand: ${subcommand}`);
           console.error("Available: add, list, rm");
           process.exit(1);
-      }
-      break;
-    }
-
-    case "feedback": {
-      const subcommand = cli.args[0];
-      const db = getDb();
-      const store = getStore();
-
-      if (subcommand === "list") {
-        const queryFilter = ((cli.values.query as string | undefined) ?? cli.args.slice(1).join(" ")).trim();
-        const rows = store.listFeedback(queryFilter || undefined);
-
-        if (cli.opts.format === "json") {
-          console.log(JSON.stringify({ count: rows.length, feedback: rows }, null, 2));
-        } else if (rows.length === 0) {
-          console.log("No feedback records found.");
-        } else {
-          console.log(`${c.bold}Feedback records${c.reset} (${rows.length})`);
-          for (const row of rows) {
-            const signal = row.signal < 0 ? "irrelevant" : "relevant";
-            const when = new Date(row.created * 1000).toISOString();
-            console.log(`- [${signal}] query="${row.query}" chunk="${row.hashSeq}" at ${when}`);
-          }
-        }
-        break;
-      }
-
-      const relevant = !!cli.values.relevant;
-      const irrelevant = !!cli.values.irrelevant;
-      if (relevant === irrelevant) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
-        process.exit(1);
-      }
-
-      const queryText = ((cli.values.query as string | undefined) ?? "").trim();
-      const chunkArg = ((cli.values.chunk as string | undefined) ?? "").trim();
-      if (!queryText || !chunkArg) {
-        console.error("Usage: kindx feedback --relevant|--irrelevant --query <text> --chunk <id>");
-        process.exit(1);
-      }
-
-      let hashSeq: string;
-      try {
-        hashSeq = resolveFeedbackChunkToHashSeq(db, chunkArg);
-      } catch (err) {
-        console.error(String(err instanceof Error ? err.message : err));
-        process.exit(1);
-      }
-
-      const signal: -1 | 1 = relevant ? 1 : -1;
-      store.insertFeedback(queryText, hashSeq, signal);
-      const signalText = signal > 0 ? "relevant" : "irrelevant";
-      if (cli.opts.format === "json") {
-        console.log(JSON.stringify({ stored: true, query: queryText, chunk: hashSeq, signal: signalText }, null, 2));
-      } else {
-        console.log(`${c.green}✓${c.reset} Stored ${signalText} feedback for ${hashSeq}`);
       }
       break;
     }
@@ -3181,9 +3652,271 @@ if (isMain) {
       break;
     }
 
-    case "status":
-      await showStatus();
+    case "memory": {
+      const subcommand = cli.args[0];
+      const db = getDb();
+      const workspaceScope = deriveWorkspaceMemoryScope(getPwd());
+      const scope = resolveMemoryScopeShared({
+        explicitScope: cli.values.scope,
+        workspaceScope,
+      }).scope;
+
+      switch (subcommand) {
+        case "put": {
+          const key = ((cli.values.key as string | undefined) || "").trim();
+          const value = ((cli.values.value as string | undefined) || "").trim();
+          if (!key || !value) {
+            console.error("Usage: kindx memory put --scope <scope> --key <key> --value <value> [--tag tag ...] [--source source]");
+            process.exit(1);
+          }
+          const tags = (cli.values.tag as string[] | undefined) || [];
+          const source = (cli.values.source as string | undefined) || undefined;
+          const threshold = cli.values.threshold ? parseFloat(String(cli.values.threshold)) : undefined;
+          const memory = await upsertMemory(db, {
+            scope,
+            key,
+            value,
+            tags,
+            source,
+            semanticThreshold: threshold,
+          });
+
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, memory }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Stored memory in scope '${scope}'`);
+            console.log(`  id: ${memory.id}`);
+            console.log(`  key: ${memory.key}`);
+            console.log(`  value: ${memory.value}`);
+          }
+          break;
+        }
+
+        case "search": {
+          const query = cli.args.slice(1).join(" ").trim();
+          if (!query) {
+            console.error("Usage: kindx memory search --scope <scope> <query> [--semantic|--text] [--threshold <n>] [-n <num>]");
+            process.exit(1);
+          }
+          const limit = cli.opts.limit || 20;
+          const threshold = cli.values.threshold ? parseFloat(String(cli.values.threshold)) : 0.3;
+          const useText = !!cli.values.text && !cli.values.semantic;
+          const mode = useText ? "text" : "semantic";
+          const results = useText
+            ? textSearchMemory(db, scope, query, limit)
+            : await semanticSearchMemory(db, scope, query, limit, threshold);
+
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, mode, query, results }, "json");
+          } else {
+            console.log(`${c.bold}Memory ${mode} search${c.reset} (${results.length} result${results.length === 1 ? "" : "s"})`);
+            for (const r of results) {
+              const score = r.similarity != null
+                ? `sim=${r.similarity.toFixed(3)}`
+                : (r.hitRate != null ? `hit=${r.hitRate.toFixed(3)}` : "");
+              console.log(`- #${r.id} ${score} ${r.key}: ${r.value}`);
+            }
+          }
+          break;
+        }
+
+        case "history": {
+          const key = ((cli.values.key as string | undefined) || "").trim();
+          if (!key) {
+            console.error("Usage: kindx memory history --scope <scope> --key <key>");
+            process.exit(1);
+          }
+          const history = getMemoryHistory(db, scope, key);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, key, history }, "json");
+          } else {
+            console.log(`${c.bold}History for ${key}${c.reset} (${history.length})`);
+            for (const h of history) {
+              const superseded = h.supersededBy ? ` -> superseded by #${h.supersededBy}` : "";
+              console.log(`- #${h.id} ${h.value}${superseded}`);
+            }
+          }
+          break;
+        }
+
+        case "stats": {
+          const stats = getMemoryStats(db, scope);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload(stats, "json");
+          } else {
+            console.log(`${c.bold}Memory stats${c.reset} (scope=${scope})`);
+            console.log(`  total: ${stats.totalMemories}`);
+            console.log(`  superseded: ${stats.superseded}`);
+            console.log(`  embedded: ${stats.embedded}`);
+            console.log(`  links: ${stats.links}`);
+          }
+          break;
+        }
+
+        case "mark-accessed": {
+          const idRaw = (cli.values.id as string | undefined) || "";
+          const id = Number.parseInt(idRaw, 10);
+          if (!Number.isFinite(id)) {
+            console.error("Usage: kindx memory mark-accessed --scope <scope> --id <id>");
+            process.exit(1);
+          }
+          const ok = markMemoryAccessed(db, scope, id);
+          if (!ok) {
+            console.error(`Memory id ${id} not found in scope '${scope}'`);
+            process.exit(1);
+          }
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, id, marked: true }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Marked memory #${id} as accessed`);
+          }
+          break;
+        }
+
+        case "embed": {
+          const force = !!cli.values.force;
+          const result = await embedMemories(db, scope, force);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, ...result, force }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Embedded ${result.embedded}/${result.totalCandidates} memories in scope '${scope}'`);
+          }
+          break;
+        }
+
+        case "help":
+        case undefined: {
+          console.log("Usage: kindx memory <subcommand> [options]");
+          console.log("");
+          console.log("Subcommands:");
+          console.log("  put            Store or update a scoped memory");
+          console.log("  search         Semantic/text memory lookup");
+          console.log("  history        Show value history for a key");
+          console.log("  stats          Show scoped memory stats");
+          console.log("  mark-accessed  Bump access counter for a memory id");
+          console.log("  embed          Backfill memory embeddings for this scope");
+          console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
+          process.exit(0);
+        }
+
+        default:
+          console.error(`Unknown memory subcommand: ${subcommand}`);
+          console.error("Run 'kindx memory help' for usage");
+          process.exit(1);
+      }
       break;
+    }
+
+    case "arch": {
+      const subcommand = cli.args[0];
+      const archRoot = (cli.values["arch-root"] as string | undefined) || cli.args[1];
+      switch (subcommand) {
+        case "status": {
+          await showArchStatus(archRoot);
+          break;
+        }
+        case "build": {
+          await runArchBuildOrRefresh(archRoot, false);
+          break;
+        }
+        case "import": {
+          await runArchImport(archRoot);
+          break;
+        }
+        case "refresh": {
+          await runArchBuildOrRefresh(archRoot, true);
+          break;
+        }
+        case "help":
+        case undefined: {
+          console.log("Usage: kindx arch <status|build|import|refresh> [path] [--arch-root <path>]");
+          console.log("");
+          console.log("Subcommands:");
+          console.log("  status   Inspect feature flag, repo/artifact paths, and distilled manifest stats");
+          console.log("  build    Run Arch sidecar + distill artifacts only (no KINDX import)");
+          console.log("  import   Import existing distilled artifacts into the Arch collection");
+          console.log("  refresh  Build + distill + import in one step");
+          console.log("");
+          console.log("Options:");
+          console.log("  --arch-root <path>   Override source root (codebase to analyze) for this command");
+          console.log("");
+          console.log("Related query/update flags:");
+          console.log("  --arch-hints         Include Arch graph hints in query output (when enabled)");
+          console.log("  --arch-refresh       Rebuild/import Arch artifacts after 'kindx update'");
+          console.log("");
+          console.log("Environment:");
+          console.log("  KINDX_ARCH_ENABLED=1              Required to run arch build/import/refresh (default: off)");
+          console.log("  KINDX_ARCH_AUGMENT_ENABLED=1      Enable Arch hints in query results");
+          console.log("  KINDX_ARCH_REPO_PATH              Path to Arch repository (default: ./tmp/arch)");
+          console.log("  KINDX_ARCH_ARTIFACT_DIR           Distilled artifact root directory (default: <cache>/arch)");
+          console.log("  KINDX_ARCH_COLLECTION             Collection name for imported artifacts (default: __arch)");
+          console.log("  KINDX_ARCH_MIN_CONFIDENCE         Min confidence: EXTRACTED|INFERRED|AMBIGUOUS");
+          console.log("  KINDX_ARCH_MAX_HINTS              Max graph hints per query (default: 3)");
+          console.log("  KINDX_ARCH_AUTO_REFRESH_ON_UPDATE Auto-rebuild on 'kindx update' (default: off)");
+          console.log("");
+          console.log("Notes:");
+          console.log("  - If --arch-root is omitted, KINDX uses the current working directory as the source root.");
+          console.log("  - 'kindx arch import' requires an existing distilled manifest from a prior build.");
+          process.exit(0);
+        }
+        default:
+          console.error(`Unknown arch subcommand: ${subcommand}`);
+          console.error("Run 'kindx arch help' for usage");
+          process.exit(1);
+      }
+      break;
+    }
+
+    case "status":
+      await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir });
+      break;
+
+    case "scheduler": {
+      const code = runSchedulerStatusCommand({
+        subcommand: cli.args[0],
+        format: cli.opts.format,
+        color: c,
+        loadState: () => {
+          const dbPath = getDbPath();
+          const db = getDb();
+          const checkpoint = getSchedulerCheckpointState(dbPath);
+          return {
+            shard: getShardRuntimeStatus(dbPath),
+            checkpoint,
+            queueState: getSchedulerQueueState(db, dbPath),
+          };
+        },
+      });
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
+    case "doctor": {
+      const paritySample = cli.values["parity-sample"] ? parseInt(String(cli.values["parity-sample"]), 10) : 16;
+      const code = runDoctorCommand(
+        { getDb, getDbPath, closeDb },
+        cli.opts.format,
+        Number.isFinite(paritySample) && paritySample > 0 ? paritySample : 16,
+      );
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
+    case "repair": {
+      if (cli.values["check-only"] === true || cli.values["check-only"] === "true") {
+        const code = runRepairCheckCommand({ getDb, getDbPath, closeDb }, cli.opts.format);
+        if (code !== 0) process.exit(code);
+        break;
+      }
+      console.error("Usage: kindx repair --check-only");
+      process.exit(1);
+    }
+
+    case "backup": {
+      const code = runBackupCmd(cli.args, cli.values as Record<string, unknown>, cli.opts.format, getDbPath());
+      if (code !== 0) process.exit(code);
+      break;
+    }
 
     case "migrate": {
       const target = cli.args[0];
@@ -3238,6 +3971,12 @@ if (isMain) {
       break;
     }
 
+    case "tenant": {
+      const code = runTenantCommand(cli.args, cli.values as Record<string, unknown>, cli.opts.format);
+      if (code !== 0) process.exit(code);
+      break;
+    }
+
     case "skill": {
       const subcommand = cli.args[0];
       if (subcommand === "install") {
@@ -3276,15 +4015,48 @@ if (isMain) {
       break;
     }
 
+    case "init": {
+      await runInitCommand(cli.args, cli.values as Record<string, unknown>, {
+        updateCollections,
+        vectorIndex,
+        defaultGlob: DEFAULT_GLOB,
+        defaultEmbedModel: DEFAULT_EMBED_MODEL,
+      });
+      break;
+    }
+
     case "update": {
-      const collFilter = cli.values.collection as string[] | undefined;
-      await updateCollections(collFilter);
+      const collFilter = cli.values.collection as string | string[] | undefined;
+      await updateCollections(collFilter, { pull: Boolean(cli.values.pull) });
+      
+      if (cli.values.embed === true || cli.values.embed === 'true') {
+        console.log(`\n${c.magenta}=== Embedding ===${c.reset}`);
+        await vectorIndex(DEFAULT_EMBED_MODEL, false, !!cli.values.resume);
+      }
+      
+      try {
+        const { getArchConfig } = await import("./integrations/arch/adapter.js");
+        const archConfig = getArchConfig();
+        const shouldRefresh = cli.opts.archRefresh ?? archConfig.autoRefreshOnUpdate;
+        if (shouldRefresh) {
+          await runArchBuildOrRefresh(cli.values["arch-root"] as string | undefined, true);
+        }
+      } catch (error) {
+        console.error(`${c.yellow}Arch refresh skipped:${c.reset} ${error}`);
+      }
       break;
     }
 
     case "embed":
-      await vectorIndex(DEFAULT_EMBED_MODEL, !!cli.values.force);
+    {
+      const code = await executeEmbedCommand({
+        force: !!cli.values.force,
+        resume: !!cli.values.resume,
+        runVectorIndex: vectorIndex,
+      });
+      if (code !== 0) process.exit(code);
       break;
+    }
 
     case "pull": {
       const refresh = cli.values.refresh === undefined ? false : Boolean(cli.values.refresh);
@@ -3302,23 +4074,6 @@ if (isMain) {
         const size = formatBytes(result.sizeBytes);
         const note = result.refreshed ? "refreshed" : "cached/checked";
         console.log(`- ${result.model} -> ${result.path} (${size}, ${note})`);
-      }
-      break;
-    }
-
-    case "preload": {
-      const result = await preloadModels({ origin: "cli", force: true });
-      if (cli.opts.format === "json") {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        const state = result.warmed ? `${c.green}warmed${c.reset}` : `${c.yellow}not warmed${c.reset}`;
-        console.log(`Preload status: ${state}`);
-        console.log(`- embed: ${result.models.embed}`);
-        console.log(`- rerank: ${result.models.rerank}`);
-        console.log(`- expand: ${result.models.expand}`);
-        if (result.lastError) {
-          console.log(`${c.yellow}Last error:${c.reset} ${result.lastError}`);
-        }
       }
       break;
     }
@@ -3346,20 +4101,21 @@ if (isMain) {
 
     case "query":
     case "deep-search": // undocumented alias
-      if (!cli.query) {
-        console.error("Usage: kindx query [options] <query>");
-        process.exit(1);
-      }
-      await querySearch(cli.query, cli.opts);
+    {
+      const code = await executeQueryCommand({
+        query: cli.query,
+        opts: cli.opts,
+        runQuerySearch: querySearch as (query: string, opts: unknown) => Promise<void>,
+      });
+      if (code !== 0) process.exit(code);
       break;
+    }
 
     case "mcp": {
       const sub = cli.args[0]; // stop | status | undefined
 
       // Cache dir for PID/log files — same dir as the index
-      const cacheDir = process.env.XDG_CACHE_HOME
-        ? resolve(process.env.XDG_CACHE_HOME, "kindx")
-        : resolve(homedir(), ".cache", "kindx");
+      const cacheDir = getKindxCacheDir();
       const pidPath = resolve(cacheDir, "mcp.pid");
 
       // Subcommands take priority over flags
@@ -3401,12 +4157,15 @@ if (isMain) {
           const logPath = resolve(cacheDir, "mcp.log");
           const logFd = openSync(logPath, "w"); // truncate — fresh log per daemon run
           const selfPath = fileURLToPath(import.meta.url);
-          const iName = cli.values.index as string | undefined;
-          const indexFlag = iName ? ["--index", iName] : [];
-          const watchFlag = cli.values.watch ? ["--watch"] : [];
+          const iName = (cli.values.workspace || cli.values.index) as string | undefined;
+          const indexFlag = iName ? ["--workspace", iName] : [];
+          const logArgs = [
+            ...(cli.values["log-format"] ? ["--log-format", String(cli.values["log-format"])] : []),
+            ...(cli.values["log-level"] ? ["--log-level", String(cli.values["log-level"])] : []),
+          ];
           const spawnArgs = selfPath.endsWith(".ts")
-            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag]
-            : [selfPath, "mcp", "--http", "--port", String(port), ...watchFlag, ...indexFlag];
+            ? ["--import", pathJoin(dirname(selfPath), "..", "node_modules", "tsx", "dist", "esm", "index.mjs"), selfPath, "mcp", "--http", "--port", String(port), ...logArgs, ...indexFlag]
+            : [selfPath, "mcp", "--http", "--port", String(port), ...logArgs, ...indexFlag];
           const child = nodeSpawn(process.execPath, spawnArgs, {
             stdio: ["ignore", logFd, logFd],
             detached: true,
@@ -3426,7 +4185,7 @@ if (isMain) {
         process.removeAllListeners("SIGINT");
         const { startMcpHttpServer } = await import("./protocol.js");
         try {
-          await startMcpHttpServer(port, { dbPath: storeDbPathOverride, watch: !!cli.values.watch });
+          await startMcpHttpServer(port, { dbPath: storeDbPathOverride });
         } catch (e: any) {
           if (e?.code === "EADDRINUSE") {
             console.error(`Port ${port} already in use. Try a different port with --port.`);
@@ -3442,12 +4201,20 @@ if (isMain) {
       break;
     }
 
-    case "demo":
-      runDemo();
-      break;
-
     case "cleanup": {
+      const dbPath = getDbPath();
       const db = getDb();
+
+      if (cli.values.cache === true || cli.values.cache === "true") {
+        const cacheCount = deleteLLMCache(db);
+        closeDb();
+        if (cli.opts.format === "json") {
+          console.log(JSON.stringify({ cache_only: true, cleared: cacheCount }, null, 2));
+        } else {
+          console.log(`${c.green}✓${c.reset} Cleared ${cacheCount} cached API responses`);
+        }
+        break;
+      }
 
       // 1. Clear llm_cache
       const cacheCount = deleteLLMCache(db);
@@ -3467,11 +4234,60 @@ if (isMain) {
         console.log(`${c.green}✓${c.reset} Removed ${inactiveDocs} inactive document records`);
       }
 
-      // 4. Vacuum to reclaim space
+      // 4. Checkpoint WAL before vacuum so sidecar pages are consolidated.
+      const checkpointed = walCheckpointTruncate(db);
+      if (checkpointed) {
+        console.log(`${c.green}✓${c.reset} WAL checkpointed (TRUNCATE)`);
+      } else {
+        console.log(`${c.yellow}!${c.reset} WAL checkpoint skipped (non-WAL mode or unsupported)`);
+      }
+
+      // 5. Vacuum to reclaim space
       vacuumDatabase(db);
       console.log(`${c.green}✓${c.reset} Database vacuumed`);
 
       closeDb();
+
+      // 6. Best-effort sidecar file cleanup after DB handle is closed.
+      const sidecar = cleanupSqliteSidecars(dbPath);
+      if (sidecar.walRemoved || sidecar.shmRemoved) {
+        console.log(`${c.green}✓${c.reset} Removed SQLite sidecars (wal=${sidecar.walRemoved}, shm=${sidecar.shmRemoved})`);
+      }
+      if (sidecar.lockedFiles.length > 0) {
+        console.error(`${c.yellow}!${c.reset} Locked files remain: ${sidecar.lockedFiles.join(", ")}`);
+      }
+
+      const cleanupReport = {
+        checkpointed,
+        wal_removed: sidecar.walRemoved,
+        shm_removed: sidecar.shmRemoved,
+        locked_files: sidecar.lockedFiles,
+      };
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify(cleanupReport, null, 2));
+      }
+      if (sidecar.lockedFiles.length > 0) {
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "verify-wipe": {
+      const report = verifyWipe();
+      const status = report.residualFiles.length === 0 ? "fully_wiped" : "residual_artifacts_found";
+      if (cli.opts.format === "json") {
+        console.log(JSON.stringify({ status, ...report }, null, 2));
+      } else if (report.residualFiles.length === 0) {
+        console.log(`${c.green}✓${c.reset} No residual index artifacts found.`);
+      } else {
+        console.error(`${c.yellow}!${c.reset} Residual artifacts detected:`);
+        for (const file of report.residualFiles) {
+          console.error(`- ${file}`);
+        }
+      }
+      if (report.residualFiles.length > 0) {
+        process.exit(2);
+      }
       break;
     }
 

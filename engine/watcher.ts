@@ -1,8 +1,7 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import { resolve, relative as pathRelative } from "path";
 import { realpathSync } from "fs";
-import { getDefaultLLM } from "./inference.js";
-import { DEFAULT_EMBED_MODEL, extractTitle, formatDocForEmbedding, type Store, chunkDocumentByTokens } from "./repository.js";
+import { type Store } from "./repository.js";
 
 interface WatchEvent {
   type: "add" | "change" | "unlink";
@@ -216,7 +215,6 @@ export class WatchDaemon {
 
     const startMs = Date.now();
     let processed = 0;
-    const changedForEmbedding: { hash: string; relativePath: string }[] = [];
     
     // Format current time
     const now = new Date().toLocaleTimeString();
@@ -240,10 +238,6 @@ export class WatchDaemon {
             if (result === "embedded") {
               console.log(`  ${c.green}[+]${c.reset} Re-indexed: ${event.relativePath}`);
               processed++;
-              const activeDoc = store.findActiveDocument(event.collectionName, event.relativePath);
-              if (activeDoc?.hash) {
-                changedForEmbedding.push({ hash: activeDoc.hash, relativePath: event.relativePath });
-              }
             } else if (result === "unchanged") {
               // hash matched, no change needed
               // console.log(`  [=] Unchanged: ${event.relativePath}`);
@@ -254,10 +248,6 @@ export class WatchDaemon {
         } catch (err) {
           console.error(`  ${c.red}[!]${c.reset} Error processing ${event.relativePath}:`, err);
         }
-      }
-
-      if (changedForEmbedding.length > 0) {
-        await this.embedChangedDocuments(changedForEmbedding);
       }
       
       if (processed > 0) {
@@ -274,87 +264,6 @@ export class WatchDaemon {
           this.processQueue().catch(err => console.error(err));
         }, 50);
       }
-    }
-  }
-
-  /**
-   * Batch-embed recently changed documents when a vector index exists.
-   */
-  private async embedChangedDocuments(changedDocs: { hash: string; relativePath: string }[]): Promise<void> {
-    const store = this.store as any;
-    const db = store.db;
-    if (!db) return;
-
-    const hasVecTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-    if (!hasVecTable) return;
-
-    const docByHash = new Map<string, { relativePath: string; body: string }>();
-    for (const doc of changedDocs) {
-      if (docByHash.has(doc.hash)) continue;
-      const row = db.prepare(`SELECT doc FROM content WHERE hash = ? LIMIT 1`).get(doc.hash) as { doc?: string } | undefined;
-      if (!row?.doc || !row.doc.trim()) continue;
-      docByHash.set(doc.hash, { relativePath: doc.relativePath, body: row.doc });
-    }
-
-    if (docByHash.size === 0) return;
-
-    const chunks: { hash: string; seq: number; pos: number; title: string; text: string }[] = [];
-    for (const [hash, payload] of docByHash.entries()) {
-      const title = extractTitle(payload.body, payload.relativePath);
-      const tokenChunks = await chunkDocumentByTokens(payload.body);
-      for (let i = 0; i < tokenChunks.length; i++) {
-        const chunk = tokenChunks[i]!;
-        chunks.push({
-          hash,
-          seq: i,
-          pos: chunk.pos,
-          title,
-          text: chunk.text,
-        });
-      }
-    }
-
-    if (chunks.length === 0) return;
-
-    const llm = getDefaultLLM();
-    const first = chunks[0]!;
-    const firstEmbedding = await llm.embed(formatDocForEmbedding(first.text, first.title));
-    if (!firstEmbedding) return;
-    store.ensureVecTable(firstEmbedding.embedding.length);
-
-    const now = new Date().toISOString();
-    const BATCH_SIZE = 32;
-    let inserted = 0;
-
-    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-      const batch = chunks.slice(i, i + BATCH_SIZE);
-      const texts = batch.map((chunk) => formatDocForEmbedding(chunk.text, chunk.title));
-      let embeddings = await llm.embedBatch(texts);
-
-      // Fallback per-item only for failed positions.
-      for (let j = 0; j < batch.length; j++) {
-        if (embeddings[j]) continue;
-        embeddings[j] = await llm.embed(texts[j]!);
-      }
-
-      for (let j = 0; j < batch.length; j++) {
-        const embedding = embeddings[j];
-        if (!embedding) continue;
-        const chunk = batch[j]!;
-        store.insertEmbedding(
-          chunk.hash,
-          chunk.seq,
-          chunk.pos,
-          new Float32Array(embedding.embedding),
-          DEFAULT_EMBED_MODEL,
-          now
-        );
-        inserted++;
-      }
-    }
-
-    if (inserted > 0) {
-      console.log(`[${new Date().toLocaleTimeString()}] Embedded ${inserted} chunk(s) from ${docByHash.size} changed file(s).`);
     }
   }
 }
