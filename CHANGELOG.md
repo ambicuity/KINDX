@@ -36,13 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.1](https://github.com/ambicuity/KINDX/compare/v1.3.0...v1.3.1) (2026-04-08)
 
-
-### Bug Fixes
-
-* **deps:** regenerate lockfile for cross-platform CI compatibility ([2b7b3b6](https://github.com/ambicuity/KINDX/commit/2b7b3b68b5e5cb05d7ecb3d1c7bc8b934f7f5497))
-
-## [1.3.1](https://github.com/ambicuity/KINDX/compare/v1.3.0...v1.3.1) (2026-04-08)
-
 ### Fixed
 
 - Regenerated lockfile for cross-platform CI compatibility.
