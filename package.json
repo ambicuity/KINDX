@@ -1,6 +1,6 @@
 {
   "name": "@ambicuity/kindx",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "KINDX - On-device hybrid search engine for markdown documents with BM25, vector embeddings, and LLM reranking",
   "type": "module",
   "workspaces": [
@@ -19,6 +19,8 @@
   "scripts": {
     "prepare": "[ -d .git ] && ./tooling/install-hooks.sh || true",
     "build": "tsc -p tsconfig.build.json && printf '#!/usr/bin/env node\\n' | cat - dist/kindx.js > dist/kindx.tmp && mv dist/kindx.tmp dist/kindx.js && chmod +x dist/kindx.js",
+    "build:packages": "npm run build -w @ambicuity/kindx-schemas && npm run build -w @ambicuity/kindx-client",
+    "build:all": "npm run build && npm run build:packages",
     "pretest": "npm run build",
     "pretest:all": "npm run build:all",
     "test": "vitest run --reporter=verbose specs/",
@@ -31,6 +33,14 @@
     "search": "tsx engine/kindx.ts search",
     "vsearch": "tsx engine/kindx.ts vsearch",
     "rerank": "tsx engine/kindx.ts rerank",
+    "perf:warm-daemon": "tsx tooling/benchmark_warm_daemon.ts",
+    "perf:llm-pool-contention": "tsx tooling/benchmark_llm_pool_contention.ts",
+    "qa:customer-pov": "tsx tooling/customer_pov_launch_gate.ts --phase P0",
+    "qa:customer-pov:p0": "tsx tooling/customer_pov_launch_gate.ts --phase P0 --output tooling/artifacts/customer-pov-p0.json",
+    "qa:customer-pov:p1": "tsx tooling/customer_pov_launch_gate.ts --phase P1 --output tooling/artifacts/customer-pov-p1.json",
+    "qa:customer-pov:p2": "tsx tooling/customer_pov_launch_gate.ts --phase P2 --output tooling/artifacts/customer-pov-p2.json",
+    "qa:customer-pov:p3": "tsx tooling/customer_pov_launch_gate.ts --phase P3 --output tooling/artifacts/customer-pov-p3.json",
+    "qa:customer-pov:all": "tsx tooling/customer_pov_launch_gate.ts --phase all --output tooling/artifacts/customer-pov-all.json",
     "arch:status": "tsx engine/kindx.ts arch status",
     "arch:refresh": "tsx engine/kindx.ts arch refresh",
     "inspector": "npx @modelcontextprotocol/inspector tsx engine/kindx.ts mcp",

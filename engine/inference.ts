@@ -294,7 +294,35 @@ export async function pullModels(
       }
     }
 
-    const path = await resolveModelFile(model, cacheDir);
+    let lastPercent = -1;
+    let started = false;
+    const path = await resolveModelFile(model, {
+      directory: cacheDir,
+      cli: false,
+      onProgress: (status) => {
+        if (!started) {
+          process.stderr.write(`KINDX: Pulling inference model ${filename || model}...\n`);
+          started = true;
+        }
+        if (status.totalSize > 0) {
+          const percent = Math.round((status.downloadedSize / status.totalSize) * 100);
+          if (percent !== lastPercent) {
+            process.stderr.write(`\r  Downloading... [${percent}% of ${Math.round(status.totalSize / (1024 * 1024))}MB]`);
+            lastPercent = percent;
+          }
+        } else if (status.downloadedSize > 0) {
+          const mb = Math.round(status.downloadedSize / (1024 * 1024));
+          if (mb !== lastPercent) {
+            process.stderr.write(`\r  Downloading... [${mb}MB]`);
+            lastPercent = mb;
+          }
+        }
+      }
+    });
+
+    if (started) {
+      process.stderr.write(" - Done.\n");
+    }
     const sizeBytes = existsSync(path) ? statSync(path).size : 0;
     if (hfRef && filename) {
       const remoteEtag = await getRemoteEtag(hfRef);
@@ -763,8 +791,37 @@ export class LlamaCpp implements LLM {
    */
   private async resolveModel(modelUri: string): Promise<string> {
     this.ensureModelCacheDir();
-    // resolveModelFile handles HF URIs and downloads to the cache dir
-    return await resolveModelFile(modelUri, this.modelCacheDir);
+    let lastPercent = -1;
+    let started = false;
+    const path = await resolveModelFile(modelUri, {
+      directory: this.modelCacheDir,
+      cli: false,
+      onProgress: (status) => {
+        if (!started) {
+          process.stderr.write(`\nKINDX: Initializing local inference model ${modelUri.split("/").pop()}...\n`);
+          started = true;
+        }
+        if (status.totalSize > 0) {
+          const percent = Math.round((status.downloadedSize / status.totalSize) * 100);
+          if (percent !== lastPercent) {
+            process.stderr.write(`\r  Downloading... [${percent}% of ${Math.round(status.totalSize / (1024 * 1024))}MB]`);
+            lastPercent = percent;
+          }
+        } else if (status.downloadedSize > 0) {
+          const mb = Math.round(status.downloadedSize / (1024 * 1024));
+          if (mb !== lastPercent) {
+            process.stderr.write(`\r  Downloading... [${mb}MB]`);
+            lastPercent = mb;
+          }
+        }
+      }
+    });
+    
+    if (started) {
+      process.stderr.write(" - Done.\n");
+    }
+    
+    return path;
   }
 
   /**
@@ -1798,7 +1855,16 @@ export function getDefaultLLM(): LLM {
 }
 
 export async function withLLMScope<T>(scopeKey: string | undefined, fn: () => Promise<T>): Promise<T> {
-  return llmScopeStorage.run(scopeKey, fn);
+  // Wrap in the LLM pool semaphore to bound concurrent LLM operations.
+  // Pool size is controlled by KINDX_LLM_POOL_SIZE (default: 1 = backward-compatible
+  // full serialization). Setting pool size > 1 enables concurrent agent queries
+  // at the cost of proportionally higher VRAM/RAM usage.
+  const { getDefaultLLMPool } = await import("./llm-pool.js");
+  const pool = getDefaultLLMPool();
+  return pool.withLease(
+    () => llmScopeStorage.run(scopeKey, fn),
+    30_000, // 30s timeout — prevents indefinite queueing under burst load
+  );
 }
 
 export async function disposeSensitiveContexts(): Promise<void> {

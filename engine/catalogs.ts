@@ -5,7 +5,7 @@
  * Collections define which directories to index and their associated contexts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
 import YAML from "yaml";
@@ -31,6 +31,16 @@ export interface Collection {
   context?: ContextMap;      // Optional context definitions
   update?: string;           // Optional bash command to run during kindx update
   includeByDefault?: boolean; // Include in queries by default (default: true)
+  shard_count?: number;      // Optional per-collection shard count for vector storage
+  max_rerank_candidates?: number; // Optional max rerank candidates for this collection
+  rerank_timeout_ms?: number; // Optional rerank timeout budget
+  embedding_batch_size?: number; // Optional embed scheduler batch size
+  embedding_workers?: number; // Optional embed scheduler worker count
+  embed_queue_limit?: number; // Optional per-run embed queue cap
+  vector_fanout_workers?: number; // Optional bounded parallelism for shard/collection vector fanout
+  rerank_queue_limit?: number; // Optional rerank queue length cap
+  rerank_concurrency?: number; // Optional rerank parallel workers
+  rerank_drop_policy?: "timeout_fallback" | "wait"; // Optional rerank backpressure behavior
 }
 
 /**
@@ -100,6 +110,9 @@ function ensureConfigDir(): void {
 // Core functions
 // ============================================================================
 
+let _cachedConfig: CollectionConfig | null = null;
+let _lastConfigMtime = 0;
+
 /**
  * Load configuration from ~/.config/kindx/index.yml
  * Returns empty config if file doesn't exist
@@ -111,6 +124,11 @@ export function loadConfig(): CollectionConfig {
   }
 
   try {
+    const stat = statSync(configPath);
+    if (_cachedConfig && stat.mtimeMs === _lastConfigMtime) {
+      return _cachedConfig;
+    }
+
     const content = readFileSync(configPath, "utf-8");
     const config = YAML.parse(content) as CollectionConfig;
 
@@ -118,6 +136,9 @@ export function loadConfig(): CollectionConfig {
     if (!config.collections) {
       config.collections = {};
     }
+
+    _cachedConfig = config;
+    _lastConfigMtime = stat.mtimeMs;
 
     return config;
   } catch (error) {
@@ -138,6 +159,11 @@ export function saveConfig(config: CollectionConfig): void {
       lineWidth: 0,  // Don't wrap lines
     });
     writeFileSync(configPath, yaml, "utf-8");
+    
+    // Update cache synchronously
+    const stat = statSync(configPath);
+    _cachedConfig = config;
+    _lastConfigMtime = stat.mtimeMs;
   } catch (error) {
     throw new Error(`Failed to write ${configPath}: ${error}`);
   }
@@ -193,7 +219,20 @@ export function getDefaultCollectionNames(): string[] {
  */
 export function updateCollectionSettings(
   name: string,
-  settings: { update?: string | null; includeByDefault?: boolean }
+  settings: {
+    update?: string | null;
+    includeByDefault?: boolean;
+    shard_count?: number | null;
+    max_rerank_candidates?: number | null;
+    rerank_timeout_ms?: number | null;
+    embedding_batch_size?: number | null;
+    embedding_workers?: number | null;
+    embed_queue_limit?: number | null;
+    vector_fanout_workers?: number | null;
+    rerank_queue_limit?: number | null;
+    rerank_concurrency?: number | null;
+    rerank_drop_policy?: "timeout_fallback" | "wait" | null;
+  }
 ): boolean {
   const config = loadConfig();
   let collection: any;
@@ -219,6 +258,56 @@ export function updateCollectionSettings(
     } else {
       collection.includeByDefault = settings.includeByDefault;
     }
+  }
+
+  if (settings.shard_count !== undefined) {
+    if (settings.shard_count === null) delete collection.shard_count;
+    else collection.shard_count = settings.shard_count;
+  }
+
+  if (settings.max_rerank_candidates !== undefined) {
+    if (settings.max_rerank_candidates === null) delete collection.max_rerank_candidates;
+    else collection.max_rerank_candidates = settings.max_rerank_candidates;
+  }
+
+  if (settings.rerank_timeout_ms !== undefined) {
+    if (settings.rerank_timeout_ms === null) delete collection.rerank_timeout_ms;
+    else collection.rerank_timeout_ms = settings.rerank_timeout_ms;
+  }
+
+  if (settings.embedding_batch_size !== undefined) {
+    if (settings.embedding_batch_size === null) delete collection.embedding_batch_size;
+    else collection.embedding_batch_size = settings.embedding_batch_size;
+  }
+
+  if (settings.embedding_workers !== undefined) {
+    if (settings.embedding_workers === null) delete collection.embedding_workers;
+    else collection.embedding_workers = settings.embedding_workers;
+  }
+
+  if (settings.embed_queue_limit !== undefined) {
+    if (settings.embed_queue_limit === null) delete collection.embed_queue_limit;
+    else collection.embed_queue_limit = settings.embed_queue_limit;
+  }
+
+  if (settings.vector_fanout_workers !== undefined) {
+    if (settings.vector_fanout_workers === null) delete collection.vector_fanout_workers;
+    else collection.vector_fanout_workers = settings.vector_fanout_workers;
+  }
+
+  if (settings.rerank_queue_limit !== undefined) {
+    if (settings.rerank_queue_limit === null) delete collection.rerank_queue_limit;
+    else collection.rerank_queue_limit = settings.rerank_queue_limit;
+  }
+
+  if (settings.rerank_concurrency !== undefined) {
+    if (settings.rerank_concurrency === null) delete collection.rerank_concurrency;
+    else collection.rerank_concurrency = settings.rerank_concurrency;
+  }
+
+  if (settings.rerank_drop_policy !== undefined) {
+    if (settings.rerank_drop_policy === null) delete collection.rerank_drop_policy;
+    else collection.rerank_drop_policy = settings.rerank_drop_policy;
   }
 
   saveConfig(config);

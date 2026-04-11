@@ -7,7 +7,7 @@
  ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝  ╚═╝
 ```
 
-# KINDX — Enterprise-Grade On-Device Knowledge Infrastructure
+# KINDX — Production-Quality On-Device Knowledge Infrastructure
 
 [![MCP-Compatible](https://img.shields.io/badge/MCP-Compatible-6f42c1?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHJ4PSIyIiBmaWxsPSIjNmY0MmMxIi8+PC9zdmc+)](https://modelcontextprotocol.io)
 [![Local-First](https://img.shields.io/badge/Local--First-Privacy%20Guaranteed-22c55e?style=flat-square)](https://github.com/ambicuity/KINDX)
@@ -16,9 +16,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ambicuity/KINDX/badge)](https://scorecard.dev/viewer/?uri=github.com/ambicuity/KINDX)
 
-**Knowledge Infrastructure for AI Agents.** KINDX is a high-performance, local-first backend for Agentic Context Injection — enabling AI agents to perform deterministic, privacy-preserving Contextual Retrieval over enterprise corpora without a single byte leaving the edge.
+**Knowledge Infrastructure for AI Agents.** KINDX is a high-performance, local-first backend for Agentic Context Injection — enabling AI agents to perform deterministic, privacy-preserving Contextual Retrieval over document corpora without a single byte leaving the edge.
 
 KINDX combines BM25 full-text retrieval, vector semantic retrieval, and LLM re-ranking — all running locally via `node-llama-cpp` with GGUF models. It is designed to be called by agents, not typed by humans.
+
+| Capability | Status |
+|---|:---:|
+| Hybrid BM25 + Vector + LLM Rerank | ✅ Implemented |
+| Encryption at rest (SQLCipher) | ✅ Implemented |
+| ANN index (centroid-based sharding) | ✅ Implemented |
+| Prometheus `/metrics` + structured logging | ✅ Implemented |
+| Diagnostics (`doctor`, `backup`, `repair`) | ✅ Implemented |
+| Multi-format ingestion (PDF, DOCX, code) | ✅ Implemented |
+| Bounded LLM concurrency pool | ✅ Implemented |
+| Multi-tenant isolation / RBAC | ✅ Implemented |
 
 > Read the progress log in the [CHANGELOG](./CHANGELOG.md).
 
@@ -98,11 +109,6 @@ kindx multi-get "journals/2025-05*.md"
 # Scoped Contextual Retrieval within a collection
 kindx search "API" -c notes
 
-# Corrective feedback (Phase 1)
-kindx feedback --irrelevant --query "deploy k8s" --chunk "#abc123:2"
-kindx feedback --relevant --query "deploy k8s" --chunk "#abc123:2"
-kindx feedback list --query "deploy"
-
 # Export full match set for agent pipeline
 kindx search "API" --all --files --min-score 0.3
 
@@ -135,7 +141,7 @@ kindx get "docs/api-reference.md" --full
 KINDX now includes typed client packages and integration scaffolding:
 
 - `@ambicuity/kindx-schemas` — shared Zod schemas for KINDX MCP/HTTP request and response contracts.
-- `@ambicuity/kindx-client` — TypeScript client for `/query` and MCP tool calls (`get`, `multi_get`, `status`, `kindx_feedback`, and memory tools).
+- `@ambicuity/kindx-client` — TypeScript client for `/query` and MCP tool calls (`get`, `multi_get`, `status`, and memory tools).
 - `python/kindx-langchain` — installable Python retriever wrapper for LangChain-style document retrieval.
 - [`reference/integrations/agent-templates.md`](reference/integrations/agent-templates.md) — tested MCP configuration templates for OpenDevin, Goose, and Claude Code.
 
@@ -146,13 +152,12 @@ KINDX now includes typed client packages and integration scaffolding:
 KINDX exposes a Model Context Protocol (MCP) server for tool-call integration with any MCP-compatible agent runtime.
 
 **Registered Tools:**
-- `kindx_search` — BM25 Contextual Retrieval (supports collection filter)
-- `kindx_vector_search` — Neural vector Contextual Retrieval (supports collection filter)
-- `kindx_deep_search` — Hybrid Neural-Symbolic retrieval with query expansion and reranking (supports collection filter)
-- `kindx_get` — Neural Extraction by path or docid (with fuzzy matching fallback)
-- `kindx_multi_get` — Bulk Neural Extraction by glob pattern, list, or docids
-- `kindx_status` — Index health and collection inventory
-- `kindx_feedback` — Store relevance feedback (`relevant` / `irrelevant`) for query+chunk pairs
+- `query` — Hybrid structured retrieval over `lex`/`vec`/`hyde` sub-queries
+- `get` — Retrieve one document by path/docid
+- `multi_get` — Bulk retrieval by glob/list/docids
+- `status` — Index and capability health
+- `arch_status`, `arch_query` — Optional Arch sidecar status/hints
+- `memory_put`, `memory_search`, `memory_history`, `memory_stats`, `memory_mark_accessed` — Scoped memory lifecycle tools
 
 **Claude Desktop configuration** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
@@ -175,18 +180,23 @@ By default, the MCP server uses stdio (launched as a subprocess per client). For
 # Foreground
 kindx mcp --http                # localhost:8181
 kindx mcp --http --port 8080    # custom port
-kindx mcp --http --watch        # start HTTP MCP + live watcher in one process
 
 # Persistent daemon
 kindx mcp --http --daemon       # writes PID to ~/.cache/kindx/mcp.pid
-kindx mcp --http --daemon --watch
 kindx mcp stop                  # terminate via PID file
 kindx status                    # reports "MCP: running (PID ...)"
 ```
 
 Endpoints:
 - `POST /mcp` — MCP Streamable HTTP (JSON, stateless)
+- `POST /query` (alias `/search`) — direct structured retrieval endpoint
 - `GET /health` — liveness probe with uptime
+- `GET /metrics` — Prometheus metrics for request/retrieval/runtime health
+
+Authentication notes:
+- HTTP mode requires `Authorization: Bearer <token>` for `/mcp`, `/query`, and `/search`.
+- If `KINDX_MCP_TOKEN` is unset, KINDX auto-generates a token and stores it at `~/.config/kindx/mcp_token`.
+- `/health` is intentionally unauthenticated for liveness probes.
 
 LLM models remain resident in VRAM across requests. Embedding and reranking contexts are disposed after 5 min idle and transparently recreated on next request (~1 s penalty, models remain warm).
 
@@ -215,6 +225,83 @@ tsx tooling/benchmark_release_hardening.ts --collection docs --query "auth token
 Audit artifacts:
 - `reference/audits/release-readiness-hardening-2026-04-02.md`
 - `reference/audits/release-readiness-benchmarks-2026-04-02.md`
+- `reference/runbooks/operating-modes.md`
+- `reference/runbooks/customer-pov-launch-readiness.md`
+- `reference/runbooks/customer-pov-evidence-template.md`
+
+---
+
+## Multi-Tenant RBAC
+
+KINDX supports multi-tenant isolation with role-based access control for shared HTTP MCP deployments. When enabled, each bearer token resolves to a tenant with a specific role and collection-scoped access.
+
+### Roles
+
+| Role | Query | Get | Memory Write | Embed/Update | Collection Manage | Backup | Tenant Manage |
+|------|:-----:|:---:|:------------:|:------------:|:-----------------:|:------:|:-------------:|
+| `admin` | ✅ all | ✅ all | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `editor` | ✅ assigned | ✅ assigned | ✅ | ✅ assigned | ❌ | ❌ | ❌ |
+| `viewer` | ✅ assigned | ✅ assigned | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+### Tenant Management
+
+```bash
+# Create a viewer tenant for CI — shows token once (save it)
+kindx tenant add ci-bot --role viewer docs notes
+
+# Create an editor for a team lead
+kindx tenant add team-lead --role editor --name "Team Lead" docs notes meetings
+
+# Create an admin
+kindx tenant add platform-admin --role admin
+
+# List all tenants
+kindx tenant list
+
+# Grant additional collection access
+kindx tenant grant ci-bot meetings
+
+# Revoke access
+kindx tenant revoke ci-bot meetings
+
+# Rotate a compromised token
+kindx tenant rotate ci-bot
+
+# Disable a tenant (token is rejected immediately)
+kindx tenant disable ci-bot
+
+# Re-enable
+kindx tenant enable ci-bot
+
+# Show RBAC status
+kindx tenant status
+```
+
+### Token Security
+
+- Tokens are generated as 32-byte cryptographically random hex strings.
+- Only SHA-256 hashes are stored in `~/.config/kindx/tenants.yml` — plaintext tokens are shown once at creation time and cannot be recovered.
+- Token rotation generates a new token and invalidates the old one atomically.
+- Disabled tenants are rejected at the auth layer before any resource access.
+
+### Backward Compatibility
+
+- **No `tenants.yml`**: KINDX operates in single-tenant mode. `KINDX_MCP_TOKEN` (or auto-generated token) provides admin-level access. No behavior change.
+- **With `tenants.yml`**: Multi-tenant RBAC is active. Each bearer token maps to a tenant identity. Unknown tokens receive 403 Forbidden.
+
+### Collection Isolation
+
+Tenants can only query, get, and retrieve documents from their assigned collections:
+
+```bash
+# Tenant ci-bot (viewer, collections: docs, notes)
+curl -H "Authorization: Bearer <ci-bot-token>" \
+  -X POST http://localhost:8181/query \
+  -d '{"searches": [{"type": "lex", "query": "API"}], "collections": ["docs", "secret"]}'
+# → "secret" is silently filtered out; only "docs" results returned
+```
+
+> **Pro-tip (Shared Agent Clusters):** Run `kindx mcp --http --daemon` with multi-tenant RBAC to give each agent team its own scoped view of the knowledge base. CI bots get read-only viewer tokens; development agents get scoped editor tokens.
 
 ---
 
@@ -483,6 +570,22 @@ KINDX_CPU_ONLY=1 kindx query "your query"
 KINDX_LLM_BACKEND=remote kindx query "your query"
 ```
 
+### Troubleshooting: Ingestion / Watch / Embed Lifecycle
+
+If retrieval quality drops unexpectedly after file edits, validate the full lifecycle:
+
+1. `kindx update` refreshes indexed content and extraction metadata.
+2. `kindx watch` keeps incremental changes synchronized in near real time.
+3. `kindx embed` refreshes vectors for new/changed content hashes.
+
+Quick checks:
+- Run `kindx status` and review `Needs embedding` and ingestion warning counts.
+- For extractor-related issues (`pdf`/`docx`), verify:
+  - `KINDX_EXTRACTOR_PDF=1`
+  - `KINDX_EXTRACTOR_DOCX=1`
+  - `KINDX_EXTRACTOR_FALLBACK_POLICY=fallback` (or `strict`)
+- If `kindx watch` is active for multiple collections, use `kindx scheduler status` and `/metrics` to identify queue pressure before increasing rerank limits.
+
 ### Troubleshooting: MCP HTTP Bind
 
 `kindx mcp --http` attempts to bind `localhost` first, then falls back to `127.0.0.1` if localhost binding is restricted by the host environment.
@@ -504,17 +607,39 @@ kindx pull                   # Download/check the default local models
 kindx update                 # Re-index configured collections
 kindx watch                  # Keep the index fresh in the background
 kindx status                 # Report index, collection, and MCP health
+kindx doctor                 # Deterministic diagnostics (vec/model/integrity/WAL/trust)
+kindx repair --check-only    # Dry-run repair checks
+kindx backup create [path]   # Create SQLite backup snapshot
+kindx backup verify <path>   # Verify backup integrity
+kindx backup restore <path>  # Restore backup to active index (use --force to overwrite)
+kindx scheduler status        # Show shard sync checkpoint/runtime warnings
 kindx cleanup                # Clear caches, orphaned rows, and vacuum the DB
 kindx cleanup --cache        # Clear only LLM + semantic query caches
 kindx mcp                    # Start the MCP server (stdio by default)
+kindx tenant <subcommand>    # Multi-tenant RBAC management
 kindx migrate <target> <path> # Import from Chroma or OpenCLAW
 kindx skill install          # Install the packaged Claude skill locally
 kindx --skill                # Print the packaged skill markdown
 kindx --version              # Print the installed CLI version
 ```
 
-KINDX opens SQLite indexes with `journal_mode=WAL` and `busy_timeout=5000`, so background writers
+KINDX opens SQLite indexes with `journal_mode=WAL` and `busy_timeout=30000`, so background writers
 (for example `kindx watch`) and MCP readers can run concurrently with fewer lock conflicts.
+
+Tenant subcommands:
+
+```bash
+kindx tenant add <id> [collections...] --role <admin|editor|viewer>
+kindx tenant remove <id>
+kindx tenant list
+kindx tenant show <id>
+kindx tenant rotate <id>
+kindx tenant grant <id> <col1> [col2 ...]
+kindx tenant revoke <id> <col1> [col2 ...]
+kindx tenant disable <id>
+kindx tenant enable <id>
+kindx tenant status
+```
 
 Collection subcommands:
 
@@ -538,8 +663,60 @@ kindx context rm <path>
 
 kindx mcp --http
 kindx mcp --http --daemon
+kindx mcp --http --log-format json --log-level INFO
 kindx mcp stop
 ```
+
+Phase 2 scale controls (optional, additive):
+
+```bash
+# query-time rerank budgeting
+kindx query \"distributed tracing\" --max-rerank-candidates 24 --rerank-timeout-ms 2500
+
+# resumable shard sync during embed
+kindx embed --resume
+```
+
+P2 runtime contracts (stable):
+
+```bash
+# Encryption-at-rest (auto-migrate plaintext index + shard dbs in place)
+export KINDX_ENCRYPTION_KEY="replace-with-strong-key"
+
+# Force sqlite runtime driver (default probes sqlcipher-capable first)
+export KINDX_SQLITE_DRIVER="better-sqlite3-multiple-ciphers"
+
+# ANN tuning
+export KINDX_ANN_ENABLE=1
+export KINDX_ANN_PROBE_COUNT=4
+export KINDX_ANN_SHORTLIST=200
+
+# Extractor policy
+export KINDX_EXTRACTOR_PDF=1
+export KINDX_EXTRACTOR_DOCX=1
+export KINDX_EXTRACTOR_FALLBACK_POLICY=fallback   # or strict
+
+# LLM concurrency pool (multi-agent throughput)
+export KINDX_LLM_POOL_SIZE=2  # concurrent LLM contexts (default: 1)
+```
+
+Stable `/metrics` names:
+- `kindx_http_requests_total{route,method,status}`
+- `kindx_http_request_duration_ms_bucket{route,method,le}`
+- `kindx_query_requests_total{profile,degraded,route}`
+- `kindx_query_degraded_total{reason}`
+- `kindx_query_route_total{route}`
+- `kindx_query_total_ms_bucket{profile,degraded,route,le}`
+- `kindx_rerank_queue_depth`
+- `kindx_rerank_queue_active`
+- `kindx_rerank_queue_concurrency`
+- `kindx_rerank_queue_timed_out_total`
+- `kindx_rerank_queue_saturated_total`
+- `kindx_llm_pool_size`
+- `kindx_llm_pool_active`
+- `kindx_llm_pool_waiting`
+- `kindx_llm_pool_acquired_total`
+- `kindx_llm_pool_timed_out_total`
 
 ### collection Management
 
@@ -651,6 +828,12 @@ kindx context rm kindx://notes/old
 | query    | Hybrid: FTS + Vector + Expansion + Rerank      |
 +----------+-------------------------------------------------+
 ```
+
+Quick mode chooser:
+- Use `kindx search` for exact keywords, quoted phrases, and negation filters.
+- Use `kindx vsearch` when you need semantic-only retrieval and can skip rerank overhead.
+- Use `kindx query` as the default for agent workflows or ambiguous natural-language requests.
+- Prefer HTTP MCP daemon (`kindx mcp --http --daemon`) when multiple agents share one warm runtime.
 
 ```bash
 # Full-text Contextual Retrieval (fast, keyword-based)
@@ -765,66 +948,19 @@ Index stored at: `~/.cache/kindx/index.sqlite`
 
 ### Schema
 
-```mermaid
-erDiagram
-    collections {
-        text name PK
-        text path
-        text mask
-    }
-    path_contexts {
-        text virtual_path PK
-        text description
-    }
-    documents {
-        text hash PK
-        text path
-        text title
-        text content
-        text docid
-        text collection
-        integer mtime
-    }
-    documents_fts {
-        text content
-        text title
-    }
-    content_vectors {
-        text hash_seq PK
-        text hash FK
-        integer seq
-        integer pos
-        text chunk_hash
-        blob embedding
-    }
-    vectors_vec {
-        text hash_seq PK
-        blob vector
-    }
-    llm_cache {
-        text key PK
-        text response
-        integer created
-    }
-    semantic_cache {
-        integer id PK
-        text query
-        text model
-        text response
-        text created_at
-        integer hits
-    }
-    semantic_cache_vec {
-        text cache_key PK
-        float[768] embedding
-    }
+Core runtime tables (current implementation):
+- `content(hash, doc, created_at)` — content-addressed document bodies.
+- `documents(id, collection, path, title, hash, created_at, modified_at, active)` — file-system view over content hashes.
+- `documents_fts(filepath, title, body)` — FTS5 lexical index kept in sync via triggers.
+- `content_vectors(hash, seq, pos, model, embedded_at)` — chunk metadata for vectorized content.
+- `vectors_vec(hash_seq, embedding)` — sqlite-vec virtual table (`vec0`) for ANN/exact vector search.
+- `llm_cache(hash, result, created_at)` — cached expansion/rerank artifacts.
+- `document_ingest(collection, path, format, extractor, warnings_json, extracted_at, content_hash)` — ingestion diagnostics.
 
-    collections ||--o{ documents : contains
-    documents ||--|{ documents_fts : indexes
-    documents ||--o{ content_vectors : chunks
-    content_vectors ||--|| vectors_vec : embeds
-    semantic_cache ||--|| semantic_cache_vec : embeds
-```
+Memory subsystem tables:
+- `memories`, `memory_tags`, `memory_links`, `memory_embeddings`, `memory_vectors_vec`.
+
+Collection definitions are YAML-backed (`~/.config/kindx/index.yml`), not stored in SQLite.
 
 ---
 
@@ -832,13 +968,31 @@ erDiagram
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KINDX_EMBED_MODEL` | `embeddinggemma-300M` | Override embedding model (HuggingFace URI) |
+| `KINDX_EMBED_MODEL` | `hf:ggml-org/embeddinggemma-300M-GGUF/...` | Override embedding model (HuggingFace URI) |
+| `KINDX_RERANK_MODEL` | `hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/...` | Override reranker model |
+| `KINDX_GENERATE_MODEL` | `hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/...` | Override query-expansion model |
 | `KINDX_EXPAND_CONTEXT_SIZE` | `2048` | Context window for query expansion LLM |
+| `KINDX_RERANK_CONTEXT_SIZE` | `4096` | Context window for reranker contexts |
 | `KINDX_CPU_ONLY` | (unset) | Set to `1` to force local model execution on CPU (slower, but more compatible) |
 | `KINDX_CONFIG_DIR` | `~/.config/kindx` | Configuration directory override |
-| `KINDX_SEMANTIC_CACHE_THRESHOLD` | `0.92` | Minimum cosine similarity to reuse semantic query-expansion cache |
-| `KINDX_CACHE_TTL_HOURS` | `168` | Semantic query-expansion cache entry TTL in hours |
 | `XDG_CACHE_HOME` | `~/.cache` | Cache base directory |
+| `KINDX_MCP_TOKEN` | auto-generated or unset | HTTP auth bearer token (`/mcp`, `/query`, `/search`) |
+| `KINDX_QUERY_TIMEOUT_MS` | `0` (disabled) | Query timeout guard in MCP HTTP mode |
+| `KINDX_INFLIGHT_DEDUPE` | `join` | In-flight query dedupe mode (`join`/`off`) |
+| `KINDX_QUERY_REPLAY_DIR` | (unset) | Write query replay artifacts for debugging |
+| `KINDX_RERANK_TIMEOUT_MS` | (unset) | Global rerank timeout budget override |
+| `KINDX_RERANK_QUEUE_LIMIT` | (unset) | Queue cap before rerank fallback |
+| `KINDX_RERANK_CONCURRENCY` | (unset) | Parallel rerank workers |
+| `KINDX_RERANK_DROP_POLICY` | `timeout_fallback` | Queue behavior (`timeout_fallback`/`wait`) |
+| `KINDX_VECTOR_FANOUT_WORKERS` | `4` | Max parallel vector fanout workers |
+| `KINDX_ENCRYPTION_KEY` | (unset) | Enable keyed encrypted index open/migration |
+| `KINDX_SQLITE_DRIVER` | auto-probe | Force SQLite runtime driver module |
+| `KINDX_ANN_ENABLE` | `1` | Enable ANN routing for sharded collections |
+| `KINDX_ANN_PROBE_COUNT` | `4` | ANN probe count per shard |
+| `KINDX_ANN_SHORTLIST` | dynamic | ANN shortlist size |
+| `KINDX_EXTRACTOR_PDF` | `1` | Enable PDF extraction |
+| `KINDX_EXTRACTOR_DOCX` | `1` | Enable DOCX extraction |
+| `KINDX_EXTRACTOR_FALLBACK_POLICY` | `fallback` | `fallback` or `strict` extractor behavior |
 | `NO_COLOR` | (unset) | Disable ANSI terminal colors |
 | `KINDX_LLM_BACKEND` | `local` | Set to `remote` to use an OpenAI-compatible API instead of local GPU |
 | `KINDX_OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | URL for the Remote API backend (e.g. Ollama, LM Studio) |

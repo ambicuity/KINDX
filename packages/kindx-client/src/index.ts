@@ -1,5 +1,4 @@
 import {
-  KindxFeedbackInputSchema,
   KindxGetInputSchema,
   KindxMcpToolResultSchema,
   KindxMemoryHistoryInputSchema,
@@ -10,7 +9,6 @@ import {
   KindxQueryInputSchema,
   KindxQueryResponseSchema,
   KindxStatusOutputSchema,
-  type KindxFeedbackInput,
   type KindxGetInput,
   type KindxMcpToolResult,
   type KindxMemoryHistoryInput,
@@ -88,10 +86,6 @@ export class KindxClient {
     return KindxStatusOutputSchema.parse(output.structuredContent ?? {});
   }
 
-  async kindxFeedback(input: KindxFeedbackInput): Promise<KindxMcpToolResult> {
-    return this.callTool("kindx_feedback", KindxFeedbackInputSchema.parse(input));
-  }
-
   async memoryPut(input: KindxMemoryPutInput): Promise<KindxMcpToolResult> {
     return this.callTool("memory_put", KindxMemoryPutInputSchema.parse(input));
   }
@@ -105,7 +99,7 @@ export class KindxClient {
   }
 
   async memoryMark(input: KindxMemoryMarkInput): Promise<KindxMcpToolResult> {
-    return this.callTool("memory_mark", KindxMemoryMarkInputSchema.parse(input));
+    return this.callTool("memory_mark_accessed", KindxMemoryMarkInputSchema.parse(input));
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<KindxMcpToolResult> {

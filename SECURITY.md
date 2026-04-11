@@ -6,7 +6,7 @@ The following versions of KINDX are currently receiving security updates:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.x.x   | Active support     |
+| 1.x.x   | Active support     |
 
 ## Reporting a Vulnerability
 
@@ -65,9 +65,14 @@ When contributing to this project, please observe the following:
 
 ## MCP HTTP Server Security
 
-When running KINDX in HTTP daemon mode (`kindx mcp --http`), the MCP endpoint is bound to `localhost` only but is unauthenticated by default, since the primary use case is single-user local access.
+When running KINDX in HTTP daemon mode (`kindx mcp --http`), the MCP endpoint binds to loopback (`localhost`/`127.0.0.1`) and enforces bearer-token authentication for `/mcp`, `/query`, and `/search`.
 
-**For any shared server or networked deployment**, authentication MUST be enabled:
+Authentication token source (in order):
+1. `KINDX_MCP_TOKEN` if explicitly set.
+2. Existing token file at `~/.config/kindx/mcp_token`.
+3. Auto-generated token persisted to `~/.config/kindx/mcp_token` (mode `0600`) on first HTTP startup.
+
+For shared hosts and networked deployments, set and rotate `KINDX_MCP_TOKEN` explicitly:
 
 ```bash
 # Generate a token and export it before starting the daemon:
@@ -75,7 +80,7 @@ export KINDX_MCP_TOKEN="$(openssl rand -hex 32)"
 kindx mcp --http --port 7700
 ```
 
-When `KINDX_MCP_TOKEN` is set:
+When auth is active:
 - All requests to `/mcp`, `/query`, and `/search` must include `Authorization: Bearer <token>`
 - The `/health` endpoint is intentionally exempt (monitoring probe compatibility)
 - Any request with a missing or incorrect token receives `401 Unauthorized`
@@ -93,6 +98,6 @@ When `KINDX_MCP_TOKEN` is set:
 }
 ```
 
-Failure to set `KINDX_MCP_TOKEN` in a networked environment allows any process on the host to query your knowledge base and retrieve document content.
+If you do not explicitly set `KINDX_MCP_TOKEN`, use the generated token from `~/.config/kindx/mcp_token` when configuring MCP clients.
 
 Thank you for helping keep KINDX and its users safe.

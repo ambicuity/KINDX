@@ -507,6 +507,23 @@ ${token}
     const after = await runQmd(["get", "kindx://empty-check/only.md"], { dbPath, configDir });
     expect(after.exitCode).toBe(1);
   });
+
+  test("supports --pull and skips non-git collections safely", async () => {
+    const { dbPath, configDir } = await createIsolatedTestEnv("update-pull");
+    const collectionDir = join(testDir, `update-pull-${Date.now()}`);
+    await mkdir(collectionDir, { recursive: true });
+    await writeFile(join(collectionDir, "one.md"), "# Pull Skip\n\nnot a git repo\n");
+
+    const add = await runQmd(
+      ["collection", "add", collectionDir, "--name", "pull-check"],
+      { dbPath, configDir }
+    );
+    expect(add.exitCode).toBe(0);
+
+    const update = await runQmd(["update", "--pull"], { dbPath, configDir });
+    expect(update.exitCode).toBe(0);
+    expect(update.stdout).toContain("--pull skipped");
+  });
 });
 
 describe("CLI Add-Context Command", () => {
@@ -558,6 +575,13 @@ describe("CLI Cleanup Command", () => {
     const { stdout, exitCode } = await runQmd(["cleanup"]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Database vacuumed");
+  });
+
+  test("cleanup --cache clears cache only", async () => {
+    const { stdout, exitCode } = await runQmd(["cleanup", "--cache"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Cleared");
+    expect(stdout).not.toContain("Database vacuumed");
   });
 
   test("verify-wipe emits structured status with --json", async () => {
@@ -1331,6 +1355,29 @@ describe("mcp http daemon", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.status).toBe("ok");
+    } finally {
+      proc.kill("SIGTERM");
+      await new Promise(r => proc.on("close", r));
+    }
+  });
+
+  test("foreground HTTP server exposes Prometheus metrics", async () => {
+    const port = randomPort();
+    const proc = spawnHttpServer(port);
+
+    try {
+      const ready = await waitForServer(port);
+      expect(ready).toBe(true);
+
+      // Generate at least one request metric.
+      const health = await fetch(`http://localhost:${port}/health`);
+      expect(health.ok).toBe(true);
+
+      const metrics = await fetch(`http://localhost:${port}/metrics`);
+      expect(metrics.ok).toBe(true);
+      const body = await metrics.text();
+      expect(body).toContain("kindx_http_requests_total");
+      expect(body).toContain("kindx_http_request_duration_ms_bucket");
     } finally {
       proc.kill("SIGTERM");
       await new Promise(r => proc.on("close", r));

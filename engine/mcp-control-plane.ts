@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { promises as fsp } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
@@ -48,13 +50,23 @@ function stableHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function isSafeHeaderName(name: string): boolean {
+  return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name);
+}
+
+function isSafeHeaderValue(value: string): boolean {
+  return !/[\r\n]/.test(value);
+}
+
 function normalizeHeaderMap(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (!k.trim()) continue;
+    const key = k.trim();
+    if (!key || !isSafeHeaderName(key)) continue;
     if (typeof v === "string") {
-      out[k.trim()] = v;
+      if (!isSafeHeaderValue(v)) continue;
+      out[key] = v;
     }
   }
   return out;
@@ -75,13 +87,22 @@ function normalizeTools(value: unknown): string[] | null {
   return out;
 }
 
-function readJsonIfExists(path: string): McpControlPlaneConfig | null {
+function readJsonIfExists(path: string, sourceLabel?: string): McpControlPlaneConfig | null {
   try {
     if (!existsSync(path)) return null;
     const parsed = JSON.parse(readFileSync(path, "utf-8"));
-    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed || typeof parsed !== "object") {
+      if (sourceLabel) {
+        process.stderr.write(`KINDX Warning: ignoring invalid ${sourceLabel} config (expected JSON object): ${path}\n`);
+      }
+      return null;
+    }
     return parsed as McpControlPlaneConfig;
-  } catch {
+  } catch (err) {
+    if (sourceLabel) {
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`KINDX Warning: failed to parse ${sourceLabel} config ${path}: ${detail}\n`);
+    }
     return null;
   }
 }
@@ -125,16 +146,22 @@ export function loadMcpControlPlaneConfig(cwd?: string): {
   const runtime = runtimeRaw ? (() => {
     try {
       const parsed = JSON.parse(runtimeRaw);
-      return (parsed && typeof parsed === "object") ? (parsed as McpControlPlaneConfig) : null;
-    } catch {
+      if (!parsed || typeof parsed !== "object") {
+        process.stderr.write("KINDX Warning: ignoring invalid KINDX_MCP_SERVERS_JSON (expected JSON object)\n");
+        return null;
+      }
+      return parsed as McpControlPlaneConfig;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`KINDX Warning: failed to parse KINDX_MCP_SERVERS_JSON: ${detail}\n`);
       return null;
     }
   })() : null;
 
   const projectPath = getProjectConfigPath(cwd);
   const userPath = getUserConfigPath();
-  const project = readJsonIfExists(projectPath);
-  const user = readJsonIfExists(userPath);
+  const project = readJsonIfExists(projectPath, "project MCP");
+  const user = readJsonIfExists(userPath, "user MCP");
 
   const trustedProject = boolFromEnv(process.env.KINDX_TRUST_PROJECT)
     || existsSync(getProjectTrustMarkerPath(cwd));
@@ -198,14 +225,15 @@ export function resolveMcpServerControl(
 export function buildResolvedHttpHeaders(control: ResolvedMcpServerControl): Record<string, string> {
   const out: Record<string, string> = { ...control.http_headers };
   for (const [header, envName] of Object.entries(control.env_http_headers)) {
+    if (!isSafeHeaderName(header)) continue;
     const envValue = process.env[envName];
-    if (typeof envValue === "string" && envValue.trim()) {
+    if (typeof envValue === "string" && envValue.trim() && isSafeHeaderValue(envValue)) {
       out[header] = envValue;
     }
   }
   if (control.bearer_token_env_var) {
     const token = process.env[control.bearer_token_env_var];
-    if (typeof token === "string" && token.trim()) {
+    if (typeof token === "string" && token.trim() && isSafeHeaderValue(token)) {
       out.Authorization = `Bearer ${token.trim()}`;
     }
   }
@@ -250,9 +278,44 @@ type ToolListCacheEnvelope = {
   payload: unknown;
 };
 
+const CACHE_WARN_WINDOW_MS = 60_000;
+const CACHE_TTL_SANITY_MULTIPLIER = 24;
+const CACHE_WARN_STATE_SOFT_LIMIT = 1_000;
+const CACHE_DISK_PRUNE_INTERVAL_MS = 60_000;
+const cacheWarnState = new Map<string, number>();
+
+function warnCache(code: string, key: string, detail: string): void {
+  const now = Date.now();
+  if (cacheWarnState.size > CACHE_WARN_STATE_SOFT_LIMIT) {
+    for (const [k, ts] of cacheWarnState) {
+      if (now - ts > CACHE_WARN_WINDOW_MS) {
+        cacheWarnState.delete(k);
+      }
+    }
+  }
+  const dedupeKey = `${code}:${key}`;
+  const last = cacheWarnState.get(dedupeKey);
+  if (typeof last === "number" && now - last < CACHE_WARN_WINDOW_MS) return;
+  cacheWarnState.set(dedupeKey, now);
+  process.stderr.write(`KINDX Warning: mcp_tool_cache_${code} key=${key} ${detail}\n`);
+}
+
+function isValidEnvelopeShape(value: unknown): value is ToolListCacheEnvelope {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const rec = value as Record<string, unknown>;
+  return (
+    typeof rec.key === "string"
+    && Number.isFinite(rec.created_at)
+    && Number.isFinite(rec.expires_at)
+    && "payload" in rec
+  );
+}
+
 export class McpToolListCache {
   private readonly memory = new Map<string, ToolListCacheEnvelope>();
   private readonly ttlMs: number;
+  private lastDiskPruneAt = 0;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(ttlMs = DEFAULT_CACHE_TTL_MS) {
     this.ttlMs = ttlMs;
@@ -274,6 +337,7 @@ export class McpToolListCache {
 
   get(key: string): unknown | null {
     const now = Date.now();
+    this.pruneExpiredInMemory(now);
     const mem = this.memory.get(key);
     if (mem && mem.expires_at > now) {
       return mem.payload;
@@ -282,7 +346,7 @@ export class McpToolListCache {
     const disk = this.readDisk(key);
     if (!disk) return null;
     if (disk.expires_at <= now) {
-      this.deleteDisk(key);
+      this.removeCorruptDisk(this.cachePath(key), key);
       return null;
     }
     this.memory.set(key, disk);
@@ -290,23 +354,214 @@ export class McpToolListCache {
   }
 
   set(key: string, payload: unknown): void {
+    const now = Date.now();
+    this.pruneExpiredInMemory(now);
     const envelope: ToolListCacheEnvelope = {
       key,
-      created_at: Date.now(),
-      expires_at: Date.now() + this.ttlMs,
+      created_at: now,
+      expires_at: now + this.ttlMs,
       payload,
     };
     this.memory.set(key, envelope);
-    this.writeDisk(key, envelope);
+    this.enqueueDiskTask(async () => {
+      await this.writeDisk(key, envelope);
+      // Opportunistically clean up stale disk entries on a bounded cadence.
+      await this.maybePruneExpiredDisk(Date.now());
+    });
   }
 
   invalidate(key: string): void {
     this.memory.delete(key);
-    this.deleteDisk(key);
+    this.enqueueDiskTask(() => this.deleteDisk(key));
   }
 
   invalidateAll(): void {
     this.memory.clear();
+    this.enqueueDiskTask(async () => {
+      const dir = this.cacheDir();
+      const entries = await fsp.readdir(dir);
+      for (const entry of entries) {
+        if (!entry.endsWith(".json")) continue;
+        const path = resolve(dir, entry);
+        try {
+          if (existsSync(path)) {
+            await fsp.unlink(path);
+          }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          warnCache("invalidate_failed", entry.replace(/\.json$/, ""), detail);
+        }
+      }
+    });
+  }
+
+  private pruneExpiredInMemory(now: number): void {
+    for (const [key, envelope] of this.memory.entries()) {
+      if (envelope.expires_at <= now) {
+        this.memory.delete(key);
+      }
+    }
+  }
+
+  async waitForIdleForTests(): Promise<void> {
+    await this.writeQueue;
+  }
+
+  private enqueueDiskTask(task: () => Promise<void>): void {
+    this.writeQueue = this.writeQueue
+      .then(task)
+      .catch((err) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        warnCache("queue_failed", "global", detail);
+      });
+  }
+
+  private async maybePruneExpiredDisk(now: number): Promise<void> {
+    if (now - this.lastDiskPruneAt < CACHE_DISK_PRUNE_INTERVAL_MS) return;
+    this.lastDiskPruneAt = now;
+    await this.pruneExpiredDisk(now);
+  }
+
+  private async pruneExpiredDisk(now: number): Promise<void> {
+    const dir = this.cacheDir();
+    const entries = await fsp.readdir(dir);
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const path = resolve(dir, entry);
+      try {
+        if (!existsSync(path)) continue;
+        const parsed = JSON.parse(await fsp.readFile(path, "utf-8"));
+        if (!isValidEnvelopeShape(parsed)) {
+          await fsp.unlink(path);
+          continue;
+        }
+        if (parsed.expires_at <= now) {
+          await fsp.unlink(path);
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        warnCache("prune_failed", entry.replace(/\.json$/, ""), detail);
+      }
+    }
+  }
+
+  private validateEnvelope(key: string, parsed: unknown): ToolListCacheEnvelope | null {
+    if (!isValidEnvelopeShape(parsed)) {
+      warnCache("invalid_envelope", key, "invalid envelope shape");
+      return null;
+    }
+    if (parsed.key !== key) {
+      warnCache("invalid_envelope", key, `key mismatch envelope=${parsed.key}`);
+      return null;
+    }
+    if (parsed.created_at > parsed.expires_at) {
+      warnCache("invalid_envelope", key, "created_at is greater than expires_at");
+      return null;
+    }
+    const futureSkewMs = parsed.created_at - Date.now();
+    if (futureSkewMs > this.ttlMs) {
+      warnCache("invalid_envelope", key, `created_at is too far in the future skew_ms=${futureSkewMs}`);
+      return null;
+    }
+    const ttl = parsed.expires_at - parsed.created_at;
+    if (ttl <= 0 || ttl > this.ttlMs * CACHE_TTL_SANITY_MULTIPLIER) {
+      warnCache("invalid_envelope", key, `ttl out of range ttl_ms=${ttl}`);
+      return null;
+    }
+    return parsed;
+  }
+
+  private removeCorruptDisk(path: string, key: string): void {
+    try {
+      if (existsSync(path)) {
+        unlinkSync(path);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warnCache("delete_failed", key, detail);
+    }
+  }
+
+  private tempCachePath(key: string): string {
+    const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return resolve(this.cacheDir(), `${key}.${nonce}.tmp`);
+  }
+
+  private async syncFd(fd: FileHandle): Promise<void> {
+    await fd.sync();
+  }
+
+  private async fsyncPathBestEffort(path: string, key: string, kind: "file" | "dir"): Promise<void> {
+    let fd: FileHandle | null = null;
+    try {
+      fd = await fsp.open(path, "r");
+      await this.syncFd(fd);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warnCache("fsync_failed", key, `${kind}:${detail}`);
+    } finally {
+      if (fd !== null) {
+        try {
+          await fd.close();
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          warnCache("fsync_failed", key, `${kind}_close:${detail}`);
+        }
+      }
+    }
+  }
+
+  private readDisk(key: string): ToolListCacheEnvelope | null {
+    const path = this.cachePath(key);
+    try {
+      if (!existsSync(path)) return null;
+      const parsed = JSON.parse(readFileSync(path, "utf-8"));
+      const envelope = this.validateEnvelope(key, parsed);
+      if (!envelope) {
+        this.removeCorruptDisk(path, key);
+        return null;
+      }
+      return envelope;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warnCache("read_failed", key, detail);
+      this.removeCorruptDisk(path, key);
+      return null;
+    }
+  }
+
+  private async writeDisk(key: string, envelope: ToolListCacheEnvelope): Promise<void> {
+    const path = this.cachePath(key);
+    const parentDir = dirname(path);
+    const tempPath = this.tempCachePath(key);
+    try {
+      await fsp.mkdir(parentDir, { recursive: true });
+      await fsp.writeFile(tempPath, JSON.stringify(envelope), { mode: 0o600 });
+      await this.fsyncPathBestEffort(tempPath, key, "file");
+      await fsp.rename(tempPath, path);
+      await this.fsyncPathBestEffort(parentDir, key, "dir");
+      try {
+        await fsp.chmod(path, 0o600);
+      } catch {
+        // best effort permission tighten
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warnCache("write_failed", key, detail);
+      this.removeCorruptDisk(tempPath, key);
+    }
+  }
+
+  private async deleteDisk(key: string): Promise<void> {
+    const path = this.cachePath(key);
+    try {
+      if (existsSync(path)) {
+        await fsp.unlink(path);
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      warnCache("delete_failed", key, detail);
+    }
   }
 
   private cacheDir(): string {
@@ -317,38 +572,5 @@ export class McpToolListCache {
 
   private cachePath(key: string): string {
     return resolve(this.cacheDir(), `${key}.json`);
-  }
-
-  private readDisk(key: string): ToolListCacheEnvelope | null {
-    try {
-      const path = this.cachePath(key);
-      if (!existsSync(path)) return null;
-      const parsed = JSON.parse(readFileSync(path, "utf-8")) as ToolListCacheEnvelope;
-      if (!parsed || typeof parsed !== "object") return null;
-      return parsed;
-    } catch {
-      return null;
-    }
-  }
-
-  private writeDisk(key: string, envelope: ToolListCacheEnvelope): void {
-    try {
-      const path = this.cachePath(key);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, JSON.stringify(envelope));
-    } catch {
-      // best effort cache
-    }
-  }
-
-  private deleteDisk(key: string): void {
-    try {
-      const path = this.cachePath(key);
-      if (existsSync(path)) {
-        unlinkSync(path);
-      }
-    } catch {
-      // best effort
-    }
   }
 }

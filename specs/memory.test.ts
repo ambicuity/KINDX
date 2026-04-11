@@ -9,6 +9,8 @@ import {
   getMemoryHistory,
   getMemoryStats,
   markMemoryAccessed,
+  deriveWorkspaceMemoryScope,
+  resolveMemoryScope,
 } from "../engine/memory.js";
 
 const openDbs: Database[] = [];
@@ -29,6 +31,61 @@ afterEach(() => {
 });
 
 describe("memory subsystem", () => {
+  test("resolveMemoryScope prefers explicit > session > workspace > default", () => {
+    const explicit = resolveMemoryScope({
+      explicitScope: "explicit-scope",
+      sessionScope: "session-scope",
+      workspaceScope: "workspace-scope",
+    });
+    expect(explicit.scope).toBe("explicit-scope");
+    expect(explicit.source).toBe("explicit");
+
+    const session = resolveMemoryScope({
+      sessionScope: "session-scope",
+      workspaceScope: "workspace-scope",
+    });
+    expect(session.scope).toBe("session-scope");
+    expect(session.source).toBe("session");
+
+    const workspace = resolveMemoryScope({
+      workspaceScope: "workspace-scope",
+    });
+    expect(workspace.scope).toBe("workspace-scope");
+    expect(workspace.source).toBe("workspace");
+
+    const fallback = resolveMemoryScope({});
+    expect(fallback.scope).toBe("default");
+    expect(fallback.source).toBe("default");
+  });
+
+  test("resolveMemoryScope rejects explicit cross-scope when strict isolation is enabled", () => {
+    const resolved = resolveMemoryScope({
+      explicitScope: "scope-b",
+      sessionScope: "scope-a",
+      strictIsolation: true,
+    });
+    expect(resolved.error?.code).toBe("cross_scope_forbidden");
+    expect(resolved.error?.message).toContain("scope-b");
+    expect(resolved.error?.message).toContain("scope-a");
+  });
+
+  test("deriveWorkspaceMemoryScope disambiguates same basename across different paths", () => {
+    const a = deriveWorkspaceMemoryScope("/workspace/team-a/app");
+    const b = deriveWorkspaceMemoryScope("/workspace/team-b/app");
+
+    expect(a).toMatch(/^app-[a-f0-9]{8}$/);
+    expect(b).toMatch(/^app-[a-f0-9]{8}$/);
+    expect(a).not.toBe(b);
+  });
+
+  test("deriveWorkspaceMemoryScope is stable for file:// URIs", () => {
+    const first = deriveWorkspaceMemoryScope("file:///Users/example/projects/kindx");
+    const second = deriveWorkspaceMemoryScope("file:///Users/example/projects/kindx");
+
+    expect(first).toBe(second);
+    expect(first).toMatch(/^kindx-[a-f0-9]{8}$/);
+  });
+
   test("exact dedup for (scope,key,value)", async () => {
     const db = createMemoryDb();
     const first = await upsertMemory(db, {

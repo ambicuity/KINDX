@@ -17,6 +17,7 @@ import picomatch from "picomatch";
 import { createHash } from "crypto";
 import { dirname, resolve as pathResolve, relative } from "path";
 import { existsSync, realpathSync, statSync, mkdirSync, unlinkSync } from "node:fs";
+import { ingestFile } from "./ingestion.js";
 import {
   LLM,
   getDefaultLLM,
@@ -41,6 +42,12 @@ import {
   type NamedCollection,
 } from "./catalogs.js";
 import { initializeMemorySchema } from "./memory.js";
+import { describeEncryptionState, ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
+import {
+  getShardRuntimeStatus,
+  getAnnRuntimeStatus,
+  searchShardedVectorsWithDiagnostics,
+} from "./sharding.js";
 
 // =============================================================================
 // Configuration
@@ -52,6 +59,47 @@ export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-Q8_0";
 export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
 export const DEFAULT_GLOB = "**/*.md";
 export const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024; // 10KB
+
+function getCollectionShardCount(collectionName?: string): number {
+  if (!collectionName) return 1;
+  const cfg = getCollection(collectionName) as (NamedCollection & { shard_count?: number }) | null;
+  const raw = Number(cfg?.shard_count ?? 1);
+  return Number.isFinite(raw) && raw > 1 ? Math.floor(raw) : 1;
+}
+
+function getCollectionRerankSettings(collectionName?: string): {
+  maxCandidates?: number;
+  timeoutMs?: number;
+  queueLimit?: number;
+  concurrency?: number;
+  dropPolicy?: "timeout_fallback" | "wait";
+  vectorFanoutWorkers?: number;
+} {
+  if (!collectionName) return {};
+  const cfg = getCollection(collectionName) as (NamedCollection & {
+    max_rerank_candidates?: number;
+    rerank_timeout_ms?: number;
+    rerank_queue_limit?: number;
+    rerank_concurrency?: number;
+    rerank_drop_policy?: "timeout_fallback" | "wait";
+    vector_fanout_workers?: number;
+  }) | null;
+  const maxCandidates = Number(cfg?.max_rerank_candidates);
+  const timeoutMs = Number(cfg?.rerank_timeout_ms);
+  const queueLimit = Number(cfg?.rerank_queue_limit);
+  const concurrency = Number(cfg?.rerank_concurrency);
+  const vectorFanoutWorkers = Number(cfg?.vector_fanout_workers);
+  const dropPolicyRaw = String(cfg?.rerank_drop_policy ?? "").trim().toLowerCase();
+  const dropPolicy = dropPolicyRaw === "wait" ? "wait" : dropPolicyRaw === "timeout_fallback" ? "timeout_fallback" : undefined;
+  return {
+    maxCandidates: Number.isFinite(maxCandidates) && maxCandidates > 0 ? Math.floor(maxCandidates) : undefined,
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : undefined,
+    queueLimit: Number.isFinite(queueLimit) && queueLimit > 0 ? Math.floor(queueLimit) : undefined,
+    concurrency: Number.isFinite(concurrency) && concurrency > 0 ? Math.floor(concurrency) : undefined,
+    dropPolicy,
+    vectorFanoutWorkers: Number.isFinite(vectorFanoutWorkers) && vectorFanoutWorkers > 0 ? Math.floor(vectorFanoutWorkers) : undefined,
+  };
+}
 
 // Chunking: 900 tokens per chunk with 15% overlap
 // Increased from 800 to accommodate smart chunking finding natural break points
@@ -679,6 +727,29 @@ function initializeDatabase(db: Database): void {
     )
   `);
 
+  // Index capability metadata (used for runtime compatibility and diagnostics)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS index_capabilities (
+      capability TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+  // Ingestion diagnostics per document path.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS document_ingest (
+      collection TEXT NOT NULL,
+      path TEXT NOT NULL,
+      format TEXT NOT NULL,
+      extractor TEXT NOT NULL,
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      extracted_at TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      PRIMARY KEY (collection, path)
+    )
+  `);
+
   // Content vectors
   const cvInfo = db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
   const hasSeqColumn = cvInfo.some(col => col.name === 'seq');
@@ -745,6 +816,15 @@ function initializeDatabase(db: Database): void {
 
   // Agent memory subsystem (m13v-style), scoped by namespace.
   initializeMemorySchema(db);
+
+  const now = new Date().toISOString();
+  const setCapability = db.prepare(`
+    INSERT OR REPLACE INTO index_capabilities (capability, value, updated_at)
+    VALUES (?, ?, ?)
+  `);
+  setCapability.run("ann", "centroid-v1", now);
+  setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
+  setCapability.run("extractors", "native-text+pdf-docx-adapter-v1", now);
 }
 
 
@@ -813,7 +893,15 @@ export type Store = {
 
   // Search
   searchFTS: (query: string, limit?: number, collectionName?: string) => SearchResult[];
-  searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
+  searchVec: (
+    query: string,
+    model: string,
+    limit?: number,
+    collectionName?: string,
+    session?: ILLMSession,
+    precomputedEmbedding?: number[],
+    diagnostics?: { onWarning?: (warning: string) => void }
+  ) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string) => Promise<ExpandedQuery[]>;
@@ -863,6 +951,8 @@ export type Store = {
  */
 export function createStore(dbPath?: string): Store {
   const resolvedPath = dbPath || getDefaultDbPath();
+  ensureEncryptedIndexReady(resolvedPath);
+  ensureEncryptedShardIndexesReady(resolvedPath);
   const db = openDatabase(resolvedPath);
   initializeDatabase(db);
 
@@ -906,7 +996,15 @@ export function createStore(dbPath?: string): Store {
 
     // Search
     searchFTS: (query: string, limit?: number, collectionName?: string) => searchFTS(db, query, limit, collectionName),
-    searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
+    searchVec: (
+      query: string,
+      model: string,
+      limit?: number,
+      collectionName?: string,
+      session?: ILLMSession,
+      precomputedEmbedding?: number[],
+      diagnostics?: { onWarning?: (warning: string) => void }
+    ) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding, diagnostics),
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string) => expandQuery(query, model, db),
@@ -967,6 +1065,11 @@ export type DocumentResult = {
   modifiedAt: string;         // Last modification timestamp
   bodyLength: number;         // Body length in bytes (useful before loading)
   body?: string;              // Document body (optional, load with getDocumentBody)
+  extraction?: {
+    format: string;
+    extractor: string;
+    warnings: string[];
+  };
 };
 
 /**
@@ -1135,7 +1238,32 @@ export type IndexStatus = {
   totalDocuments: number;
   needsEmbedding: number;
   hasVectorIndex: boolean;
+  capabilities: Record<string, string>;
+  ann: {
+    enabled: boolean;
+    mode: "ann" | "exact";
+    state: "ready" | "stale" | "missing" | "degraded";
+    probeCount: number;
+    shortlistLimit: number;
+    details: Array<{ collection: string; shard: number; state: "ready" | "stale" | "missing" | "degraded"; reason: string }>;
+  };
+  encryption: {
+    encrypted: boolean;
+    keyConfigured: boolean;
+    bytes: number;
+  };
+  ingestion: {
+    warnedDocuments: number;
+    byFormat: Array<{ format: string; count: number }>;
+    byWarning: Array<{ warning: string; count: number }>;
+  };
   collections: CollectionInfo[];
+  shards: {
+    enabledCollections: Array<{ collection: string; shardCount: number }>;
+    checkpointPath: string;
+    checkpointExists: boolean;
+    warnings: string[];
+  };
 };
 
 // =============================================================================
@@ -1398,6 +1526,56 @@ export function insertDocument(
       modified_at = excluded.modified_at,
       active = 1
   `).run(collectionName, path, title, hash, createdAt, modifiedAt);
+}
+
+export function upsertDocumentIngestion(
+  db: Database,
+  collectionName: string,
+  path: string,
+  payload: {
+    format: string;
+    extractor: string;
+    warnings: string[];
+    contentHash: string;
+    extractedAt: string;
+  }
+): void {
+  db.prepare(`
+    INSERT OR REPLACE INTO document_ingest
+      (collection, path, format, extractor, warnings_json, extracted_at, content_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    collectionName,
+    path,
+    payload.format,
+    payload.extractor,
+    JSON.stringify(payload.warnings || []),
+    payload.extractedAt,
+    payload.contentHash
+  );
+}
+
+export function getIndexCapabilities(db: Database): Record<string, string> {
+  const hasCapsTable = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type='table' AND name='index_capabilities'
+  `).get() as { name?: string } | undefined;
+  if (!hasCapsTable?.name) {
+    return {
+      ann: "centroid-v1",
+      encryption: process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none",
+      extractors: "native-text+pdf-docx-adapter-v1",
+    };
+  }
+  const rows = db.prepare(`
+    SELECT capability, value
+    FROM index_capabilities
+    ORDER BY capability
+  `).all() as Array<{ capability: string; value: string }>;
+  const out: Record<string, string> = {};
+  for (const row of rows) out[row.capability] = row.value;
+  return out;
 }
 
 /**
@@ -2344,32 +2522,25 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // Vector Search
 // =============================================================================
 
-export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
-  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableExists) return [];
+/** Module-level flag to emit the vector-unavailable warning only once per process. */
+let _vecUnavailableWarned = false;
 
-  const embedding = precomputedEmbedding ?? await getEmbedding(query, model, true, session);
-  if (!embedding) return [];
+function getMainDatabasePath(db: Database): string {
+  const row = db.prepare(`PRAGMA database_list`).all() as Array<{ name: string; file: string }>;
+  const main = row.find((r) => r.name === "main");
+  return main?.file || getDefaultDbPath();
+}
 
-  // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
-  // hang indefinitely when combined with JOINs in the same query. Do NOT try to
-  // "optimize" this by combining into a single query with JOINs - it will break.
-  // See: https://github.com/ambicuity/KINDX/pull/23
-
-  // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
-  const vecResults = db.prepare(`
-    SELECT hash_seq, distance
-    FROM vectors_vec
-    WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
-
+function mapVectorMatchesToDocuments(
+  db: Database,
+  vecResults: Array<{ hash_seq: string; distance: number }>,
+  limit: number,
+  collectionName?: string
+): SearchResult[] {
   if (vecResults.length === 0) return [];
-
-  // Step 2: Get chunk info and document data
   const hashSeqs = vecResults.map(r => r.hash_seq);
   const distanceMap = new Map(vecResults.map(r => [r.hash_seq, r.distance]));
 
-  // Build query for document lookup
   const placeholders = hashSeqs.map(() => '?').join(',');
   let docSql = `
     SELECT
@@ -2386,7 +2557,6 @@ export async function searchVec(db: Database, query: string, model: string, limi
     WHERE cv.hash || '_' || cv.seq IN (${placeholders})
   `;
   const params: string[] = [...hashSeqs];
-
   if (collectionName) {
     docSql += ` AND d.collection = ?`;
     params.push(collectionName);
@@ -2397,7 +2567,6 @@ export async function searchVec(db: Database, query: string, model: string, limi
     display_path: string; title: string; body: string;
   }[];
 
-  // Combine with distances and dedupe by filepath
   const seen = new Map<string, { row: typeof docRows[0]; bestDist: number }>();
   for (const row of docRows) {
     const distance = distanceMap.get(row.hash_seq) ?? 1;
@@ -2408,7 +2577,7 @@ export async function searchVec(db: Database, query: string, model: string, limi
   }
 
   return Array.from(seen.values())
-    .sort((a, b) => a.bestDist - b.bestDist)
+    .sort((a, b) => (a.bestDist - b.bestDist) || a.row.filepath.localeCompare(b.row.filepath))
     .slice(0, limit)
     .map(({ row, bestDist }) => {
       const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
@@ -2419,15 +2588,81 @@ export async function searchVec(db: Database, query: string, model: string, limi
         hash: row.hash,
         docid: getDocid(row.hash),
         collectionName,
-        modifiedAt: "",  // Not available in vec query
+        modifiedAt: "",
         bodyLength: row.body.length,
         body: row.body,
         context: getContextForFile(db, row.filepath),
-        score: 1 - bestDist,  // Cosine similarity = 1 - cosine distance
+        score: 1 - bestDist,
         source: "vec" as const,
         chunkPos: row.pos,
       };
     });
+}
+
+export async function searchVec(
+  db: Database,
+  query: string,
+  model: string,
+  limit: number = 20,
+  collectionName?: string,
+  session?: ILLMSession,
+  precomputedEmbedding?: number[],
+  diagnostics?: { onWarning?: (warning: string) => void }
+): Promise<SearchResult[]> {
+  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  const shardCount = getCollectionShardCount(collectionName);
+  if (!tableExists && shardCount <= 1) {
+    if (!_vecUnavailableWarned) {
+      _vecUnavailableWarned = true;
+      if (_sqliteVecAvailable === false) {
+        process.stderr.write(
+          `[KINDX] ⚠ Vector search unavailable: sqlite-vec extension failed to load. Run 'kindx doctor' for setup guidance.\n`
+        );
+      } else {
+        process.stderr.write(
+          `[KINDX] ⚠ Vector search unavailable: no embeddings found. Run 'kindx embed' to generate vectors.\n`
+        );
+      }
+    }
+    return [];
+  }
+
+  const embedding = precomputedEmbedding ?? await getEmbedding(query, model, true, session);
+  if (!embedding) return [];
+
+  // If collection sharding is enabled, fan out over shard DBs and merge top matches.
+  if (collectionName && shardCount > 1) {
+    const mainDbPath = getMainDatabasePath(db);
+    const perShardK = Math.max(4, Math.ceil((limit * 3) / shardCount));
+    const shardResult = searchShardedVectorsWithDiagnostics(
+      mainDbPath,
+      collectionName,
+      shardCount,
+      new Float32Array(embedding),
+      perShardK
+    );
+    for (const warning of shardResult.warnings) diagnostics?.onWarning?.(warning);
+    const shardResults = shardResult.matches;
+    if (shardResults.length > 0) {
+      return mapVectorMatchesToDocuments(db, shardResults.slice(0, limit * 3), limit, collectionName);
+    }
+    // fallback to main vectors table if shard results are empty
+  }
+
+  if (!tableExists) return [];
+
+  // IMPORTANT: We use a two-step query approach here because sqlite-vec virtual tables
+  // hang indefinitely when combined with JOINs in the same query. Do NOT try to
+  // "optimize" this by combining into a single query with JOINs - it will break.
+  // See: https://github.com/ambicuity/KINDX/pull/23
+
+  // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
+  const vecResults = db.prepare(`
+    SELECT hash_seq, distance
+    FROM vectors_vec
+    WHERE embedding MATCH ? AND k = ?
+  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  return mapVectorMatchesToDocuments(db, vecResults, limit, collectionName);
 }
 
 // =============================================================================
@@ -2797,7 +3032,19 @@ type DbDocRow = {
   modified_at: string;
   body_length: number;
   body?: string;
+  ingest_format?: string;
+  ingest_extractor?: string;
+  ingest_warnings_json?: string;
 };
+
+function hasDocumentIngestTable(db: Database): boolean {
+  const row = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type='table' AND name='document_ingest'
+  `).get() as { name?: string } | undefined;
+  return !!row?.name;
+}
 
 /**
  * Find a document by filename/path, docid (#hash), or with fuzzy matching.
@@ -2831,6 +3078,13 @@ export function findDocument(db: Database, filename: string, options: { includeB
   }
 
   const bodyCol = options.includeBody ? `, content.doc as body` : ``;
+  const hasIngest = hasDocumentIngestTable(db);
+  const ingestCols = hasIngest
+    ? `, di.format as ingest_format, di.extractor as ingest_extractor, di.warnings_json as ingest_warnings_json`
+    : ``;
+  const ingestJoin = hasIngest
+    ? `LEFT JOIN document_ingest di ON di.collection = d.collection AND di.path = d.path`
+    : ``;
 
   // Build computed columns
   // Note: absoluteFilepath is computed from YAML collections after query
@@ -2840,8 +3094,10 @@ export function findDocument(db: Database, filename: string, options: { includeB
     d.title,
     d.hash,
     d.collection,
+    d.path,
     d.modified_at,
     LENGTH(content.doc) as body_length
+    ${ingestCols}
     ${bodyCol}
   `;
 
@@ -2850,6 +3106,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
     SELECT ${selectCols}
     FROM documents d
     JOIN content ON content.hash = d.hash
+    ${ingestJoin}
     WHERE 'kindx://' || d.collection || '/' || d.path = ? AND d.active = 1
   `).get(filepath) as DbDocRow | null;
 
@@ -2859,6 +3116,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
       SELECT ${selectCols}
       FROM documents d
       JOIN content ON content.hash = d.hash
+      ${ingestJoin}
       WHERE 'kindx://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
       LIMIT 1
     `).get(`%${filepath}`) as DbDocRow | null;
@@ -2873,6 +3131,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
         SELECT ${selectCols}
         FROM documents d
         JOIN content ON content.hash = d.hash
+        ${ingestJoin}
         WHERE 'kindx://' || d.collection || '/' || d.path = ? AND d.active = 1
       `).get(virtualP) as DbDocRow | null;
     }
@@ -2898,6 +3157,7 @@ export function findDocument(db: Database, filename: string, options: { includeB
           SELECT ${selectCols}
           FROM documents d
           JOIN content ON content.hash = d.hash
+          ${ingestJoin}
           WHERE d.collection = ? AND d.path = ? AND d.active = 1
         `).get(coll.name, relativePath) as DbDocRow | null;
         if (doc) break;
@@ -2925,6 +3185,19 @@ export function findDocument(db: Database, filename: string, options: { includeB
     modifiedAt: doc.modified_at,
     bodyLength: doc.body_length,
     ...(options.includeBody && doc.body !== undefined && { body: doc.body }),
+    ...((doc.ingest_format || doc.ingest_extractor || doc.ingest_warnings_json) && {
+      extraction: {
+        format: doc.ingest_format || "unknown",
+        extractor: doc.ingest_extractor || "unknown",
+        warnings: (() => {
+          try {
+            return JSON.parse(doc.ingest_warnings_json || "[]") as string[];
+          } catch {
+            return ["ingest_warning_parse_error"];
+          }
+        })(),
+      },
+    }),
   };
 }
 
@@ -2992,14 +3265,23 @@ export function findDocuments(
   const maxBytes = options.maxBytes ?? DEFAULT_MULTI_GET_MAX_BYTES;
 
   const bodyCol = options.includeBody ? `, content.doc as body` : ``;
+  const hasIngest = hasDocumentIngestTable(db);
+  const ingestCols = hasIngest
+    ? `, di.format as ingest_format, di.extractor as ingest_extractor, di.warnings_json as ingest_warnings_json`
+    : ``;
+  const ingestJoin = hasIngest
+    ? `LEFT JOIN document_ingest di ON di.collection = d.collection AND di.path = d.path`
+    : ``;
   const selectCols = `
     'kindx://' || d.collection || '/' || d.path as virtual_path,
     d.collection || '/' || d.path as display_path,
     d.title,
     d.hash,
     d.collection,
+    d.path,
     d.modified_at,
     LENGTH(content.doc) as body_length
+    ${ingestCols}
     ${bodyCol}
   `;
 
@@ -3013,6 +3295,7 @@ export function findDocuments(
         SELECT ${selectCols}
         FROM documents d
         JOIN content ON content.hash = d.hash
+        ${ingestJoin}
         WHERE 'kindx://' || d.collection || '/' || d.path = ? AND d.active = 1
       `).get(name) as DbDocRow | null;
       if (!doc) {
@@ -3020,6 +3303,7 @@ export function findDocuments(
           SELECT ${selectCols}
           FROM documents d
           JOIN content ON content.hash = d.hash
+          ${ingestJoin}
           WHERE 'kindx://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
           LIMIT 1
         `).get(`%${name}`) as DbDocRow | null;
@@ -3048,6 +3332,7 @@ export function findDocuments(
       SELECT ${selectCols}
       FROM documents d
       JOIN content ON content.hash = d.hash
+      ${ingestJoin}
       WHERE 'kindx://' || d.collection || '/' || d.path IN (${placeholders}) AND d.active = 1
     `).all(...virtualPaths) as DbDocRow[];
   }
@@ -3080,6 +3365,19 @@ export function findDocuments(
         modifiedAt: row.modified_at,
         bodyLength: row.body_length,
         ...(options.includeBody && row.body !== undefined && { body: row.body }),
+        ...((row.ingest_format || row.ingest_extractor || row.ingest_warnings_json) && {
+          extraction: {
+            format: row.ingest_format || "unknown",
+            extractor: row.ingest_extractor || "unknown",
+            warnings: (() => {
+              try {
+                return JSON.parse(row.ingest_warnings_json || "[]") as string[];
+              } catch {
+                return ["ingest_warning_parse_error"];
+              }
+            })(),
+          },
+        }),
       },
       skipped: false,
     });
@@ -3125,12 +3423,56 @@ export function getStatus(db: Database): IndexStatus {
   const totalDocs = (db.prepare(`SELECT COUNT(*) as c FROM documents WHERE active = 1`).get() as { c: number }).c;
   const needsEmbedding = getHashesNeedingEmbedding(db);
   const hasVectors = !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  const mainDbPath = getMainDatabasePath(db);
+  const shardStatus = getShardRuntimeStatus(mainDbPath);
+  const ann = getAnnRuntimeStatus(mainDbPath);
+  const capabilities = getIndexCapabilities(db);
+  const encryption = describeEncryptionState(mainDbPath);
+  const hasIngest = hasDocumentIngestTable(db);
+  const warnedDocuments = hasIngest
+    ? (db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM document_ingest
+      WHERE warnings_json IS NOT NULL
+        AND warnings_json != '[]'
+        AND LENGTH(TRIM(warnings_json)) > 2
+    `).get() as { c: number }).c
+    : 0;
+  const byFormat = hasIngest
+    ? (db.prepare(`
+      SELECT format, COUNT(*) AS count
+      FROM document_ingest
+      GROUP BY format
+      ORDER BY count DESC, format ASC
+    `).all() as Array<{ format: string; count: number }>)
+    : [];
+  const byWarning = hasIngest
+    ? (db.prepare(`
+      SELECT warning, COUNT(*) AS count
+      FROM (
+        SELECT TRIM(j.value) AS warning
+        FROM document_ingest di, json_each(di.warnings_json) j
+      )
+      WHERE warning != ''
+      GROUP BY warning
+      ORDER BY count DESC, warning ASC
+    `).all() as Array<{ warning: string; count: number }>)
+    : [];
 
   return {
     totalDocuments: totalDocs,
     needsEmbedding,
     hasVectorIndex: hasVectors,
+    capabilities,
+    ann,
+    encryption,
+    ingestion: {
+      warnedDocuments,
+      byFormat,
+      byWarning,
+    },
     collections,
+    shards: shardStatus,
   };
 }
 
@@ -3223,6 +3565,224 @@ export function addLineNumbers(text: string, startLine: number = 1): string {
   return lines.map((line, i) => `${startLine + i}: ${line}`).join('\n');
 }
 
+async function withTimeout<T>(task: Promise<T>, timeoutMs?: number): Promise<{ timedOut: boolean; value: T | null }> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return { timedOut: false, value: await task };
+  }
+  let timer: NodeJS.Timeout | null = null;
+  const timeoutPromise = new Promise<{ timedOut: true; value: null }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true, value: null }), timeoutMs);
+  });
+  const value = await Promise.race([
+    task.then((v) => ({ timedOut: false as const, value: v })),
+    timeoutPromise,
+  ]);
+  if (timer) clearTimeout(timer);
+  return value;
+}
+
+type RerankDropPolicy = "timeout_fallback" | "wait";
+
+type RerankQueueConfig = {
+  key: string;
+  concurrency: number;
+  queueLimit: number | null;
+  dropPolicy: RerankDropPolicy;
+};
+
+type RerankQueueSnapshot = {
+  depth: number;
+  active: number;
+  limit: number | null;
+  concurrency: number;
+  dropPolicy: RerankDropPolicy;
+  fairness: {
+    enqueued: number;
+    dequeued: number;
+    immediateServed: number;
+    deferredServed: number;
+    timedOut: number;
+    saturated: number;
+    lastServedSeq: number | null;
+  };
+};
+
+type QueueWaitResult = {
+  release: (() => void) | null;
+  deferred: boolean;
+  saturated: boolean;
+  timedOut: boolean;
+};
+
+type QueueController = {
+  active: number;
+  nextSeq: number;
+  metrics: {
+    enqueued: number;
+    dequeued: number;
+    immediateServed: number;
+    deferredServed: number;
+    timedOut: number;
+    saturated: number;
+    lastServedSeq: number | null;
+  };
+  waiting: Array<{
+    seq: number;
+    resolve: (value: QueueWaitResult) => void;
+    timeoutHandle: NodeJS.Timeout | null;
+    completed: boolean;
+  }>;
+};
+
+const rerankControllers = new Map<string, QueueController>();
+
+function getQueueController(key: string): QueueController {
+  let controller = rerankControllers.get(key);
+  if (!controller) {
+    controller = {
+      active: 0,
+      nextSeq: 1,
+      metrics: {
+        enqueued: 0,
+        dequeued: 0,
+        immediateServed: 0,
+        deferredServed: 0,
+        timedOut: 0,
+        saturated: 0,
+        lastServedSeq: null,
+      },
+      waiting: [],
+    };
+    rerankControllers.set(key, controller);
+  }
+  return controller;
+}
+
+function makeQueueRelease(controller: QueueController, concurrency: number): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    controller.active = Math.max(0, controller.active - 1);
+    while (controller.active < concurrency && controller.waiting.length > 0) {
+      const next = controller.waiting.shift();
+      if (!next || next.completed) continue;
+      next.completed = true;
+      if (next.timeoutHandle) clearTimeout(next.timeoutHandle);
+      controller.active += 1;
+      controller.metrics.dequeued += 1;
+      controller.metrics.deferredServed += 1;
+      controller.metrics.lastServedSeq = next.seq;
+      const release = makeQueueRelease(controller, concurrency);
+      next.resolve({ release, deferred: true, saturated: false, timedOut: false });
+      break;
+    }
+  };
+}
+
+async function acquireRerankSlot(config: RerankQueueConfig, timeoutMs?: number): Promise<QueueWaitResult> {
+  const controller = getQueueController(config.key);
+  const concurrency = Math.max(1, Math.floor(config.concurrency));
+  if (controller.active < concurrency) {
+    controller.active += 1;
+    controller.metrics.immediateServed += 1;
+    controller.metrics.lastServedSeq = 0;
+    return { release: makeQueueRelease(controller, concurrency), deferred: false, saturated: false, timedOut: false };
+  }
+
+  const limit = config.queueLimit;
+  if (limit !== null && controller.waiting.length >= limit) {
+    controller.metrics.saturated += 1;
+    return { release: null, deferred: false, saturated: true, timedOut: false };
+  }
+
+  return new Promise<QueueWaitResult>((resolve) => {
+    const seq = controller.nextSeq++;
+    const entry = {
+      seq,
+      resolve,
+      timeoutHandle: null as NodeJS.Timeout | null,
+      completed: false,
+    };
+    controller.metrics.enqueued += 1;
+    if (config.dropPolicy === "timeout_fallback" && timeoutMs && timeoutMs > 0) {
+      entry.timeoutHandle = setTimeout(() => {
+        if (entry.completed) return;
+        entry.completed = true;
+        const idx = controller.waiting.indexOf(entry);
+        if (idx >= 0) controller.waiting.splice(idx, 1);
+        controller.metrics.timedOut += 1;
+        resolve({ release: null, deferred: true, saturated: false, timedOut: true });
+      }, timeoutMs);
+      entry.timeoutHandle.unref?.();
+    }
+    controller.waiting.push(entry);
+  });
+}
+
+function getRerankQueueSnapshot(config: RerankQueueConfig): RerankQueueSnapshot {
+  const controller = getQueueController(config.key);
+  return {
+    depth: controller.waiting.length,
+    active: controller.active,
+    limit: config.queueLimit,
+    concurrency: Math.max(1, Math.floor(config.concurrency)),
+    dropPolicy: config.dropPolicy,
+    fairness: {
+      enqueued: controller.metrics.enqueued,
+      dequeued: controller.metrics.dequeued,
+      immediateServed: controller.metrics.immediateServed,
+      deferredServed: controller.metrics.deferredServed,
+      timedOut: controller.metrics.timedOut,
+      saturated: controller.metrics.saturated,
+      lastServedSeq: controller.metrics.lastServedSeq,
+    },
+  };
+}
+
+function parsePositiveInt(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+export function getRerankThroughputSnapshot(collectionName?: string): RerankQueueSnapshot {
+  const settings = getCollectionRerankSettings(collectionName);
+  const envConcurrency = parsePositiveInt(process.env.KINDX_RERANK_CONCURRENCY);
+  const envQueueLimit = parsePositiveInt(process.env.KINDX_RERANK_QUEUE_LIMIT);
+  const envDropPolicyRaw = String(process.env.KINDX_RERANK_DROP_POLICY ?? "").trim().toLowerCase();
+  const envDropPolicy = envDropPolicyRaw === "wait" ? "wait" : envDropPolicyRaw === "timeout_fallback" ? "timeout_fallback" : undefined;
+  const config: RerankQueueConfig = {
+    key: collectionName ?? "__global__",
+    concurrency: envConcurrency ?? settings.concurrency ?? 1,
+    queueLimit: envQueueLimit ?? settings.queueLimit ?? null,
+    dropPolicy: envDropPolicy ?? settings.dropPolicy ?? "timeout_fallback",
+  };
+  return getRerankQueueSnapshot(config);
+}
+
+async function runWithConcurrencyLimit<T>(tasks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
+  if (tasks.length === 0) return [];
+  const concurrency = Math.max(1, Math.floor(limit));
+  const results: T[] = new Array(tasks.length);
+  let index = 0;
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const current = index;
+      index += 1;
+      if (current >= tasks.length) break;
+      const task = tasks[current];
+      if (!task) continue;
+      results[current] = await task();
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 // =============================================================================
 // Shared search orchestration
 //
@@ -3264,10 +3824,50 @@ export type SearchRoutingProfile = "fast" | "balanced" | "max_precision";
 export interface StructuredSearchDiagnostics {
   degradedMode: boolean;
   fallbackReasons: string[];
+  scaleWarnings: string[];
   routingProfile: SearchRoutingProfile;
   candidateLimit: number;
   rerankLimit: number;
   rerankApplied: number;
+  planner: {
+    policy: {
+      precedence: ["candidateLimit", "maxRerankCandidates", "rerankLimit"];
+      routingProfile: SearchRoutingProfile;
+      vectorFanoutWorkers: number;
+    };
+    appliedLimits: {
+      requestedCandidateLimit: number;
+      maxRerankCandidates: number | null;
+      candidateLimit: number;
+      requestedRerankLimit: number;
+      rerankLimit: number;
+    };
+    degradedReasons: string[];
+  };
+  ann: {
+    route: "ann" | "exact_fallback" | "n/a";
+    state: "ready" | "stale" | "missing" | "degraded" | "n/a";
+  };
+  throughput: {
+    queue: {
+      depth: number;
+      active: number;
+      limit: number | null;
+      concurrency: number;
+      dropPolicy: RerankDropPolicy;
+      saturated: boolean;
+      deferred: boolean;
+      fairness: {
+        enqueued: number;
+        dequeued: number;
+        immediateServed: number;
+        deferredServed: number;
+        timedOut: number;
+        saturated: number;
+        lastServedSeq: number | null;
+      };
+    };
+  };
 }
 
 export interface HybridQueryOptions {
@@ -3275,6 +3875,8 @@ export interface HybridQueryOptions {
   limit?: number;           // default 10
   minScore?: number;        // default 0
   candidateLimit?: number;  // default RERANK_CANDIDATE_LIMIT
+  maxRerankCandidates?: number; // optional hard ceiling for rerank candidates
+  rerankTimeoutMs?: number; // optional rerank timeout budget
   explain?: boolean;        // include backend/RRF/rerank score traces
   hooks?: SearchHooks;
 }
@@ -3319,7 +3921,13 @@ export async function hybridQuery(
   const retrievalStart = Date.now();
   const limit = options?.limit ?? 10;
   const minScore = options?.minScore ?? 0;
-  const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
+  const collectionSettings = getCollectionRerankSettings(options?.collection);
+  const requestedCandidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
+  const maxRerankCandidates = options?.maxRerankCandidates ?? collectionSettings.maxCandidates;
+  const candidateLimit = maxRerankCandidates
+    ? Math.min(requestedCandidateLimit, Math.max(1, maxRerankCandidates))
+    : requestedCandidateLimit;
+  const rerankTimeoutMs = options?.rerankTimeoutMs ?? collectionSettings.timeoutMs;
   const collection = options?.collection;
   const explain = options?.explain ?? false;
   const hooks = options?.hooks;
@@ -3416,7 +4024,10 @@ export async function hybridQuery(
 
       const vecResults = await store.searchVec(
         vecQueries[i]!.text, DEFAULT_EMBED_MODEL, 20, collection,
-        undefined, embedding
+        undefined, embedding,
+        {
+          onWarning: (warning) => hooks?.onDegradedMode?.(warning),
+        }
       );
       if (vecResults.length > 0) {
         for (const r of vecResults) docidMap.set(r.filepath, r.docid);
@@ -3469,14 +4080,23 @@ export async function hybridQuery(
   // Step 6: Rerank chunks (NOT full bodies)
   hooks?.onRerankStart?.(chunksToRerank.length);
   const rerankStart = Date.now();
-  const reranked = await store.rerank(
-    query,
-    chunksToRerank,
-    undefined,
-    {
-      onRerankInit: (elapsedMs) => hooks?.onRerankInitDone?.(elapsedMs),
-    }
+  const timed = await withTimeout(
+    store.rerank(
+      query,
+      chunksToRerank,
+      undefined,
+      {
+        onRerankInit: (elapsedMs) => hooks?.onRerankInitDone?.(elapsedMs),
+      }
+    ),
+    rerankTimeoutMs
   );
+  const reranked = timed.timedOut || !timed.value
+    ? candidates.map((cand, idx) => ({ file: cand.file, score: cand.score, index: idx }))
+    : timed.value;
+  if (timed.timedOut) {
+    hooks?.onDegradedMode?.("rerank_timeout");
+  }
   hooks?.onRerankDone?.(Date.now() - rerankStart);
 
   // Step 7: Blend RRF position score with reranker score
@@ -3532,7 +4152,7 @@ export async function hybridQuery(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => b.score - a.score);
+  }).sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));
 
   // Step 8: Dedup by file (safety net — prevents duplicate output)
   const seenFiles = new Set<string>();
@@ -3614,7 +4234,7 @@ export async function vectorSearchQuery(
   }
 
   return Array.from(allResults.values())
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file))
     .filter(r => r.score >= minScore)
     .slice(0, limit);
 }
@@ -3641,7 +4261,13 @@ export interface StructuredSearchOptions {
   limit?: number;           // default 10
   minScore?: number;        // default 0
   candidateLimit?: number;  // default RERANK_CANDIDATE_LIMIT
+  maxRerankCandidates?: number; // optional hard ceiling for rerank candidates
+  rerankTimeoutMs?: number; // optional rerank timeout budget
   rerankLimit?: number;     // default candidateLimit
+  rerankQueueLimit?: number; // optional queue cap override
+  rerankConcurrency?: number; // optional rerank worker cap override
+  rerankDropPolicy?: RerankDropPolicy; // queue behavior override
+  vectorFanoutWorkers?: number; // bounded vec fanout worker cap
   disableRerank?: boolean;  // default false
   explain?: boolean;        // include backend/RRF/rerank score traces
   routingProfile?: SearchRoutingProfile; // default balanced
@@ -3690,33 +4316,155 @@ export async function structuredSearchWithDiagnostics(
   const retrievalStart = Date.now();
   const limit = options?.limit ?? 10;
   const minScore = options?.minScore ?? 0;
-  const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
-  const rerankLimit = Math.max(0, options?.rerankLimit ?? candidateLimit);
+  const firstCollection = options?.collections?.length === 1 ? options.collections[0] : undefined;
+  const collectionSettings = getCollectionRerankSettings(firstCollection);
+  const envMaxRerankCandidates = parsePositiveInt(process.env.KINDX_MAX_RERANK_CANDIDATES);
+  const envRerankTimeoutMs = parsePositiveInt(process.env.KINDX_RERANK_TIMEOUT_MS);
+  const envRerankQueueLimit = parsePositiveInt(process.env.KINDX_RERANK_QUEUE_LIMIT);
+  const envRerankConcurrency = parsePositiveInt(process.env.KINDX_RERANK_CONCURRENCY);
+  const envVectorFanoutWorkers = parsePositiveInt(process.env.KINDX_VECTOR_FANOUT_WORKERS);
+  const envDropPolicyRaw = String(process.env.KINDX_RERANK_DROP_POLICY ?? "").trim().toLowerCase();
+  const envDropPolicy = envDropPolicyRaw === "wait" ? "wait" : envDropPolicyRaw === "timeout_fallback" ? "timeout_fallback" : undefined;
+  const requestedCandidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
+  const maxRerankCandidates = options?.maxRerankCandidates
+    ?? envMaxRerankCandidates
+    ?? collectionSettings.maxCandidates;
+  const candidateLimit = maxRerankCandidates
+    ? Math.min(requestedCandidateLimit, Math.max(1, maxRerankCandidates))
+    : requestedCandidateLimit;
+  const requestedRerankLimit = options?.rerankLimit ?? candidateLimit;
+  const rerankLimit = Math.max(0, Math.min(requestedRerankLimit, candidateLimit));
+  const rerankTimeoutMs = options?.rerankTimeoutMs ?? envRerankTimeoutMs ?? collectionSettings.timeoutMs;
+  const rerankQueueLimit = options?.rerankQueueLimit ?? envRerankQueueLimit ?? collectionSettings.queueLimit ?? null;
+  const rerankConcurrency = options?.rerankConcurrency ?? envRerankConcurrency ?? collectionSettings.concurrency ?? 1;
+  const rerankDropPolicy = options?.rerankDropPolicy ?? envDropPolicy ?? collectionSettings.dropPolicy ?? "timeout_fallback";
+  const vectorFanoutWorkers = options?.vectorFanoutWorkers ?? envVectorFanoutWorkers ?? collectionSettings.vectorFanoutWorkers ?? 4;
   const disableRerank = options?.disableRerank ?? false;
   const explain = options?.explain ?? false;
   const routingProfile = options?.routingProfile ?? "balanced";
   const hooks = options?.hooks;
+  const collections = options?.collections;
+  const queueKey = collections && collections.length > 0
+    ? `collections:${[...collections].sort().join(",")}`
+    : (firstCollection ?? "__global__");
+  const queueConfig: RerankQueueConfig = {
+    key: queueKey,
+    concurrency: Math.max(1, rerankConcurrency),
+    queueLimit: rerankQueueLimit,
+    dropPolicy: rerankDropPolicy as RerankDropPolicy,
+  };
+  const initialQueueSnapshot = getRerankQueueSnapshot(queueConfig);
   const fallbackReasons: string[] = [];
+  const scaleWarnings: string[] = [];
+  const plannerDegradedReasons: string[] = [];
+  const queueState = {
+    depth: initialQueueSnapshot.depth,
+    active: initialQueueSnapshot.active,
+    limit: initialQueueSnapshot.limit,
+    concurrency: initialQueueSnapshot.concurrency,
+    dropPolicy: initialQueueSnapshot.dropPolicy,
+    saturated: false,
+    deferred: false,
+    fairness: initialQueueSnapshot.fairness,
+  };
+  const mapScaleWarningToFallbackReason = (warning: string): string | undefined => {
+    if (warning.startsWith("ann_missing:")) {
+      return "ann_missing";
+    }
+    if (warning.startsWith("ann_stale:")) {
+      return "ann_stale";
+    }
+    if (warning.startsWith("ann_failed:")) {
+      return "ann_failed";
+    }
+    if (warning.startsWith("shard_missing:") || warning.startsWith("shard_root_missing:") || warning.startsWith("shard_read_missing:")) {
+      return "shard_missing";
+    }
+    if (warning.startsWith("shard_read_failed:") || warning.startsWith("shard_read_vec_unavailable:") || warning.startsWith("shard_read_no_vectors_table:")) {
+      return "shard_read_failed";
+    }
+    if (warning.startsWith("shard_write_failed:") || warning.startsWith("shard_write_handle_missing:")) {
+      return "shard_write_failed";
+    }
+    if (warning.startsWith("topology_drift:")) {
+      return "shard_topology_drift";
+    }
+    if (warning.startsWith("resume_cursor_invalid:")) {
+      return "shard_resume_cursor_invalid";
+    }
+    if (warning.startsWith("checkpoint_")) {
+      return "shard_checkpoint_invalid";
+    }
+    if (warning.startsWith("candidate_limit_clamped:") || warning.startsWith("rerank_limit_clamped:")) {
+      return "rerank_truncated";
+    }
+    return undefined;
+  };
   const markDegraded = (reason: string): void => {
     if (!fallbackReasons.includes(reason)) {
       fallbackReasons.push(reason);
       hooks?.onDegradedMode?.(reason);
     }
+    if (!plannerDegradedReasons.includes(reason)) {
+      plannerDegradedReasons.push(reason);
+    }
   };
-
-  const collections = options?.collections;
+  const buildDiagnostics = (rerankApplied: number): StructuredSearchDiagnostics => ({
+    ann: (() => {
+      const hasSharded = scaleWarnings.some((w) => w.startsWith("sharded_collection:"));
+      if (!hasSharded) {
+        return { route: "n/a" as const, state: "n/a" as const };
+      }
+      if (scaleWarnings.some((w) => w.startsWith("ann_failed:"))) {
+        return { route: "exact_fallback" as const, state: "degraded" as const };
+      }
+      if (scaleWarnings.some((w) => w.startsWith("ann_stale:"))) {
+        return { route: "exact_fallback" as const, state: "stale" as const };
+      }
+      if (scaleWarnings.some((w) => w.startsWith("ann_missing:"))) {
+        return { route: "exact_fallback" as const, state: "missing" as const };
+      }
+      return { route: "ann" as const, state: "ready" as const };
+    })(),
+    degradedMode: fallbackReasons.length > 0,
+    fallbackReasons,
+    scaleWarnings,
+    routingProfile,
+    candidateLimit,
+    rerankLimit,
+    rerankApplied,
+    planner: {
+      policy: {
+        precedence: ["candidateLimit", "maxRerankCandidates", "rerankLimit"],
+        routingProfile,
+        vectorFanoutWorkers: Math.max(1, vectorFanoutWorkers),
+      },
+      appliedLimits: {
+        requestedCandidateLimit,
+        maxRerankCandidates: maxRerankCandidates ?? null,
+        candidateLimit,
+        requestedRerankLimit,
+        rerankLimit,
+      },
+      degradedReasons: plannerDegradedReasons,
+    },
+    throughput: {
+      queue: queueState,
+    },
+  });
+  if (maxRerankCandidates && requestedCandidateLimit > candidateLimit) {
+    scaleWarnings.push(`candidate_limit_clamped:${requestedCandidateLimit}->${candidateLimit}`);
+    markDegraded("rerank_truncated");
+  }
+  if (requestedRerankLimit > rerankLimit) {
+    scaleWarnings.push(`rerank_limit_clamped:${requestedRerankLimit}->${rerankLimit}`);
+    markDegraded("rerank_truncated");
+  }
 
   if (searches.length === 0) {
     return {
       results: [],
-      diagnostics: {
-        degradedMode: false,
-        fallbackReasons: [],
-        routingProfile,
-        candidateLimit,
-        rerankLimit,
-        rerankApplied: 0,
-      },
+      diagnostics: buildDiagnostics(0),
     };
   }
 
@@ -3748,6 +4496,19 @@ export async function structuredSearchWithDiagnostics(
 
   // Helper to run search across collections (or all if undefined)
   const collectionList = collections ?? [undefined]; // undefined = all collections
+  if (collections && collections.length > 0) {
+    const shardStatus = getShardRuntimeStatus(getMainDatabasePath(store.db));
+    const configuredShardCollections = new Set(shardStatus.enabledCollections.map((c) => c.collection));
+    for (const coll of collections) {
+      if (configuredShardCollections.has(coll)) {
+        scaleWarnings.push(`sharded_collection:${coll}`);
+      }
+    }
+    for (const warn of shardStatus.warnings) {
+      scaleWarnings.push(warn);
+      markDegraded(mapScaleWarningToFallbackReason(warn) ?? "shard_runtime_warning");
+    }
+  }
 
   // Step 1: Run FTS for all lex searches (sync, instant)
   for (const search of searches) {
@@ -3807,7 +4568,7 @@ export async function structuredSearchWithDiagnostics(
         query: string;
         vecResults: Awaited<ReturnType<Store["searchVec"]>>;
       };
-      const vecFanOutTasks: Promise<VecFanOutItem>[] = [];
+      const vecFanOutTasks: Array<() => Promise<VecFanOutItem>> = [];
 
       for (let i = 0; i < vecSearches.length; i++) {
         const embedding = embeddings[i]?.embedding;
@@ -3816,36 +4577,48 @@ export async function structuredSearchWithDiagnostics(
 
         for (let collIdx = 0; collIdx < collectionList.length; collIdx++) {
           const coll = collectionList[collIdx];
-          vecFanOutTasks.push(
-            store.searchVec(searchEntry.query, DEFAULT_EMBED_MODEL, 20, coll, undefined, embedding)
-              .then(vecResults => {
-                return {
-                  queryIdx: i,
-                  collIdx,
-                  queryType: searchEntry.type,
-                  query: searchEntry.query,
-                  vecResults,
-                } as VecFanOutItem;
-              })
-              .catch(err => {
-                process.stderr.write(
-                  `KINDX Warning: vector search failed for collection=${coll ?? "all"}, query="${searchEntry.query}": ${err}\n`
-                );
-                markDegraded("vector_search_partial_failure");
-                return {
-                  queryIdx: i,
-                  collIdx,
-                  queryType: searchEntry.type,
-                  query: searchEntry.query,
-                  vecResults: [],
-                } as VecFanOutItem;
-              })
-          );
+          vecFanOutTasks.push(async () => {
+            try {
+              const vecResults = await store.searchVec(
+                searchEntry.query,
+                DEFAULT_EMBED_MODEL,
+                20,
+                coll,
+                undefined,
+                embedding,
+                {
+                  onWarning: (warning) => {
+                    scaleWarnings.push(warning);
+                    markDegraded(mapScaleWarningToFallbackReason(warning) ?? "vector_search_partial_failure");
+                  },
+                }
+              );
+              return {
+                queryIdx: i,
+                collIdx,
+                queryType: searchEntry.type,
+                query: searchEntry.query,
+                vecResults,
+              } as VecFanOutItem;
+            } catch (err) {
+              process.stderr.write(
+                `KINDX Warning: vector search failed for collection=${coll ?? "all"}, query="${searchEntry.query}": ${err}\n`
+              );
+              markDegraded("vector_search_partial_failure");
+              return {
+                queryIdx: i,
+                collIdx,
+                queryType: searchEntry.type,
+                query: searchEntry.query,
+                vecResults: [],
+              } as VecFanOutItem;
+            }
+          });
         }
       }
 
       // Wait for all collection fan-out tasks to complete before proceeding to RRF.
-      const vecFanOutResults = await Promise.all(vecFanOutTasks);
+      const vecFanOutResults = await runWithConcurrencyLimit(vecFanOutTasks, Math.max(1, vectorFanoutWorkers));
       if (vecFanOutResults.length !== vecFanOutTasks.length) {
         process.stderr.write(
           `KINDX Warning: vector fan-out task mismatch (expected ${vecFanOutTasks.length}, got ${vecFanOutResults.length}).\n`
@@ -3874,14 +4647,7 @@ export async function structuredSearchWithDiagnostics(
   if (rankedLists.length === 0) {
     return {
       results: [],
-      diagnostics: {
-        degradedMode: fallbackReasons.length > 0,
-        fallbackReasons,
-        routingProfile,
-        candidateLimit,
-        rerankLimit,
-        rerankApplied: 0,
-      },
+      diagnostics: buildDiagnostics(0),
     };
   }
 
@@ -3894,14 +4660,7 @@ export async function structuredSearchWithDiagnostics(
   if (candidates.length === 0) {
     return {
       results: [],
-      diagnostics: {
-        degradedMode: fallbackReasons.length > 0,
-        fallbackReasons,
-        routingProfile,
-        candidateLimit,
-        rerankLimit,
-        rerankApplied: 0,
-      },
+      diagnostics: buildDiagnostics(0),
     };
   }
 
@@ -3946,15 +4705,60 @@ export async function structuredSearchWithDiagnostics(
     const rerankStart2 = Date.now();
     try {
       const rerankInput = chunksToRerank.slice(0, rerankLimit);
-      const rerankResults = await store.rerank(
-        primaryQuery,
-        rerankInput,
-        undefined,
-        {
-          onRerankInit: (elapsedMs) => hooks?.onRerankInitDone?.(elapsedMs),
+      const queued = await acquireRerankSlot(queueConfig, rerankTimeoutMs);
+      if (queued.saturated) {
+        markDegraded("rerank_queue_saturated");
+        queueState.saturated = true;
+        scaleWarnings.push(`rerank_queue_saturated:${queueConfig.queueLimit ?? "unbounded"}`);
+        const saturatedSnapshot = getRerankQueueSnapshot(queueConfig);
+        queueState.depth = saturatedSnapshot.depth;
+        queueState.active = saturatedSnapshot.active;
+        queueState.fairness = saturatedSnapshot.fairness;
+        const fallback = candidates.slice(0, rerankLimit);
+        reranked = fallback.map((cand, idx) => ({ file: cand.file, score: cand.score, index: idx }));
+      } else if (queued.timedOut) {
+        markDegraded("rerank_timeout");
+        queueState.deferred = true;
+        scaleWarnings.push(`rerank_timeout_ms:${rerankTimeoutMs ?? 0}`);
+        const timeoutSnapshot = getRerankQueueSnapshot(queueConfig);
+        queueState.depth = timeoutSnapshot.depth;
+        queueState.active = timeoutSnapshot.active;
+        queueState.fairness = timeoutSnapshot.fairness;
+        const fallback = candidates.slice(0, rerankLimit);
+        reranked = fallback.map((cand, idx) => ({ file: cand.file, score: cand.score, index: idx }));
+      } else {
+        if (queued.deferred) {
+          markDegraded("rerank_deferred");
+          queueState.deferred = true;
         }
-      );
-      reranked = rerankResults;
+        const inFlightSnapshot = getRerankQueueSnapshot(queueConfig);
+        queueState.depth = inFlightSnapshot.depth;
+        queueState.active = inFlightSnapshot.active;
+        queueState.fairness = inFlightSnapshot.fairness;
+        try {
+          const rerankTask = store.rerank(
+            primaryQuery,
+            rerankInput,
+            undefined,
+            {
+              onRerankInit: (elapsedMs) => hooks?.onRerankInitDone?.(elapsedMs),
+            }
+          );
+          const timed = await withTimeout(rerankTask, rerankTimeoutMs);
+          if (timed.timedOut || !timed.value) {
+            markDegraded("rerank_timeout");
+            scaleWarnings.push(`rerank_timeout_ms:${rerankTimeoutMs ?? 0}`);
+            const fallback = candidates.slice(0, rerankLimit);
+            reranked = fallback.map((cand, idx) => ({ file: cand.file, score: cand.score, index: idx }));
+          } else {
+            reranked = timed.value
+              .slice()
+              .sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));
+          }
+        } finally {
+          queued.release?.();
+        }
+      }
       hooks?.onRerankDone?.(Date.now() - rerankStart2);
     } catch (err) {
       process.stderr.write(`KINDX Warning: rerank failed during structuredSearch, falling back to retrieval-only scoring. ${err}\n`);
@@ -4017,7 +4821,7 @@ export async function structuredSearchWithDiagnostics(
       docid: docidMap.get(r.file) || "",
       ...(explainData ? { explain: explainData } : {}),
     };
-  }).sort((a, b) => b.score - a.score);
+  }).sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));
 
   // Step 7: Dedup by file
   const seenFiles = new Set<string>();
@@ -4029,16 +4833,13 @@ export async function structuredSearchWithDiagnostics(
     })
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+  const finalQueueSnapshot = getRerankQueueSnapshot(queueConfig);
+  queueState.depth = finalQueueSnapshot.depth;
+  queueState.active = finalQueueSnapshot.active;
+  queueState.fairness = finalQueueSnapshot.fairness;
   return {
     results,
-    diagnostics: {
-      degradedMode: fallbackReasons.length > 0,
-      fallbackReasons,
-      routingProfile,
-      candidateLimit,
-      rerankLimit,
-      rerankApplied: reranked.length,
-    },
+    diagnostics: buildDiagnostics(reranked.length),
   };
 }
 
@@ -4053,16 +4854,21 @@ async function indexSingleFile(
   absolutePath: string
 ): Promise<"embedded" | "unchanged" | "failed"> {
   try {
-    const { readFileSync, statSync } = await import("fs");
-    const { createHash } = await import("crypto");
-
-    // Read file and hash
-    const content = readFileSync(absolutePath, "utf-8");
     const stat = statSync(absolutePath);
+    const path = handelize(relativePath);
+    const ingested = ingestFile(absolutePath);
+    const content = ingested.text;
+
+    // Match full-index behavior: skip empty or unsupported payloads.
+    if (!content.trim()) {
+      return "unchanged";
+    }
+
     const hash = createHash("sha256").update(content).digest("hex");
+    const title = extractTitle(content, relativePath);
 
     // Check if unchanged
-    const activeDoc = findActiveDocument(db, collectionName, relativePath);
+    const activeDoc = findActiveDocument(db, collectionName, path);
     if (activeDoc && activeDoc.hash === hash) {
       return "unchanged";
     }
@@ -4076,10 +4882,17 @@ async function indexSingleFile(
       if (activeDoc) {
         // Delete old vectors if hash changed
         db.prepare(`DELETE FROM content_vectors WHERE hash = ?`).run(activeDoc.hash);
-        updateDocument(db, activeDoc.id, relativePath, hash, modifiedAt);
+        updateDocument(db, activeDoc.id, title, hash, modifiedAt);
       } else {
-        insertDocument(db, collectionName, relativePath, relativePath, hash, now, modifiedAt);
+        insertDocument(db, collectionName, path, title, hash, now, modifiedAt);
       }
+      upsertDocumentIngestion(db, collectionName, path, {
+        format: ingested.metadata.format,
+        extractor: ingested.metadata.extractor,
+        warnings: ingested.warnings,
+        contentHash: hash,
+        extractedAt: now,
+      });
       db.exec("COMMIT");
       return "embedded"; // Properly enqueued for BM25 and embedding 
     } catch (e) {
@@ -4098,7 +4911,8 @@ async function unlinkSingleFile(
   relativePath: string
 ): Promise<boolean> {
   try {
-    deactivateDocument(db, collectionName, relativePath);
+    const path = handelize(relativePath);
+    deactivateDocument(db, collectionName, path);
     return true;
   } catch (err) {
     return false;

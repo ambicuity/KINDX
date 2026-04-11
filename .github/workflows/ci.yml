@@ -87,3 +87,40 @@ jobs:
 
       - name: Verify publishable package contents
         run: npm pack --dry-run
+
+  sqlcipher-smoke:
+    name: SQLCipher Runtime Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install SQLCipher-capable sqlite driver
+        run: npm install --no-save better-sqlite3-multiple-ciphers
+
+      - name: Build
+        run: npm run build
+
+      - name: Encrypted migration smoke
+        run: |
+          export KINDX_CONFIG_DIR=/tmp/kindx-config
+          export INDEX_PATH=/tmp/kindx-cache/index.sqlite
+          mkdir -p /tmp/kindx-corpus /tmp/kindx-config /tmp/kindx-cache
+          printf "# Cipher Smoke\n\nhello world\n" > /tmp/kindx-corpus/smoke.md
+          node dist/kindx.js collection add /tmp/kindx-corpus --name smoke --mask "**/*.md"
+          node dist/kindx.js update
+          KINDX_ENCRYPTION_KEY="ci-smoke-key" node dist/kindx.js status
+          node -e "const fs=require('fs');const h=fs.readFileSync('/tmp/kindx-cache/index.sqlite').subarray(0,16).toString('ascii'); if(h==='SQLite format 3\\u0000'){throw new Error('index is still plaintext');}"

@@ -1,5 +1,6 @@
 import type { Database } from "./runtime.js";
 import { withLLMSession, formatDocForEmbedding, formatQueryForEmbedding } from "./inference.js";
+import { createHash } from "node:crypto";
 
 const MEMORY_SCHEMA_VERSION = "1";
 const DEFAULT_SCOPE = "default";
@@ -14,6 +15,8 @@ const SINGLE_CARDINALITY_KEYS = new Set([
   "job_title",
   "card_holder_name",
 ]);
+
+let _memoryVectorPersistWarningEmitted = false;
 
 export type MemoryRecord = {
   id: number;
@@ -132,30 +135,43 @@ export function deriveWorkspaceMemoryScope(workspaceUri?: string | null): string
   const raw = normalizeScopeOrUndefined(workspaceUri);
   if (!raw) return undefined;
 
+  // Extract the full normalized path for hashing (collision resistance)
+  // and the basename for human readability.
   let basename = raw;
+  let fullPath = raw;
   try {
     if (raw.includes("://")) {
       const parsed = new URL(raw);
       if (parsed.protocol === "file:") {
         const path = decodeURIComponent(parsed.pathname || "");
+        fullPath = path;
         const segments = path.split("/").filter(Boolean);
         basename = segments[segments.length - 1] || "";
       } else {
         const host = parsed.hostname || "";
         const pathSegments = (parsed.pathname || "").split("/").filter(Boolean);
+        fullPath = `${host}/${pathSegments.join("/")}`;
         basename = pathSegments[pathSegments.length - 1] || host || raw;
       }
     } else {
       const segments = raw.split(/[\\/]/).filter(Boolean);
+      fullPath = segments.join("/");
       basename = segments[segments.length - 1] || raw;
     }
   } catch {
     const segments = raw.split(/[\\/]/).filter(Boolean);
+    fullPath = segments.join("/");
     basename = segments[segments.length - 1] || raw;
   }
 
   const cleaned = sanitizeScopeSegment(basename);
-  return cleaned.length > 0 ? cleaned : DEFAULT_SCOPE;
+  if (cleaned.length === 0) return DEFAULT_SCOPE;
+
+  // Append a stable 8-char hash of the full normalized path to prevent
+  // collisions between projects with the same directory basename
+  // (e.g., /home/dev/projectA/app vs /home/dev/projectB/app).
+  const pathHash = createHash("sha256").update(fullPath).digest("hex").slice(0, 8);
+  return `${cleaned}-${pathHash}`;
 }
 
 export function resolveMemoryScope(input: {
@@ -317,6 +333,24 @@ function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | F
     INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, model, embedded_at)
     VALUES (?, ?, ?, ?)
   `).run(memoryId, serializeVector(norm), "kindx-local", embeddedAt);
+
+  const dimensions = norm.length;
+  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_vectors_vec'`).get();
+  try {
+    if (!tableExists) {
+      db.exec(`CREATE VIRTUAL TABLE memory_vectors_vec USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
+      db.exec(`INSERT OR IGNORE INTO memory_vectors_vec(memory_id, embedding) SELECT CAST(memory_id AS INTEGER), embedding FROM memory_embeddings`);
+    }
+    db.prepare(`DELETE FROM memory_vectors_vec WHERE memory_id = CAST(? AS INTEGER)`).run(memoryId);
+    db.prepare(`INSERT INTO memory_vectors_vec (memory_id, embedding) VALUES (CAST(? AS INTEGER), ?)`).run(memoryId, new Float32Array(norm));
+  } catch (err) {
+    // Vector persistence is best-effort; memory records remain valid without ANN acceleration.
+    if (!_memoryVectorPersistWarningEmitted) {
+      _memoryVectorPersistWarningEmitted = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[KINDX] ⚠ memory_vector_index_write_failed: ${detail}\n`);
+    }
+  }
 }
 
 function insertNewMemory(db: Database, params: {
@@ -414,6 +448,21 @@ export function initializeMemorySchema(db: Database): void {
       embedded_at TEXT NOT NULL
     )
   `);
+
+  const hasVec = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_vectors_vec'`).get();
+  if (!hasVec) {
+    const row = db.prepare(`SELECT embedding FROM memory_embeddings LIMIT 1`).get() as { embedding: Buffer } | undefined;
+    if (row && row.embedding) {
+      try {
+        const floatArr = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+        const dimensions = floatArr.length;
+        if (dimensions > 0) {
+          db.exec(`CREATE VIRTUAL TABLE memory_vectors_vec USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
+          db.exec(`INSERT INTO memory_vectors_vec(memory_id, embedding) SELECT CAST(memory_id AS INTEGER), embedding FROM memory_embeddings`);
+        }
+      } catch {}
+    }
+  }
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_key_active ON memories(scope, key, superseded_by)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_search ON memories(scope, search_text)`);
@@ -645,12 +694,30 @@ export function semanticSearchMemoryWithVector(
   const scope = normalizeScope(scopeInput);
   const normQuery = normalizeVector(queryVector);
 
+  const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_vectors_vec'`).get();
+  if (!tableExists) return [];
+
+  // Step 1: sqlite-vec vector query (no joins allowed or it hangs)
+  const vecResults = db.prepare(`
+    SELECT memory_id, distance
+    FROM memory_vectors_vec
+    WHERE embedding MATCH ? AND k = ?
+  `).all(new Float32Array(normQuery), limit * 3) as { memory_id: number; distance: number }[];
+
+  if (vecResults.length === 0) return [];
+
+  // Step 2: Metadata and scope filtering
+  const memoryIds = vecResults.map(r => r.memory_id);
+  const distanceMap = new Map(vecResults.map(r => [r.memory_id, r.distance]));
+  const placeholders = memoryIds.map(() => '?').join(',');
+
   const rows = db.prepare(`
-    SELECT m.id, m.scope, m.key, m.value, m.source, m.appeared_count, m.accessed_count, e.embedding
+    SELECT m.id, m.scope, m.key, m.value, m.source, m.appeared_count, m.accessed_count
     FROM memories m
-    JOIN memory_embeddings e ON e.memory_id = m.id
-    WHERE m.scope = ? AND m.superseded_by IS NULL
-  `).all(scope) as {
+    WHERE m.id IN (${placeholders}) 
+      AND m.scope = ? 
+      AND m.superseded_by IS NULL
+  `).all(...memoryIds, scope) as {
     id: number;
     scope: string;
     key: string;
@@ -658,12 +725,12 @@ export function semanticSearchMemoryWithVector(
     source: string | null;
     appeared_count: number;
     accessed_count: number;
-    embedding: Buffer;
   }[];
 
   const scored = rows
     .map((row) => {
-      const sim = cosineSimilarityNormalized(normQuery, deserializeVector(row.embedding));
+      const dist = distanceMap.get(Number(row.id)) || 1.0;
+      const sim = 1.0 - dist;
       return {
         id: Number(row.id),
         scope: row.scope,
