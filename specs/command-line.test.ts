@@ -32,22 +32,66 @@ function stripAnsi(input: string): string {
   return input.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
+function extractFirstJsonValue(input: string): string | null {
+  for (let start = 0; start < input.length; start++) {
+    const token = input[start];
+    if (token !== "{" && token !== "[") continue;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < input.length; i++) {
+      const char = input[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{" || char === "[") {
+        depth++;
+        continue;
+      }
+      if (char === "}" || char === "]") {
+        depth--;
+        if (depth === 0) {
+          return input.slice(start, i + 1).trim();
+        }
+        if (depth < 0) {
+          break;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function parseJsonFromCli(
   result: { stdout: string; stderr: string; exitCode: number },
   label: string
 ): any {
   const cleanStdout = stripAnsi(result.stdout).trim();
   const candidates = [cleanStdout];
-  const firstObject = cleanStdout.indexOf("{");
-  const firstArray = cleanStdout.indexOf("[");
-  const firstJsonIdx =
-    firstObject === -1
-      ? firstArray
-      : firstArray === -1
-        ? firstObject
-        : Math.min(firstObject, firstArray);
-  if (firstJsonIdx > 0) {
-    candidates.push(cleanStdout.slice(firstJsonIdx).trim());
+  const extractedJson = extractFirstJsonValue(cleanStdout);
+  if (extractedJson && extractedJson !== cleanStdout) {
+    candidates.push(extractedJson);
   }
 
   let lastError: unknown = null;
