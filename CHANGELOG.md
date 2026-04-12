@@ -5,17 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.1](https://github.com/ambicuity/KINDX/compare/v1.3.0...v1.3.1) (2026-04-08)
+## [1.3.2](https://github.com/ambicuity/KINDX/compare/v1.3.1...v1.3.2) (2026-04-11)
 
+### Added
 
-### Bug Fixes
+- Customer POV launch-readiness runbook: `reference/runbooks/customer-pov-launch-readiness.md`.
+- Customer POV evidence template: `reference/runbooks/customer-pov-evidence-template.md`.
+- Phase-based release gate helper: `tooling/customer_pov_launch_gate.ts`.
+- QA scripts for phased launch checks: `qa:customer-pov`, `qa:customer-pov:p0`, `qa:customer-pov:p1`, `qa:customer-pov:p2`, `qa:customer-pov:p3`, `qa:customer-pov:all`.
 
-* **deps:** regenerate lockfile for cross-platform CI compatibility ([2b7b3b6](https://github.com/ambicuity/KINDX/commit/2b7b3b68b5e5cb05d7ecb3d1c7bc8b934f7f5497))
+### Changed
+
+- Release documentation now points operators directly to the customer POV runbook and evidence template.
+- Release metadata is synchronized to `1.3.2` across `package.json`, `package-lock.json`, `.release-please-manifest.json`, MCP `serverInfo.version`, and marketplace metadata.
+
+### Fixed
+
+- Fixed tenant role parsing so `kindx tenant add --role <admin|editor|viewer>` is parsed and validated correctly.
+- Fixed RBAC collection-isolation on HTTP `/query` and `/search` to prevent unauthorized collection leakage.
+- Hardened MCP `tools/call` query RBAC scoping so allowed collections are enforced even when `collections` is omitted.
+- Fixed release-gate TypeScript checks by excluding generated `specs/test-src` snapshots from `tsc --noEmit` while keeping them available as PR evidence artifacts.
+
+### Verification
+
+- `npm run build` passed.
+- `npm test` passed (35 files, 829 tests).
+- `npm run test:packages` passed.
+- `npm run test:python` passed.
+- `npm run qa:customer-pov:all` passed (`required_failures=0`, `required_passes=5`, `skipped=1` optional container smoke).
+- `npx tsc --noEmit` passed.
+- Temp-prefix packaged installability passed (`npm pack`, `npm install -g --prefix /tmp/kindx-global`, `kindx --version`, `kindx --help`).
+- Added targeted regression coverage for tenant role parsing (`specs/ops-cli.test.ts`) and RBAC collection isolation in HTTP/MCP query paths (`specs/mcp.test.ts`).
 
 ## [1.3.1](https://github.com/ambicuity/KINDX/compare/v1.3.0...v1.3.1) (2026-04-08)
 
 ### Fixed
 
+- Regenerated lockfile for cross-platform CI compatibility.
 - Ensured `kindx arch` command group is fully documented in `kindx --help` output with detailed subcommands, options, environment variables, and architecture diagrams.
 - Aligned `arch:status` and `arch:refresh` npm helper scripts for dev workflow consistency.
 

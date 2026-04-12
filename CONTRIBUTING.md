@@ -10,7 +10,7 @@ Let's get you up and running quickly.
 
 ### Prerequisites
 
-- Node.js **22+**
+- Node.js **20+** (22 LTS recommended for local parity with CI)
 - Git
 - macOS: `brew install sqlite` (for `sqlite-vec` extension support)
 

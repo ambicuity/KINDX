@@ -1,0 +1,23 @@
+{
+  "informational": true,
+  "defaults": {
+    "p95QueryLatencyMs": 4000,
+    "maxRerankTimeoutRate": 0.5,
+    "maxQueueSaturationRate": 0.5,
+    "maxDegradedModeRate": 0.75
+  },
+  "scenarios": [
+    {
+      "sessions": 10,
+      "p95QueryLatencyMs": 3000
+    },
+    {
+      "sessions": 25,
+      "p95QueryLatencyMs": 5000
+    },
+    {
+      "sessions": 50,
+      "p95QueryLatencyMs": 8000
+    }
+  ]
+}

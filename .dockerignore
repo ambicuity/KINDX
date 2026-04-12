@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.git/
+.github/
+.idea/
+.vscode/
+bin/kindx
+mock_chroma.sqlite3
+test_corpus/
+test_watch_collection/
+vitest.config.ts
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+.gemini/

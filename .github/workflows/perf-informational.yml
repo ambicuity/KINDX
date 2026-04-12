@@ -1,0 +1,76 @@
+name: perf-informational
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "engine/**"
+      - "tooling/**"
+      - ".github/workflows/perf-informational.yml"
+
+jobs:
+  warm-daemon-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Seed corpus
+        run: |
+          mkdir -p /tmp/kindx-perf-corpus
+          for i in $(seq 1 400); do
+            printf "# Perf Doc %s\n\nThis is benchmark corpus content for warm daemon throughput checks.\n\nQuery token perf-%s.\n" "$i" "$i" > "/tmp/kindx-perf-corpus/doc-$i.md"
+          done
+          node dist/kindx.js collection add /tmp/kindx-perf-corpus --name perfbench
+          node dist/kindx.js update
+
+      - name: Start MCP HTTP
+        env:
+          KINDX_MCP_TOKEN: perf-bench-token
+          KINDX_LOG_LEVEL: ERROR
+        run: |
+          node dist/kindx.js mcp --http --port 8788 >/tmp/kindx-mcp.log 2>&1 &
+          echo $! >/tmp/kindx-mcp.pid
+          sleep 3
+
+      - name: Run informational benchmark
+        run: |
+          npx tsx tooling/benchmark_warm_daemon.ts \
+            --base-url http://127.0.0.1:8788/query \
+            --token perf-bench-token \
+            --sessions 10,25,50 \
+            --doc-equivalent 10000,50000,100000 \
+            --requests-per-session 4 \
+            --routing-profile fast \
+            --thresholds tooling/perf-thresholds.json \
+            --output tooling/artifacts/warm-daemon-benchmark.json \
+            --summary tooling/artifacts/warm-daemon-summary.md
+
+      - name: Publish summary
+        run: |
+          cat tooling/artifacts/warm-daemon-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: warm-daemon-benchmark
+          path: tooling/artifacts/
+
+      - name: Stop MCP HTTP
+        if: always()
+        run: |
+          if [ -f /tmp/kindx-mcp.pid ]; then
+            kill "$(cat /tmp/kindx-mcp.pid)" || true
+          fi
