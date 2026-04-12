@@ -116,12 +116,32 @@ export function getSqliteRuntimeDriverName(): string {
 }
 
 export function supportsSqlCipherPragma(db: Database): boolean {
+  const pragmaDb = db as Database & {
+    pragma?: (source: string, options?: { simple?: boolean }) => unknown;
+  };
+
+  if (typeof pragmaDb.pragma === "function") {
+    try {
+      const cipher = pragmaDb.pragma("cipher", { simple: true });
+      if (typeof cipher === "string" && cipher.trim().length > 0) return true;
+    } catch {
+      // Fall through to statement-based probes.
+    }
+
+    try {
+      const version = pragmaDb.pragma("cipher_version", { simple: true });
+      if (typeof version === "string" && version.trim().length > 0) return true;
+    } catch {
+      // Fall through to statement-based probes.
+    }
+  }
+
   try {
-    const row = db.prepare("PRAGMA cipher_version").get() as
-      | { cipher_version?: string }
-      | undefined;
-    const version = row?.cipher_version;
-    return typeof version === "string" && version.trim().length > 0;
+    const rows = db.prepare("PRAGMA cipher").all();
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+    return Object.values(rows[0] as Record<string, unknown>).some(
+      (value) => typeof value === "string" && value.trim().length > 0
+    );
   } catch {
     return false;
   }
@@ -133,6 +153,7 @@ export function supportsSqlCipherPragma(db: Database): boolean {
 export interface Database {
   exec(sql: string): void;
   prepare(sql: string): Statement;
+  pragma?(source: string, options?: { simple?: boolean }): unknown;
   /**
    * Wrap a callback in a SQLite transaction.
    * Both better-sqlite3 and bun:sqlite expose this with compatible signatures.

@@ -39,6 +39,7 @@ async function runCli(
       NO_COLOR: "1",
       INDEX_PATH: options.dbPath,
       KINDX_CONFIG_DIR: options.configDir,
+      KINDX_SQLITE_DRIVER: "better-sqlite3",
       PWD: options.cwd,
       ...options.env,
     },

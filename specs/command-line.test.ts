@@ -43,6 +43,7 @@ async function runQmd(
       ...process.env,
       INDEX_PATH: dbPath,
       KINDX_CONFIG_DIR: configDir, // Use test config directory
+      KINDX_SQLITE_DRIVER: "better-sqlite3",
       ...(cacheHome ? { XDG_CACHE_HOME: cacheHome } : {}),
       PWD: workingDir, // Must explicitly set PWD since getPwd() checks this
       ...options.env,

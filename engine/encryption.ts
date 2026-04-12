@@ -47,11 +47,10 @@ export function ensureEncryptedIndexReady(indexPath: string): void {
     if (!supportsSqlCipherPragma(plainDb)) {
       throw new Error("sqlcipher_pragma_unavailable");
     }
-    plainDb.exec(`ATTACH DATABASE ${sqliteLiteral(tempEncrypted)} AS encrypted KEY ${sqliteLiteral(key)}`);
-    plainDb.exec(`SELECT sqlcipher_export('encrypted')`);
-    plainDb.exec(`DETACH DATABASE encrypted`);
+
+    // Preferred path: in-place encryption via rekey (supported by SQLCipher and SQLite3 Multiple Ciphers).
+    plainDb.exec(`PRAGMA rekey = ${sqliteLiteral(key)}`);
   } catch (err) {
-    try { plainDb.exec(`DETACH DATABASE encrypted`); } catch {}
     throw new Error(
       `Failed to auto-migrate index to encrypted storage. ` +
       `This runtime likely lacks SQLCipher support. ` +
@@ -59,6 +58,33 @@ export function ensureEncryptedIndexReady(indexPath: string): void {
     );
   } finally {
     plainDb.close();
+  }
+
+  if (isLikelyEncryptedSqlite(path)) return;
+
+  // Compatibility fallback for runtimes that require export-based conversion.
+  const exportDb = openWithoutRuntimeKey(path);
+  try {
+    exportDb.exec(`ATTACH DATABASE ${sqliteLiteral(tempEncrypted)} AS encrypted KEY ${sqliteLiteral(key)}`);
+    try {
+      exportDb.exec(`SELECT sqlcipher_export('encrypted')`);
+    } catch (sqlcipherErr) {
+      if (sqlcipherErr instanceof Error && sqlcipherErr.message.includes("no such function: sqlcipher_export")) {
+        exportDb.exec(`SELECT sqlite3mc_export('encrypted')`);
+      } else {
+        throw sqlcipherErr;
+      }
+    }
+    exportDb.exec(`DETACH DATABASE encrypted`);
+  } catch (err) {
+    try { exportDb.exec(`DETACH DATABASE encrypted`); } catch {}
+    throw new Error(
+      `Failed to auto-migrate index to encrypted storage. ` +
+      `This runtime likely lacks SQLCipher support. ` +
+      `Set KINDX_ENCRYPTION_KEY only on SQLCipher-enabled builds. Root cause: ${err instanceof Error ? err.message : String(err)}`
+    );
+  } finally {
+    exportDb.close();
     try {
       if (existsSync(tempEncrypted) && !isLikelyEncryptedSqlite(tempEncrypted)) unlinkSync(tempEncrypted);
     } catch {}
