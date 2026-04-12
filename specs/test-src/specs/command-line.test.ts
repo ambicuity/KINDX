@@ -28,47 +28,6 @@ const thisDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(thisDir, "..");
 const kindxBin = join(projectRoot, "bin", "kindx");
 
-function stripAnsi(input: string): string {
-  return input.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function parseJsonFromCli(
-  result: { stdout: string; stderr: string; exitCode: number },
-  label: string
-): any {
-  const cleanStdout = stripAnsi(result.stdout).trim();
-  const candidates = [cleanStdout];
-  const firstObject = cleanStdout.indexOf("{");
-  const firstArray = cleanStdout.indexOf("[");
-  const firstJsonIdx =
-    firstObject === -1
-      ? firstArray
-      : firstArray === -1
-        ? firstObject
-        : Math.min(firstObject, firstArray);
-  if (firstJsonIdx > 0) {
-    candidates.push(cleanStdout.slice(firstJsonIdx).trim());
-  }
-
-  let lastError: unknown = null;
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      return JSON.parse(candidate);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-
-  throw new Error(
-    `[${label}] Failed to parse JSON from CLI output.\n` +
-      `exitCode=${result.exitCode}\n` +
-      `stdout:\n${result.stdout}\n` +
-      `stderr:\n${result.stderr}\n` +
-      `parseError=${lastError instanceof Error ? lastError.message : String(lastError)}`
-  );
-}
-
 // Helper to run kindx command with test database
 async function runQmd(
   args: string[],
@@ -1574,7 +1533,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(put.exitCode).toBe(0);
-    const putJson = parseJsonFromCli(put, "memory put --json");
+    const putJson = JSON.parse(put.stdout);
     expect(putJson.scope).toBe("cli-test");
     expect(putJson.memory).toBeDefined();
     expect(typeof putJson.memory.id).toBe("number");
@@ -1584,7 +1543,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(search.exitCode).toBe(0);
-    const searchJson = parseJsonFromCli(search, "memory search --json");
+    const searchJson = JSON.parse(search.stdout);
     expect(searchJson.scope).toBe("cli-test");
     expect(searchJson.mode).toBe("text");
     expect(Array.isArray(searchJson.results)).toBe(true);
@@ -1594,7 +1553,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(history.exitCode).toBe(0);
-    const historyJson = parseJsonFromCli(history, "memory history --json");
+    const historyJson = JSON.parse(history.stdout);
     expect(historyJson.scope).toBe("cli-test");
     expect(Array.isArray(historyJson.history)).toBe(true);
 
@@ -1603,7 +1562,7 @@ describe("CLI Memory Commands", () => {
       { dbPath: localDbPath, configDir: localConfigDir }
     );
     expect(stats.exitCode).toBe(0);
-    const statsJson = parseJsonFromCli(stats, "memory stats --json");
+    const statsJson = JSON.parse(stats.stdout);
     expect(statsJson.scope).toBe("cli-test");
     expect(typeof statsJson.totalMemories).toBe("number");
   });

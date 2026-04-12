@@ -1,0 +1,110 @@
+{
+  "generatedAt": "2026-04-11T22:49:48.560Z",
+  "baseUrl": "http://127.0.0.1:8181/query",
+  "routingProfile": "fast",
+  "requestsPerSession": 6,
+  "metrics": [
+    {
+      "docEquivalent": 10000,
+      "sessions": 10,
+      "requests": 60,
+      "p95LatencyMs": 8,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 10000,
+      "sessions": 25,
+      "requests": 150,
+      "p95LatencyMs": 6,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 10000,
+      "sessions": 50,
+      "requests": 300,
+      "p95LatencyMs": 11,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 50000,
+      "sessions": 10,
+      "requests": 60,
+      "p95LatencyMs": 5,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 50000,
+      "sessions": 25,
+      "requests": 150,
+      "p95LatencyMs": 4,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 50000,
+      "sessions": 50,
+      "requests": 300,
+      "p95LatencyMs": 12,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 100000,
+      "sessions": 10,
+      "requests": 60,
+      "p95LatencyMs": 2,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 100000,
+      "sessions": 25,
+      "requests": 150,
+      "p95LatencyMs": 9,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    },
+    {
+      "docEquivalent": 100000,
+      "sessions": 50,
+      "requests": 300,
+      "p95LatencyMs": 6,
+      "rerankTimeoutRate": 0,
+      "queueSaturationRate": 0,
+      "degradedModeRate": 1,
+      "requestErrorRate": 1
+    }
+  ],
+  "violations": [
+    "sessions=10 doceq=10000: degraded_mode_rate 1 > 0.75",
+    "sessions=25 doceq=10000: degraded_mode_rate 1 > 0.75",
+    "sessions=50 doceq=10000: degraded_mode_rate 1 > 0.75",
+    "sessions=10 doceq=50000: degraded_mode_rate 1 > 0.75",
+    "sessions=25 doceq=50000: degraded_mode_rate 1 > 0.75",
+    "sessions=50 doceq=50000: degraded_mode_rate 1 > 0.75",
+    "sessions=10 doceq=100000: degraded_mode_rate 1 > 0.75",
+    "sessions=25 doceq=100000: degraded_mode_rate 1 > 0.75",
+    "sessions=50 doceq=100000: degraded_mode_rate 1 > 0.75"
+  ],
+  "informational": true
+}
