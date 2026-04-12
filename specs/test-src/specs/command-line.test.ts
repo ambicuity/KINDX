@@ -32,7 +32,9 @@ function stripAnsi(input: string): string {
   return input.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
-function extractFirstJsonValue(input: string): string | null {
+function extractJsonCandidates(input: string): string[] {
+  const candidates: string[] = [];
+
   for (let start = 0; start < input.length; start++) {
     const token = input[start];
     if (token !== "{" && token !== "[") continue;
@@ -71,7 +73,11 @@ function extractFirstJsonValue(input: string): string | null {
       if (char === "}" || char === "]") {
         depth--;
         if (depth === 0) {
-          return input.slice(start, i + 1).trim();
+          const candidate = input.slice(start, i + 1).trim();
+          if (candidate.length > 1) {
+            candidates.push(candidate);
+          }
+          break;
         }
         if (depth < 0) {
           break;
@@ -80,7 +86,7 @@ function extractFirstJsonValue(input: string): string | null {
     }
   }
 
-  return null;
+  return candidates;
 }
 
 function parseJsonFromCli(
@@ -89,9 +95,10 @@ function parseJsonFromCli(
 ): any {
   const cleanStdout = stripAnsi(result.stdout).trim();
   const candidates = [cleanStdout];
-  const extractedJson = extractFirstJsonValue(cleanStdout);
-  if (extractedJson && extractedJson !== cleanStdout) {
-    candidates.push(extractedJson);
+  for (const candidate of extractJsonCandidates(cleanStdout)) {
+    if (candidate !== cleanStdout) {
+      candidates.push(candidate);
+    }
   }
 
   let lastError: unknown = null;
