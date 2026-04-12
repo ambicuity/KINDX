@@ -13,6 +13,7 @@ let _sqliteVecLoad: (db: any) => void;
 let _sqliteDriverName = "unknown";
 
 const SQLITE_STDOUT_NOISE = "Not searching for unused variables given on the command line.";
+let _sqliteStdoutNoiseFilterInstalled = false;
 
 function withSuppressedSqliteStdoutNoise<T>(fn: () => T): T {
   const stream = process.stdout as NodeJS.WriteStream & { write: (...args: any[]) => any };
@@ -40,6 +41,30 @@ function withSuppressedSqliteStdoutNoise<T>(fn: () => T): T {
   }
 }
 
+function installSqliteStdoutNoiseFilter(): void {
+  if (_sqliteStdoutNoiseFilterInstalled) return;
+  const stream = process.stdout as NodeJS.WriteStream & { write: (...args: any[]) => any };
+  if (!stream || typeof stream.write !== "function") return;
+  const originalWrite = stream.write.bind(stream);
+  const filteredWrite = ((chunk: any, encoding?: any, cb?: any) => {
+    const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString(encoding || "utf8") : null;
+    if (text && text.includes(SQLITE_STDOUT_NOISE)) {
+      const cleaned = text
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== SQLITE_STDOUT_NOISE)
+        .join("\n");
+      if (!cleaned.trim()) {
+        if (typeof cb === "function") cb();
+        return true;
+      }
+      return originalWrite(cleaned, encoding, cb);
+    }
+    return originalWrite(chunk, encoding, cb);
+  }) as typeof stream.write;
+  stream.write = filteredWrite;
+  _sqliteStdoutNoiseFilterInstalled = true;
+}
+
 if (isBun) {
   // Dynamic string prevents tsc from resolving bun:sqlite on Node.js builds
   const bunSqlite = "bun:" + "sqlite";
@@ -48,6 +73,7 @@ if (isBun) {
   const { getLoadablePath } = await import("sqlite-vec");
   _sqliteVecLoad = (db: any) => db.loadExtension(getLoadablePath());
 } else {
+  installSqliteStdoutNoiseFilter();
   const explicitDriver = String(process.env.KINDX_SQLITE_DRIVER ?? "").trim();
   const preferredDrivers = explicitDriver
     ? [explicitDriver]

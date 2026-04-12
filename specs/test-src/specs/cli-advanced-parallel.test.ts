@@ -23,6 +23,44 @@ const thisDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(thisDir, "..");
 const kindxBin = join(projectRoot, "bin", "kindx");
 
+function stripAnsi(input: string): string {
+  return input.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function parseJsonFromCli(result: CliResult, label: string): any {
+  const cleanStdout = stripAnsi(result.stdout).trim();
+  const candidates = [cleanStdout];
+  const firstObject = cleanStdout.indexOf("{");
+  const firstArray = cleanStdout.indexOf("[");
+  const firstJsonIdx =
+    firstObject === -1
+      ? firstArray
+      : firstArray === -1
+        ? firstObject
+        : Math.min(firstObject, firstArray);
+  if (firstJsonIdx > 0) {
+    candidates.push(cleanStdout.slice(firstJsonIdx).trim());
+  }
+
+  let lastError: unknown = null;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw new Error(
+    `[${label}] Failed to parse JSON from CLI output.\n` +
+      `exitCode=${result.exitCode}\n` +
+      `stdout:\n${result.stdout}\n` +
+      `stderr:\n${result.stderr}\n` +
+      `parseError=${lastError instanceof Error ? lastError.message : String(lastError)}`
+  );
+}
+
 async function runCli(
   args: string[],
   options: {
@@ -167,7 +205,7 @@ describe("CLI advanced command coverage", () => {
         "--json",
       ]);
       expect(put.exitCode).toBe(0);
-      const putPayload = JSON.parse(put.stdout);
+      const putPayload = parseJsonFromCli(put, "memory put --json");
       expect(putPayload.scope).toBe("adv-mem");
       expect(typeof putPayload.memory.id).toBe("number");
 
@@ -181,7 +219,7 @@ describe("CLI advanced command coverage", () => {
         "--json",
       ]);
       expect(mark.exitCode).toBe(0);
-      const markPayload = JSON.parse(mark.stdout);
+      const markPayload = parseJsonFromCli(mark, "memory mark-accessed --json");
       expect(markPayload).toMatchObject({
         scope: "adv-mem",
         id: putPayload.memory.id,
@@ -190,7 +228,7 @@ describe("CLI advanced command coverage", () => {
 
       const embed = await run(["memory", "embed", "--scope", "empty-advanced-scope", "--json"]);
       expect(embed.exitCode).toBe(0);
-      const embedPayload = JSON.parse(embed.stdout);
+      const embedPayload = parseJsonFromCli(embed, "memory embed --json");
       expect(embedPayload.scope).toBe("empty-advanced-scope");
       expect(typeof embedPayload.totalCandidates).toBe("number");
       expect(typeof embedPayload.embedded).toBe("number");

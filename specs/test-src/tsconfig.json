@@ -21,6 +21,7 @@
     "exclude": [
         "node_modules",
         "dist",
-        "training"
+        "training",
+        "specs/test-src"
     ]
 }

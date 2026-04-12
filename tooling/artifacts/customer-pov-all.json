@@ -1,6 +1,6 @@
 {
-  "started_at": "2026-04-11T22:48:12.199Z",
-  "completed_at": "2026-04-11T22:49:59.041Z",
+  "started_at": "2026-04-12T01:48:49.504Z",
+  "completed_at": "2026-04-12T01:50:41.438Z",
   "phase": "all",
   "summary": {
     "overall": "pass",
@@ -16,7 +16,7 @@
       "required": true,
       "status": "pass",
       "code": 0,
-      "durationMs": 2111
+      "durationMs": 2175
     },
     {
       "id": "P0-2",
@@ -25,7 +25,7 @@
       "required": true,
       "status": "pass",
       "code": 0,
-      "durationMs": 72725
+      "durationMs": 74689
     },
     {
       "id": "P0-3",
@@ -34,7 +34,7 @@
       "required": false,
       "status": "skip",
       "code": 1,
-      "durationMs": 2947,
+      "durationMs": 3088,
       "reason": "Optional when docker/podman is unavailable in CI or developer workstation"
     },
     {
@@ -44,7 +44,7 @@
       "required": true,
       "status": "pass",
       "code": 0,
-      "durationMs": 2740
+      "durationMs": 2809
     },
     {
       "id": "P1-2",
@@ -53,7 +53,7 @@
       "required": false,
       "status": "pass",
       "code": 0,
-      "durationMs": 7404
+      "durationMs": 8136
     },
     {
       "id": "P2-1",
@@ -62,7 +62,7 @@
       "required": true,
       "status": "pass",
       "code": 0,
-      "durationMs": 7398
+      "durationMs": 7924
     },
     {
       "id": "P2-2",
@@ -71,7 +71,7 @@
       "required": false,
       "status": "pass",
       "code": 0,
-      "durationMs": 1064
+      "durationMs": 1183
     },
     {
       "id": "P3-1",
@@ -80,7 +80,7 @@
       "required": true,
       "status": "pass",
       "code": 0,
-      "durationMs": 10436
+      "durationMs": 11904
     },
     {
       "id": "P3-2",
