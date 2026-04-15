@@ -4,7 +4,7 @@
 # This file defines all collections and their contexts.
 # You can manually edit this file - changes take effect immediately.
 #
-# Note: All paths must be absolute paths. Relative paths are not supported.
+# Note: Leading ~/ in paths is supported and expands to your home directory.
 
 # Global context applied to all collections
 # Use this for universal search instructions or patterns
@@ -14,14 +14,14 @@ global_context: "If you see a relevant [[WikiWord]], you can search for that Wik
 collections:
   # Meeting notes
   Meetings:
-    path: /absolute/path/to/meetings
+    path: ~/Documents/Meetings
     pattern: "**/*.md"
     context:
       "/": "Meeting notes and summaries"
 
   # Daily journal entries
   journals:
-    path: /absolute/path/to/notes
+    path: ~/Documents/Notes
     pattern: "**/*.md"
     context:
       "/journal/2024": "Daily notes from 2024"
@@ -29,7 +29,7 @@ collections:
       "/": "Notes vault"
 
   codex:
-    path: /absolute/path/to/codex
+    path: ~/Documents/Codex
     pattern: "**/*.md"
     context:
       "/": "Thematic collections of important concepts and discussions"

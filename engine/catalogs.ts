@@ -113,6 +113,31 @@ function ensureConfigDir(): void {
 let _cachedConfig: CollectionConfig | null = null;
 let _lastConfigMtime = 0;
 
+function normalizeCollectionPath(pathValue: string): string {
+  if (!pathValue) return pathValue;
+  if (pathValue.startsWith("~/")) {
+    return resolve(homedir(), pathValue.slice(2));
+  }
+  return pathValue;
+}
+
+function normalizeCollectionPaths(config: CollectionConfig): void {
+  if (Array.isArray(config.collections)) {
+    for (const entry of config.collections) {
+      if (entry && typeof entry.path === "string") {
+        entry.path = normalizeCollectionPath(entry.path);
+      }
+    }
+    return;
+  }
+
+  for (const collection of Object.values(config.collections)) {
+    if (collection && typeof collection.path === "string") {
+      collection.path = normalizeCollectionPath(collection.path);
+    }
+  }
+}
+
 /**
  * Load configuration from ~/.config/kindx/index.yml
  * Returns empty config if file doesn't exist
@@ -136,6 +161,7 @@ export function loadConfig(): CollectionConfig {
     if (!config.collections) {
       config.collections = {};
     }
+    normalizeCollectionPaths(config);
 
     _cachedConfig = config;
     _lastConfigMtime = stat.mtimeMs;
