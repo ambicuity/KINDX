@@ -18,8 +18,16 @@ export const cursor = {
 };
 
 // Ensure cursor is restored on exit
-process.on('SIGINT', () => { cursor.show(); process.exit(130); });
-process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
+let _signalsRegistered = false;
+export function registerCursorCleanup(): void {
+  if (typeof process === "undefined" || _signalsRegistered) return;
+  const isCli = process.title === "node" && !process.env.VITEST && !process.env.NODE_ENV?.includes("test");
+  if (!isCli) return;
+  _signalsRegistered = true;
+  process.on('SIGINT', () => { cursor.show(); process.exit(130); });
+  process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
+}
+registerCursorCleanup();
 
 // Terminal progress bar using OSC 9;4 escape sequence (TTY only)
 const isTTY = process.stderr.isTTY;

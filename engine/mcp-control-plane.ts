@@ -242,9 +242,14 @@ export function buildResolvedHttpHeaders(control: ResolvedMcpServerControl): Rec
 
 export function isToolEnabledByPolicy(control: ResolvedMcpServerControl, toolName: string): boolean {
   if (control.project_scoped && !control.trusted_project) return false;
-  const inEnabled = control.enabled_tools === null || control.enabled_tools.includes(toolName);
-  const inDisabled = control.disabled_tools.includes(toolName);
-  return inEnabled && !inDisabled;
+  
+  // F-003: Strict deny-by-default execution. 
+  // We forbid executing unknown or implicitly missing mappings.
+  const isExcluded = control.disabled_tools.includes(toolName);
+  if (isExcluded) return false;
+
+  const inEnabled = Array.isArray(control.enabled_tools) && control.enabled_tools.includes(toolName);
+  return inEnabled;
 }
 
 export function applyToolPolicy(control: ResolvedMcpServerControl, toolNames: string[]): string[] {
@@ -315,7 +320,8 @@ export class McpToolListCache {
   private readonly memory = new Map<string, ToolListCacheEnvelope>();
   private readonly ttlMs: number;
   private lastDiskPruneAt = 0;
-  private writeQueue: Promise<void> = Promise.resolve();
+  private pendingTasks: Array<() => Promise<void>> = [];
+  private isProcessingQueue = false;
 
   constructor(ttlMs = DEFAULT_CACHE_TTL_MS) {
     this.ttlMs = ttlMs;
@@ -404,16 +410,36 @@ export class McpToolListCache {
   }
 
   async waitForIdleForTests(): Promise<void> {
-    await this.writeQueue;
+    while (this.pendingTasks.length > 0 || this.isProcessingQueue) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   private enqueueDiskTask(task: () => Promise<void>): void {
-    this.writeQueue = this.writeQueue
-      .then(task)
-      .catch((err) => {
-        const detail = err instanceof Error ? err.message : String(err);
-        warnCache("queue_failed", "global", detail);
-      });
+    if (this.pendingTasks.length > 1000) {
+      warnCache("queue_full", "global", "disk task queue limit reached, dropping task");
+      return;
+    }
+    this.pendingTasks.push(task);
+    this.processQueue();
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.isProcessingQueue) return;
+    this.isProcessingQueue = true;
+    try {
+      while (this.pendingTasks.length > 0) {
+        const task = this.pendingTasks.shift();
+        if (task) {
+          await task().catch((err) => {
+            const detail = err instanceof Error ? err.message : String(err);
+            warnCache("queue_failed", "global", detail);
+          });
+        }
+      }
+    } finally {
+      this.isProcessingQueue = false;
+    }
   }
 
   private async maybePruneExpiredDisk(now: number): Promise<void> {

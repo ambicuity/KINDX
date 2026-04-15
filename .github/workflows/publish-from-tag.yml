@@ -12,6 +12,15 @@ on:
         required: true
         type: boolean
         default: false
+      publish_targets:
+        description: 'Where to publish this package version'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - npm
+          - github
 
 concurrency:
   group: publish-from-tag-${{ github.event.inputs.tag }}
@@ -19,6 +28,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write
   id-token: write
 
 jobs:
@@ -54,30 +64,71 @@ jobs:
           set -euo pipefail
           NAME=$(jq -r '.name' package.json)
           VERSION=$(jq -r '.version' package.json)
+          MARKET_VERSION=$(jq -r '.plugins[0].version' .agent-plugin/marketplace.json)
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "market_version=${MARKET_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Publishing candidate: ${NAME}@${VERSION} from tag ${{ github.event.inputs.tag }}"
 
-      - name: Guardrail (already published)
+      - name: Guardrail (marketplace metadata in sync)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.pkg.outputs.version }}'
+          MARKET_VERSION='${{ steps.pkg.outputs.market_version }}'
+          if [[ "$VERSION" != "$MARKET_VERSION" ]]; then
+            echo "::error::.agent-plugin/marketplace.json version (${MARKET_VERSION}) must match package.json (${VERSION})."
+            exit 1
+          fi
+
+      - name: Guardrail (already published on npmjs)
         if: ${{ github.event.inputs.dry_run != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           NAME='${{ steps.pkg.outputs.name }}'
           VERSION='${{ steps.pkg.outputs.version }}'
-          if npm view "${NAME}@${VERSION}" version --silent >/dev/null 2>&1; then
+          TARGET='${{ github.event.inputs.publish_targets }}'
+          if [[ "$TARGET" =~ ^(both|npm)$ ]] && npm view "${NAME}@${VERSION}" version --silent --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
             echo "::error::${NAME}@${VERSION} is already published on npm. Refusing to republish."
             exit 1
           fi
 
+      - name: Guardrail (already published on GitHub Packages)
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME='${{ steps.pkg.outputs.name }}'
+          VERSION='${{ steps.pkg.outputs.version }}'
+          TARGET='${{ github.event.inputs.publish_targets }}'
+          if [[ "$TARGET" =~ ^(both|github)$ ]] && npm view "${NAME}@${VERSION}" version --silent --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} is already published on GitHub Packages. Refusing to republish."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish to npm (dry run)
-        if: ${{ github.event.inputs.dry_run == 'true' }}
+        if: ${{ github.event.inputs.dry_run == 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'npm') }}
         run: npm publish --provenance --dry-run
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Publish to GitHub Packages (dry run)
+        if: ${{ github.event.inputs.dry_run == 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
+        run: npm publish --registry=https://npm.pkg.github.com --dry-run
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish to npm
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ github.event.inputs.dry_run != 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'npm') }}
         run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        if: ${{ github.event.inputs.dry_run != 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
+        run: npm publish --registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

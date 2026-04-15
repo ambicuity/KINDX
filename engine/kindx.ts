@@ -789,7 +789,7 @@ async function updateCollections(
 
         trustedHashes.push(cmdHash);
         try {
-          writeFileSync(trustFile, JSON.stringify(trustedHashes), "utf-8");
+          writeFileSync(trustFile, JSON.stringify(trustedHashes), { encoding: "utf-8", mode: 0o600 });
           console.log(`${c.green}✓ Command trusted for future runs.${c.reset}`);
         } catch (err) {
           console.error(`Failed to save trust marker: ${err}`);

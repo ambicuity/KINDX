@@ -41,6 +41,7 @@ import {
   loadConfig as collectionsLoadConfig,
   type NamedCollection,
 } from "./catalogs.js";
+// SessionRegistry import removed — signal now propagated via options.signal
 import { initializeMemorySchema } from "./memory.js";
 import { describeEncryptionState, ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
 import {
@@ -681,6 +682,7 @@ function initializeDatabase(db: Database): void {
     _sqliteVecAvailable = false;
   }
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA synchronous = FULL"); // Enforce atomic multi-statement flushes to OS to prevent index data loss
   db.exec("PRAGMA busy_timeout = 30000"); // Allow concurrent processes to wait for lock
   db.exec("PRAGMA foreign_keys = ON");
 
@@ -800,11 +802,11 @@ function initializeDatabase(db: Database): void {
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents
     BEGIN
-      -- Delete from FTS if no longer active
-      DELETE FROM documents_fts WHERE rowid = old.id AND new.active = 0;
+      -- Always delete old FTS entry first (FTS5 does not cleanly support INSERT OR REPLACE)
+      DELETE FROM documents_fts WHERE rowid = old.id;
 
-      -- Update FTS if still/newly active
-      INSERT OR REPLACE INTO documents_fts(rowid, filepath, title, body)
+      -- Insert new FTS entry if active
+      INSERT INTO documents_fts(rowid, filepath, title, body)
       SELECT
         new.id,
         new.collection || '/' || new.path,
@@ -825,8 +827,40 @@ function initializeDatabase(db: Database): void {
   setCapability.run("ann", "centroid-v1", now);
   setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
   setCapability.run("extractors", "native-text+pdf-docx-adapter-v1", now);
+  
+  ensureVectorIndexIntegrity(db);
 }
 
+export function ensureVectorIndexIntegrity(db: Database): void {
+  const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
+  if (!tableCheck) return;
+
+  const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as any).c;
+  const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as any).c;
+
+  let mismatch = contentCount !== indexCount;
+
+  if (!mismatch && contentCount > 0) {
+    try {
+      const missingInIndex = db.prepare(`
+        SELECT 1 FROM content_vectors 
+        WHERE NOT EXISTS (
+          SELECT 1 FROM vectors_vec 
+          WHERE vectors_vec.hash_seq = content_vectors.hash || '_' || content_vectors.seq
+        ) LIMIT 1
+      `).get();
+      if (missingInIndex) mismatch = true;
+    } catch (e) {
+      // Graceful fallback if SQLite version prohibits virtual table outer joins
+    }
+  }
+
+  if (mismatch) {
+    process.stderr.write(`KINDX Recovery: vector index parity mismatch (content: ${contentCount}, index: ${indexCount}). Rebuilding...\n`);
+    db.exec(`DELETE FROM vectors_vec`);
+    db.exec(`DELETE FROM content_vectors`);
+  }
+}
 
 export function isSqliteVecAvailable(): boolean {
   return _sqliteVecAvailable === true;
@@ -1625,8 +1659,15 @@ export function updateDocument(
  * Deactivate a document (mark as inactive but don't delete).
  */
 export function deactivateDocument(db: Database, collectionName: string, path: string): void {
-  db.prepare(`UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1`)
+  const res = db.prepare(`UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1`)
     .run(collectionName, path);
+    
+  if (res.changes > 0) {
+    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat
+    setTimeout(() => {
+      try { cleanupOrphanedVectors(db); } catch {}
+    }, 0);
+  }
 }
 
 /**
@@ -2919,7 +2960,8 @@ export function reciprocalRankFusion(
     if (!list) continue;
     const weight = weights[listIdx] ?? 1.0;
 
-    for (let rank = 0; rank < list.length; rank++) {
+    const boundedLength = Math.min(list.length, 300); // Cap to prevent memory/event loop exhaustion
+    for (let rank = 0; rank < boundedLength; rank++) {
       const result = list[rank];
       if (!result) continue;
       const rrfContribution = weight / (k + rank + 1);
@@ -3879,6 +3921,7 @@ export interface HybridQueryOptions {
   rerankTimeoutMs?: number; // optional rerank timeout budget
   explain?: boolean;        // include backend/RRF/rerank score traces
   hooks?: SearchHooks;
+  signal?: AbortSignal;
 }
 
 export interface HybridQueryResult {
@@ -4008,7 +4051,7 @@ export async function hybridQuery(
     const embedStart = Date.now();
     let embeddings: Awaited<ReturnType<typeof llm.embedBatch>>;
     try {
-      embeddings = await llm.embedBatch(textsToEmbed);
+      embeddings = await llm.embedBatch(textsToEmbed, { signal: options?.signal });
     } catch (err) {
       process.stderr.write(
         `KINDX Warning: embedBatch failed during hybridQuery, falling back to FTS-only results. ${err}\n`
@@ -4271,9 +4314,9 @@ export interface StructuredSearchOptions {
   disableRerank?: boolean;  // default false
   explain?: boolean;        // include backend/RRF/rerank score traces
   routingProfile?: SearchRoutingProfile; // default balanced
-  /** Future: domain intent hint for routing/boosting */
   intent?: string;
   hooks?: SearchHooks;
+  signal?: AbortSignal;
 }
 
 export type StructuredSearchWithDiagnosticsResult = {
@@ -4544,7 +4587,7 @@ export async function structuredSearchWithDiagnostics(
       const embedStart = Date.now();
       let embeddings: Awaited<ReturnType<typeof llm.embedBatch>>;
       try {
-        embeddings = await llm.embedBatch(textsToEmbed);
+        embeddings = await llm.embedBatch(textsToEmbed, { signal: options?.signal });
       } catch (err) {
         process.stderr.write(
           `KINDX Warning: embedBatch failed during structuredSearch, falling back to FTS-only results. ${err}\n`

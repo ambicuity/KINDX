@@ -906,6 +906,7 @@ describe("MCP HTTP Transport", () => {
   const origIndexPath = process.env.INDEX_PATH;
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
   const origMcpToken = process.env.KINDX_MCP_TOKEN;
+  const origMcpServersJson = process.env.KINDX_MCP_SERVERS_JSON;
   const testMcpToken = "kindx-test-token";
 
   beforeAll(async () => {
@@ -933,6 +934,17 @@ describe("MCP HTTP Transport", () => {
     process.env.INDEX_PATH = httpTestDbPath;
     process.env.KINDX_CONFIG_DIR = httpTestConfigDir;
     process.env.KINDX_MCP_TOKEN = testMcpToken;
+    process.env.KINDX_MCP_SERVERS_JSON = JSON.stringify({
+      mcp_servers: {
+        "kindx": {
+          enabled_tools: [
+            "query", "get", "status", 
+            "memory_put", "memory_search", "memory_history", 
+            "memory_stats", "memory_mark_accessed"
+          ]
+        }
+      }
+    });
 
     handle = await startMcpHttpServer(0, { quiet: true }); // OS-assigned ephemeral port
     baseUrl = `http://localhost:${handle.port}`;
@@ -948,6 +960,8 @@ describe("MCP HTTP Transport", () => {
     else delete process.env.KINDX_CONFIG_DIR;
     if (origMcpToken !== undefined) process.env.KINDX_MCP_TOKEN = origMcpToken;
     else delete process.env.KINDX_MCP_TOKEN;
+    if (origMcpServersJson !== undefined) process.env.KINDX_MCP_SERVERS_JSON = origMcpServersJson;
+    else delete process.env.KINDX_MCP_SERVERS_JSON;
 
     // Clean up test files
     try { unlinkSync(httpTestDbPath); } catch { }
@@ -1648,6 +1662,7 @@ describe("MCP HTTP Transport RBAC collection isolation", () => {
   const origIndexPath = process.env.INDEX_PATH;
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
   const origMcpToken = process.env.KINDX_MCP_TOKEN;
+  const origMcpServersJson = process.env.KINDX_MCP_SERVERS_JSON;
 
   beforeAll(async () => {
     dbPath = `/tmp/kindx-mcp-rbac-test-${Date.now()}.sqlite`;
@@ -1682,6 +1697,14 @@ describe("MCP HTTP Transport RBAC collection isolation", () => {
     const created = rbac.createTenant("viewer-rbac", "Viewer RBAC", "viewer", ["docs"]);
     viewerToken = created.plaintextToken;
 
+    process.env.KINDX_MCP_SERVERS_JSON = JSON.stringify({
+      mcp_servers: {
+        "kindx": {
+          enabled_tools: ["query", "get", "status"]
+        }
+      }
+    });
+
     handle = await startMcpHttpServer(0, { quiet: true });
     baseUrl = `http://localhost:${handle.port}`;
   });
@@ -1698,6 +1721,8 @@ describe("MCP HTTP Transport RBAC collection isolation", () => {
     else delete process.env.KINDX_CONFIG_DIR;
     if (origMcpToken !== undefined) process.env.KINDX_MCP_TOKEN = origMcpToken;
     else delete process.env.KINDX_MCP_TOKEN;
+    if (origMcpServersJson !== undefined) process.env.KINDX_MCP_SERVERS_JSON = origMcpServersJson;
+    else delete process.env.KINDX_MCP_SERVERS_JSON;
 
     try { unlinkSync(dbPath); } catch { }
     try {
@@ -1792,5 +1817,50 @@ describe("MCP HTTP Transport RBAC collection isolation", () => {
     expect(Array.isArray(structuredResults)).toBe(true);
     expect(structuredResults.length).toBe(0);
     expect(resultText).not.toContain("secret/plan.md");
+  });
+
+  test("POST /query returns 429 when tenant exceeds configured rate limit", async () => {
+    const origBurst = process.env.KINDX_RATE_LIMIT_BURST;
+    const origRateMs = process.env.KINDX_RATE_LIMIT_MS;
+    process.env.KINDX_RATE_LIMIT_BURST = "1";
+    process.env.KINDX_RATE_LIMIT_MS = "60000";
+
+    const rbac = await import("../engine/rbac.js");
+    rbac.__resetRateLimitsForTests();
+
+    try {
+      const reqBody = JSON.stringify({
+        searches: [{ type: "lex", query: "project" }],
+        collections: ["docs"],
+      });
+
+      const first = await fetch(`${baseUrl}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${viewerToken}`,
+        },
+        body: reqBody,
+      });
+      expect(first.status).toBe(200);
+
+      const second = await fetch(`${baseUrl}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${viewerToken}`,
+        },
+        body: reqBody,
+      });
+      const secondBody = await second.json();
+      expect(second.status).toBe(429);
+      expect(String(secondBody.error || "")).toContain("Rate limit exceeded for tenant 'viewer-rbac'");
+    } finally {
+      rbac.__resetRateLimitsForTests();
+      if (origBurst !== undefined) process.env.KINDX_RATE_LIMIT_BURST = origBurst;
+      else delete process.env.KINDX_RATE_LIMIT_BURST;
+      if (origRateMs !== undefined) process.env.KINDX_RATE_LIMIT_MS = origRateMs;
+      else delete process.env.KINDX_RATE_LIMIT_MS;
+    }
   });
 });

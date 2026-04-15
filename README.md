@@ -1,10 +1,9 @@
 ```
- ██╗  ██╗██╗███╗   ██╗██████╗ ██╗  ██╗
- ██║ ██╔╝██║████╗  ██║██╔══██╗╚██╗██╔╝
- █████╔╝ ██║██╔██╗ ██║██║  ██║ ╚███╔╝
- ██╔═██╗ ██║██║╚██╗██║██║  ██║ ██╔██╗
- ██║  ██╗██║██║ ╚████║██████╔╝██╔╝ ██╗
- ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚═╝  ╚═╝
+ _  ___ _   _ ____  __  __
+| |/ (_) \ | |  _ \ \ \/ /
+| ' /| |  \| | | | | \  /
+| . \| | |\  | |_| | /  \
+|_|\_\_|_| \_|____/ /_/\_\
 ```
 
 # KINDX — Production-Quality On-Device Knowledge Infrastructure
@@ -228,6 +227,22 @@ Audit artifacts:
 - `reference/runbooks/operating-modes.md`
 - `reference/runbooks/customer-pov-launch-readiness.md`
 - `reference/runbooks/customer-pov-evidence-template.md`
+- `reference/runbooks/release-surface-qa-checklist.md`
+
+### Release Surfaces Checklist
+
+For every release tag (`vX.Y.Z`), verify public distribution surfaces are synchronized:
+
+- GitHub Releases: `https://github.com/ambicuity/KINDX/releases` shows `vX.Y.Z` as latest.
+- npm registry: `npm view @ambicuity/kindx version --registry=https://registry.npmjs.org/` returns `X.Y.Z`.
+- GitHub Packages: `https://github.com/ambicuity/KINDX/pkgs/npm/kindx` shows `X.Y.Z` as latest.
+- MCP Market listing: `https://mcpmarket.com/server/kindx` reflects updated listing content; if version is not visible, capture dashboard submission evidence.
+
+Release metadata must stay aligned:
+
+- `package.json` version = `X.Y.Z`
+- `.release-please-manifest.json` (`"."`) = `X.Y.Z`
+- `.agent-plugin/marketplace.json` (`plugins[0].version`) = `X.Y.Z`
 
 ---
 

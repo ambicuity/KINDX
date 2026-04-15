@@ -5,7 +5,7 @@
  * Collections define which directories to index and their associated contexts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, openSync, writeSync, fsyncSync, closeSync, renameSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
 import YAML from "yaml";
@@ -174,25 +174,54 @@ export function loadConfig(): CollectionConfig {
 
 /**
  * Save configuration to ~/.config/kindx/index.yml
+ *
+ * Uses atomic write (temp-file + fsync + rename + dir-fsync) to prevent
+ * configuration corruption on crash. Matches the pattern in rbac.ts.
  */
 export function saveConfig(config: CollectionConfig): void {
   ensureConfigDir();
   const configPath = getConfigFilePath();
+  const configDir = getConfigDir();
+  const tempPath = `${configPath}.tmp.${Date.now()}`;
 
+  const yaml = YAML.stringify(config, {
+    indent: 2,
+    lineWidth: 0,  // Don't wrap lines
+  });
+
+  // F-INT-2: Atomic write — crash at any point leaves either old or new file intact.
+  let fd: number | null = null;
   try {
-    const yaml = YAML.stringify(config, {
-      indent: 2,
-      lineWidth: 0,  // Don't wrap lines
-    });
-    writeFileSync(configPath, yaml, "utf-8");
-    
-    // Update cache synchronously
-    const stat = statSync(configPath);
-    _cachedConfig = config;
-    _lastConfigMtime = stat.mtimeMs;
+    fd = openSync(tempPath, "w", 0o644);
+    writeSync(fd, yaml, null, "utf8");
+    fsyncSync(fd);
   } catch (error) {
     throw new Error(`Failed to write ${configPath}: ${error}`);
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
   }
+
+  renameSync(tempPath, configPath);
+
+  // fsync the directory to ensure the rename is durable against power failure
+  let dirFd: number | null = null;
+  try {
+    dirFd = openSync(configDir, "r");
+    fsyncSync(dirFd);
+  } catch {
+    // Ignored for OSes that don't support directory fsync
+  } finally {
+    if (dirFd !== null) {
+      try { closeSync(dirFd); } catch {}
+    }
+  }
+
+  // Update cache synchronously
+  const stat = statSync(configPath);
+  _cachedConfig = config;
+  _lastConfigMtime = stat.mtimeMs;
 }
 
 /**

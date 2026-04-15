@@ -24,6 +24,8 @@ export type BackupVerifyResult = {
 export function createBackup(indexPath: string, outputPath: string): BackupCreateResult {
   const db = openDatabase(indexPath);
   let checkpointed = false;
+  const target = resolve(outputPath);
+
   try {
     try {
       db.exec("PRAGMA wal_checkpoint(FULL)");
@@ -31,15 +33,19 @@ export function createBackup(indexPath: string, outputPath: string): BackupCreat
     } catch {
       checkpointed = false;
     }
+
+    mkdirSync(dirname(target), { recursive: true });
+    if (existsSync(target)) {
+      unlinkSync(target); // VACUUM INTO requires the target to not exist
+    }
+    // Safe atomic snapshot:
+    const safeTargetPath = target.replace(/'/g, "''");
+    db.exec(`VACUUM INTO '${safeTargetPath}'`);
   } finally {
     db.close();
   }
 
-  const target = resolve(outputPath);
-  mkdirSync(dirname(target), { recursive: true });
-  copyFileSync(indexPath, target);
   const bytes = statSync(target).size;
-
   return { backupPath: target, bytes, checkpointed, encrypted: isLikelyEncryptedSqlite(target) };
 }
 
