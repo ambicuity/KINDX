@@ -73,7 +73,11 @@ export class LLMPool {
    *                  Default: 30000 (30s).
    * @returns A lease that MUST be released in a finally block.
    */
-  acquire(timeoutMs: number = 30_000): Promise<PooledLease> {
+  acquire(timeoutMs: number = 30_000, signal?: AbortSignal): Promise<PooledLease> {
+    if (signal?.aborted) {
+      return Promise.reject(new Error(`LLMPool acquire aborted: ${signal.reason}`));
+    }
+
     if (this.available > 0) {
       this.available--;
       this.totalAcquired++;
@@ -95,18 +99,37 @@ export class LLMPool {
         timer: null,
       };
 
-      entry.timer = setTimeout(() => {
+      const cleanup = () => {
         const idx = this.waitQueue.indexOf(entry);
         if (idx >= 0) {
           this.waitQueue.splice(idx, 1);
-          this.totalTimedOut++;
-          reject(
-            new LLMPoolTimeoutError(
-              `LLM pool acquire timed out after ${timeoutMs}ms ` +
-              `(pool=${this.size}, active=${this.size - this.available}, waiting=${this.waitQueue.length})`
-            )
-          );
         }
+        if (entry.timer) clearTimeout(entry.timer);
+      };
+
+      if (signal) {
+        const onAbort = () => {
+          cleanup();
+          reject(new Error(`LLMPool acquire aborted: ${signal.reason}`));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        
+        const origResolve = entry.resolve;
+        entry.resolve = (lease) => {
+          signal.removeEventListener("abort", onAbort);
+          origResolve(lease);
+        };
+      }
+
+      entry.timer = setTimeout(() => {
+        cleanup();
+        this.totalTimedOut++;
+        reject(
+          new LLMPoolTimeoutError(
+            `LLM pool acquire timed out after ${timeoutMs}ms ` +
+            `(pool=${this.size}, active=${this.size - this.available}, waiting=${this.waitQueue.length})`
+          )
+        );
       }, timeoutMs);
 
       this.waitQueue.push(entry);
@@ -116,8 +139,8 @@ export class LLMPool {
   /**
    * Execute a function with a pooled lease, releasing automatically on completion.
    */
-  async withLease<T>(fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
-    const lease = await this.acquire(timeoutMs);
+  async withLease<T>(fn: () => Promise<T>, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+    const lease = await this.acquire(timeoutMs, signal);
     try {
       return await fn();
     } finally {

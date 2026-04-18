@@ -160,7 +160,7 @@ export type LLMSessionOptions = {
  */
 export interface ILLMSession {
   embed(text: string, options?: EmbedOptions): Promise<EmbeddingResult | null>;
-  embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]>;
+  embedBatch(texts: string[], options?: { signal?: AbortSignal }): Promise<(EmbeddingResult | null)[]>;
   expandQuery(query: string, options?: { context?: string; includeLexical?: boolean }): Promise<Queryable[]>;
   rerank(query: string, documents: RerankDocument[], options?: RerankOptions): Promise<RerankResult>;
   /** Whether this session is still valid (not released or aborted) */
@@ -352,7 +352,7 @@ export interface LLM {
   /**
    * Batch get embeddings for text
    */
-  embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]>;
+  embedBatch(texts: string[], options?: { signal?: AbortSignal }): Promise<(EmbeddingResult | null)[]>;
 
   /**
    * Generate text completion
@@ -1168,7 +1168,7 @@ export class LlamaCpp implements LLM {
    * Batch embed multiple texts efficiently
    * Uses Promise.all for parallel embedding - node-llama-cpp handles batching internally
    */
-  async embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]> {
+  async embedBatch(texts: string[], options?: { signal?: AbortSignal }): Promise<(EmbeddingResult | null)[]> {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
@@ -1183,6 +1183,7 @@ export class LlamaCpp implements LLM {
         const context = contexts[0]!;
         const embeddings: ({ embedding: number[]; model: string } | null)[] = [];
         for (const text of texts) {
+          if (options?.signal?.aborted) throw new Error("AbortError");
           try {
             const embedding = await context.getEmbeddingFor(text);
             this.touchActivity();
@@ -1203,9 +1204,11 @@ export class LlamaCpp implements LLM {
 
       const chunkResults = await Promise.all(
         chunks.map(async (chunk, i) => {
+          if (options?.signal?.aborted) throw new Error("AbortError");
           const ctx = contexts[i]!;
           const results: (EmbeddingResult | null)[] = [];
           for (const text of chunk) {
+            if (options?.signal?.aborted) throw new Error("AbortError");
             try {
               const embedding = await ctx.getEmbeddingFor(text);
               this.touchActivity();
@@ -1761,8 +1764,8 @@ class LLMSession implements ILLMSession {
     return this.withOperation(() => this.manager.getLLM().embed(text, options));
   }
 
-  async embedBatch(texts: string[]): Promise<(EmbeddingResult | null)[]> {
-    return this.withOperation(() => this.manager.getLLM().embedBatch(texts));
+  async embedBatch(texts: string[], options?: { signal?: AbortSignal }): Promise<(EmbeddingResult | null)[]> {
+    return this.withOperation(() => this.manager.getLLM().embedBatch(texts, options));
   }
 
   async expandQuery(

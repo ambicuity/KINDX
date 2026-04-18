@@ -290,4 +290,58 @@ describe("RBAC", () => {
       }
     });
   });
+
+  describe("Rate Limiting", () => {
+    const origBurst = process.env.KINDX_RATE_LIMIT_BURST;
+    const origRateMs = process.env.KINDX_RATE_LIMIT_MS;
+
+    beforeEach(() => {
+      process.env.KINDX_RATE_LIMIT_BURST = "2";
+      process.env.KINDX_RATE_LIMIT_MS = "1000";
+      rbac.__resetRateLimitsForTests();
+    });
+
+    afterEach(() => {
+      rbac.__resetRateLimitsForTests();
+      vi.useRealTimers();
+      if (origBurst !== undefined) {
+        process.env.KINDX_RATE_LIMIT_BURST = origBurst;
+      } else {
+        delete process.env.KINDX_RATE_LIMIT_BURST;
+      }
+      if (origRateMs !== undefined) {
+        process.env.KINDX_RATE_LIMIT_MS = origRateMs;
+      } else {
+        delete process.env.KINDX_RATE_LIMIT_MS;
+      }
+    });
+
+    it("enforces burst limit and throws RateLimitExceededError", () => {
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).toThrow(rbac.RateLimitExceededError);
+    });
+
+    it("refills tokens over time", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).toThrow(rbac.RateLimitExceededError);
+
+      vi.advanceTimersByTime(1000);
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+    });
+
+    it("tracks limits independently per tenant", () => {
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-a")).toThrow(rbac.RateLimitExceededError);
+
+      expect(() => rbac.enforceRateLimit("tenant-b")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-b")).not.toThrow();
+      expect(() => rbac.enforceRateLimit("tenant-b")).toThrow(rbac.RateLimitExceededError);
+    });
+  });
 });

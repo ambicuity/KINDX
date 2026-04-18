@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kindx.local/schemas/section6-results.schema.json",
+  "title": "KINDX Section 6 Benchmark Results",
+  "type": "object",
+  "required": [
+    "schema",
+    "generatedAt",
+    "hardware",
+    "runtime",
+    "provenance",
+    "datasets"
+  ],
+  "properties": {
+    "schema": { "const": "kindx-section6-results-v1" },
+    "generatedAt": { "type": "string" },
+    "hardware": {
+      "type": "object",
+      "required": ["cpu", "cores", "ramGB", "storage"],
+      "properties": {
+        "cpu": { "type": "string" },
+        "cores": { "type": "integer" },
+        "ramGB": { "type": "number" },
+        "storage": { "type": "string" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["nodeVersion", "kindxVersion"],
+      "properties": {
+        "nodeVersion": { "type": "string" },
+        "kindxVersion": { "type": "string" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["command", "artifactPath"],
+      "properties": {
+        "command": { "type": "string" },
+        "artifactPath": { "type": "string" }
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "docCount",
+          "queryCount",
+          "retrievalQuality",
+          "servingPerformance",
+          "indexingPerformance",
+          "resourceUsage"
+        ]
+      }
+    }
+  }
+}

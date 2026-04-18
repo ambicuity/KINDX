@@ -67,6 +67,38 @@ describe("mcp control plane", () => {
     expect(applyToolPolicy(resolved, ["query", "get", "status"])).toEqual(["query", "get"]);
   });
 
+  test("deny-by-default blocks tools when enabled list is missing", () => {
+    const resolved = resolveMcpServerControl("kindx", {
+      runtime: null,
+      project: null,
+      user: null,
+      trustedProject: true,
+      projectHash: "p",
+    });
+    expect(resolved.enabled_tools).toBeNull();
+    expect(isToolEnabledByPolicy(resolved, "query")).toBe(false);
+    expect(applyToolPolicy(resolved, ["query", "get"])).toEqual([]);
+  });
+
+  test("deny-by-default blocks unknown tools not explicitly allowlisted", () => {
+    const resolved = resolveMcpServerControl("kindx", {
+      runtime: {
+        mcp_servers: {
+          kindx: {
+            enabled_tools: ["query"],
+          },
+        },
+      },
+      project: null,
+      user: null,
+      trustedProject: true,
+      projectHash: "p",
+    });
+    expect(isToolEnabledByPolicy(resolved, "query")).toBe(true);
+    expect(isToolEnabledByPolicy(resolved, "status")).toBe(false);
+    expect(applyToolPolicy(resolved, ["query", "status"])).toEqual(["query"]);
+  });
+
   test("builds provenance registry with qualified tool names", () => {
     const registry = buildToolProvenanceRegistry("kindx", ["query"]);
     expect(registry.query.qualified_name).toBe("mcp:kindx/query");

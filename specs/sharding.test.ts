@@ -7,6 +7,7 @@ import { openDatabase, loadSqliteVec } from "../engine/runtime.js";
 import type { Database } from "../engine/runtime.js";
 import { setConfigIndexName } from "../engine/catalogs.js";
 import {
+  __setCheckpointWriterForTests,
   getSchedulerCheckpointState,
   getShardCheckpointPath,
   getShardHealthSummary,
@@ -99,6 +100,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __setCheckpointWriterForTests(null);
   try { db.close(); } catch {}
   delete process.env.KINDX_CONFIG_DIR;
   await rm(dir, { recursive: true, force: true });
@@ -237,5 +239,42 @@ describe("sharding sync", () => {
     expect(summary.families).toHaveProperty("write");
     expect(summary.families).toHaveProperty("parity");
     expect(Array.isArray(summary.warnings)).toBe(true);
+  });
+
+  test("torn write playback recovers sequence", async () => {
+    if (!hasVec) return;
+
+    // Insert a batch of documents so we transcend the immediate modulo bounds
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO content (hash, doc, created_at) VALUES (?, ?, ?)`).run("h3", "doc three", now);
+    db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES ('notes', 'c.md', 'C', 'h3', ?, ?, 1)`).run(now, now);
+    db.prepare(`INSERT INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES ('h3', 0, 0, 'embeddinggemma', ?)`).run(now);
+
+    // Override batch size to force frequent checkpoint writes and fail exactly once.
+    await writeFile(
+      join(configDir, "index.yml"),
+      `collections:\n  notes:\n    path: ${dir}/notes\n    pattern: "**/*.md"\n    shard_count: 2\n    embedding_batch_size: 1\n`
+    );
+    let failedOnce = false;
+    __setCheckpointWriterForTests((path, data, encoding) => {
+      if (!failedOnce && path.includes("scheduler-checkpoint")) {
+        failedOnce = true;
+        throw new Error("Simulated hard crash exit during checkpoint flush");
+      }
+      writeFileSync(path, data, encoding);
+    });
+
+    await syncCollectionShardsFromMainDb(db, dbPath, { resume: false });
+    expect(failedOnce).toBe(true);
+
+    __setCheckpointWriterForTests(null);
+
+    // Resume should reconstruct checkpoint + shard parity without torn state.
+    const resumed = await syncCollectionShardsFromMainDb(db, dbPath, { resume: true });
+    const checkpoint = getSchedulerCheckpointState(dbPath);
+    expect(checkpoint.warnings).not.toContain("checkpoint_parse_error");
+    expect(Array.isArray(resumed.warnings)).toBe(true);
+    const health = getShardHealthSummary(db, dbPath, 3);
+    expect(health.families.parity.count).toBeGreaterThan(0);
   });
 });

@@ -54,7 +54,7 @@ COPY --from=builder /app/capabilities ./capabilities
 # Configure Operational Environment
 ENV NODE_ENV=production
 # Force JSON logs for datadog/cloudwatch friendliness 
-ENV KINDX_LOG_FORMAT=json
+ENV KINDX_LOG_JSON=1
 ENV KINDX_SQLITE_DRIVER=better-sqlite3-multiple-ciphers
 
 # Isolate homedir so config and cache are persisted easily

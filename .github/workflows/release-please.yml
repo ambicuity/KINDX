@@ -48,11 +48,68 @@ jobs:
         if: ${{ steps.release.outputs.release_created }}
         run: npm run build
 
+      - name: Resolve package metadata
+        if: ${{ steps.release.outputs.release_created }}
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME=$(jq -r '.name' package.json)
+          VERSION=$(jq -r '.version' package.json)
+          MARKET_VERSION=$(jq -r '.plugins[0].version' .agent-plugin/marketplace.json)
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "market_version=${MARKET_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Guardrail (marketplace metadata in sync)
+        if: ${{ steps.release.outputs.release_created }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.pkg.outputs.version }}'
+          MARKET_VERSION='${{ steps.pkg.outputs.market_version }}'
+          if [[ "$VERSION" != "$MARKET_VERSION" ]]; then
+            echo "::error::.agent-plugin/marketplace.json version (${MARKET_VERSION}) must match package.json (${VERSION})."
+            exit 1
+          fi
+
+      - name: Guardrail (npmjs already published)
+        if: ${{ steps.release.outputs.release_created }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME='${{ steps.pkg.outputs.name }}'
+          VERSION='${{ steps.pkg.outputs.version }}'
+          if npm view "${NAME}@${VERSION}" version --silent --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} already exists on npmjs. Refusing duplicate publish."
+            exit 1
+          fi
+
       - name: Publish to npm
         if: ${{ steps.release.outputs.release_created }}
         run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Guardrail (GitHub Packages already published)
+        if: ${{ steps.release.outputs.release_created }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME='${{ steps.pkg.outputs.name }}'
+          VERSION='${{ steps.pkg.outputs.version }}'
+          if npm view "${NAME}@${VERSION}" version --silent --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} already exists on GitHub Packages. Refusing duplicate publish."
+            exit 1
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to GitHub Packages
+        if: ${{ steps.release.outputs.release_created }}
+        run: npm publish --registry=https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign release artifacts
         if: ${{ steps.release.outputs.release_created }}

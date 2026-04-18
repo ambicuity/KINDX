@@ -19,7 +19,7 @@
  *   collection restrictions.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, promises as fsp } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, renameSync, openSync, writeSync, fsyncSync, closeSync, promises as fsp } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomBytes, createHash } from "crypto";
@@ -265,9 +265,34 @@ export function saveTenantRegistry(registry: TenantRegistry): void {
   }
 
   const filePath = getTenantsFilePath();
+  const tempPath = `${filePath}.tmp.${Date.now()}`;
   const yaml = YAML.stringify(registry, { indent: 2, lineWidth: 0 });
-  writeFileSync(filePath, yaml, { encoding: "utf8", mode: 0o600 });
+  
+  let fd: number | null = null;
+  try {
+    fd = openSync(tempPath, "w", 0o600);
+    writeSync(fd, yaml, null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch (e) {}
+    }
+  }
+  
+  renameSync(tempPath, filePath);
 
+  // fsync the directory to ensure the rename is durable against power failure
+  let dirFd: number | null = null;
+  try {
+    dirFd = openSync(configDir, "r");
+    fsyncSync(dirFd);
+  } catch (e) {
+    // Ignore errors for OSes that don't support directory fsync
+  } finally {
+    if (dirFd !== null) {
+      try { closeSync(dirFd); } catch (e) {}
+    }
+  }
   const stat = statSync(filePath);
   _cachedRegistry = registry;
   _lastRegistryMtime = stat.mtimeMs;
@@ -511,6 +536,8 @@ export function enforce(
   operation: RBACOperation,
   collectionName?: string,
 ): void {
+  enforceRateLimit(identity.tenantId, operation);
+
   if (!isPermitted(identity, operation)) {
     throw new RBACDeniedError(
       `Tenant '${identity.tenantId}' (role=${identity.role}) is not permitted to perform '${operation}'`
@@ -557,3 +584,80 @@ export function getRBACStatus(): {
     roles,
   };
 }
+
+// =============================================================================
+// Rate Limiting
+// =============================================================================
+
+export class RateLimitExceededError extends Error {
+  public readonly statusCode = 429;
+  constructor(message: string) {
+    super(message);
+    this.name = "RateLimitExceededError";
+  }
+}
+
+interface RateLimitTracker {
+  tokens: number;
+  lastRefill: number;
+}
+
+const rateLimits = new Map<string, RateLimitTracker>();
+
+export function __resetRateLimitsForTests(): void {
+  rateLimits.clear();
+}
+
+export function getRateLimitConfig() {
+  const burst = parseInt(process.env.KINDX_RATE_LIMIT_BURST ?? "100", 10);
+  const rateMs = parseInt(process.env.KINDX_RATE_LIMIT_MS ?? "1000", 10);
+  return {
+    burst: Number.isFinite(burst) && burst > 0 ? burst : 100,
+    rateMs: Number.isFinite(rateMs) && rateMs > 0 ? rateMs : 1000
+  };
+}
+
+export function enforceRateLimit(tenantId: string, operation?: RBACOperation): void {
+  const now = Date.now();
+  let tracker = rateLimits.get(tenantId);
+  const cfg = getRateLimitConfig();
+  
+  if (!tracker) {
+    tracker = { tokens: cfg.burst, lastRefill: now };
+    rateLimits.set(tenantId, tracker);
+  } else {
+    const timeElapsed = now - tracker.lastRefill;
+    const tokensToAdd = Math.floor(timeElapsed / cfg.rateMs);
+    if (tokensToAdd > 0) {
+      tracker.tokens = Math.min(cfg.burst, tracker.tokens + tokensToAdd);
+      tracker.lastRefill = now;
+    }
+  }
+
+  // F-004: Lightweight per-tenant rate limit middleware
+  // Certain critical/admin operations bypass rate limit, or can have dynamic costs
+  if (tracker.tokens <= 0) {
+    throw new RateLimitExceededError(`Rate limit exceeded for tenant '${tenantId}' (max ${cfg.burst} reqs / ${(cfg.rateMs / 1000).toFixed(1)}s)`);
+  }
+
+  tracker.tokens -= 1;
+}
+
+// Memory cleanup for stale trackers
+let _rlCleanupTimer: NodeJS.Timeout | null = null;
+export function _startRateLimitCleanup() {
+  if (_rlCleanupTimer) return;
+  _rlCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    const cfg = getRateLimitConfig();
+    for (const [tenantId, tracker] of rateLimits.entries()) {
+      if (now - tracker.lastRefill > cfg.rateMs * cfg.burst) {
+        rateLimits.delete(tenantId);
+      }
+    }
+  }, 60000);
+  if (typeof _rlCleanupTimer.unref === "function") {
+    _rlCleanupTimer.unref();
+  }
+}
+_startRateLimitCleanup();

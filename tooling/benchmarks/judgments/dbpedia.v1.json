@@ -1,0 +1,152 @@
+{
+  "schema": "kindx-benchmark-judgments-v1",
+  "version": 1,
+  "dataset": "DBpedia 1000",
+  "source_corpus": "tooling/benchmarks/test_corpus_dbpedia",
+  "queries": [
+    {
+      "id": "dbp-easy-01",
+      "difficulty": "easy",
+      "query": "Animalia book by Graeme Base",
+      "relevance": { "doc_0000.md": 3 }
+    },
+    {
+      "id": "dbp-easy-02",
+      "difficulty": "easy",
+      "query": "Academy Award for Best Production Design",
+      "relevance": { "doc_0001.md": 3 }
+    },
+    {
+      "id": "dbp-easy-03",
+      "difficulty": "easy",
+      "query": "An American in Paris film",
+      "relevance": { "doc_0002.md": 3 }
+    },
+    {
+      "id": "dbp-easy-04",
+      "difficulty": "easy",
+      "query": "astronomer definition",
+      "relevance": { "doc_0003.md": 3 }
+    },
+    {
+      "id": "dbp-easy-05",
+      "difficulty": "easy",
+      "query": "Adobe software company",
+      "relevance": { "doc_0006.md": 3 }
+    },
+    {
+      "id": "dbp-easy-06",
+      "difficulty": "easy",
+      "query": "alkane hydrocarbon",
+      "relevance": { "doc_0009.md": 3 }
+    },
+    {
+      "id": "dbp-med-01",
+      "difficulty": "medium",
+      "query": "afc conference in the nfl",
+      "relevance": { "doc_0005.md": 3 }
+    },
+    {
+      "id": "dbp-med-02",
+      "difficulty": "medium",
+      "query": "computer character encoding standard ascii",
+      "relevance": { "doc_0011.md": 3 }
+    },
+    {
+      "id": "dbp-med-03",
+      "difficulty": "medium",
+      "query": "author of Brave New World",
+      "relevance": { "doc_0012.md": 3 }
+    },
+    {
+      "id": "dbp-med-04",
+      "difficulty": "medium",
+      "query": "us appellate court procedure overview",
+      "relevance": { "doc_0014.md": 3 }
+    },
+    {
+      "id": "dbp-med-05",
+      "difficulty": "medium",
+      "query": "study of human societies anthropology",
+      "relevance": { "doc_0015.md": 3 }
+    },
+    {
+      "id": "dbp-med-06",
+      "difficulty": "medium",
+      "query": "average value arithmetic mean",
+      "relevance": { "doc_0017.md": 3 }
+    },
+    {
+      "id": "dbp-hard-01",
+      "difficulty": "hard",
+      "query": "how is international atomic time maintained",
+      "relevance": { "doc_0018.md": 3 }
+    },
+    {
+      "id": "dbp-hard-02",
+      "difficulty": "hard",
+      "query": "who was film director Allan Dwan",
+      "relevance": { "doc_0019.md": 3 }
+    },
+    {
+      "id": "dbp-hard-03",
+      "difficulty": "hard",
+      "query": "assistive devices and disability support technology",
+      "relevance": { "doc_0022.md": 3 }
+    },
+    {
+      "id": "dbp-hard-04",
+      "difficulty": "hard",
+      "query": "the letter a in writing systems",
+      "relevance": { "doc_0023.md": 3 }
+    },
+    {
+      "id": "dbp-hard-05",
+      "difficulty": "hard",
+      "query": "ancient greek philosopher Aristotle",
+      "relevance": { "doc_0024.md": 3 }
+    },
+    {
+      "id": "dbp-hard-06",
+      "difficulty": "hard",
+      "query": "novelist associated with Atlas Shrugged",
+      "relevance": { "doc_0026.md": 3 }
+    },
+    {
+      "id": "dbp-fusion-01",
+      "difficulty": "fusion",
+      "query": "academy awards and production design category",
+      "relevance": { "doc_0020.md": 3, "doc_0001.md": 2 }
+    },
+    {
+      "id": "dbp-fusion-02",
+      "difficulty": "fusion",
+      "query": "chemistry of acids and alkanes",
+      "relevance": { "doc_0008.md": 3, "doc_0009.md": 2 }
+    },
+    {
+      "id": "dbp-fusion-03",
+      "difficulty": "fusion",
+      "query": "altruism and anthropological views of human behavior",
+      "relevance": { "doc_0016.md": 3, "doc_0015.md": 2 }
+    },
+    {
+      "id": "dbp-fusion-04",
+      "difficulty": "fusion",
+      "query": "Greek myth hero Achilles and philosopher Aristotle",
+      "relevance": { "doc_0028.md": 3, "doc_0024.md": 2 }
+    },
+    {
+      "id": "dbp-fusion-05",
+      "difficulty": "fusion",
+      "query": "atom time standards and atomic number concept",
+      "relevance": { "doc_0018.md": 3, "doc_0029.md": 2 }
+    },
+    {
+      "id": "dbp-fusion-06",
+      "difficulty": "fusion",
+      "query": "history of animation and classic film productions",
+      "relevance": { "doc_0007.md": 3, "doc_0002.md": 2 }
+    }
+  ]
+}

@@ -23,6 +23,7 @@ import { WebStandardStreamableHTTPServerTransport }
   from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+export const requestIdentityScope = new AsyncLocalStorage<import("./rbac.js").ResolvedIdentity | null>();
 import {
   createStore,
   extractSnippet,
@@ -372,14 +373,21 @@ function stableHash(value: unknown): string {
   return createHash("sha256").update(json).digest("hex");
 }
 
-function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
-  if (timeoutMs <= 0) return promise;
+function raceWithTimeout<T>(
+  promiseOrFn: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  timeoutMs: number,
+  code: string
+): Promise<T> {
+  const ac = new AbortController();
+  const getPromise = () => typeof promiseOrFn === "function" ? promiseOrFn(ac.signal) : promiseOrFn;
+  if (timeoutMs <= 0) return getPromise();
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
+      ac.abort();
       reject(Object.assign(new Error(`Query timed out after ${timeoutMs}ms`), { code }));
     }, timeoutMs);
     timer.unref?.();
-    promise.then(
+    getPromise().then(
       (value) => {
         clearTimeout(timer);
         resolve(value);
@@ -789,7 +797,7 @@ Intent-aware lex (C++ performance, not sports):
       const results = await withLLMScope(
         scopeKey,
         () => raceWithTimeout(
-          structuredSearchWithDiagnostics(store, subSearches, {
+          (signal) => structuredSearchWithDiagnostics(store, subSearches, {
             collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
             limit,
             minScore,
@@ -803,6 +811,7 @@ Intent-aware lex (C++ performance, not sports):
             rerankLimit: profilePolicy.rerankLimit,
             disableRerank: profile === "fast",
             routingProfile: profile,
+            signal,
             hooks: {
               onExpand: (_original, _expanded, elapsedMs) => { timings.expand_ms += elapsedMs; },
               onEmbedDone: (elapsedMs) => { timings.embed_ms += elapsedMs; },
@@ -932,6 +941,20 @@ Intent-aware lex (C++ performance, not sports):
 
       const result = store.findDocument(lookup, { includeBody: false });
 
+      if (!("error" in result)) {
+        const { filterAllowedCollections } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity && identity.allowedCollections !== "*") {
+          const allowed = filterAllowedCollections(identity, [result.collectionName]);
+          if (allowed.length === 0) {
+            return {
+              content: [{ type: "text", text: `RBAC denied: access to collection '${result.collectionName}' forbidden.` }],
+              isError: true,
+            };
+          }
+        }
+      }
+
       if ("error" in result) {
         let msg = `Document not found: ${file}`;
         if (result.similarFiles.length > 0) {
@@ -943,8 +966,20 @@ Intent-aware lex (C++ performance, not sports):
         };
       }
 
-      const body = store.getDocumentBody(result, parsedFromLine, maxLines) ?? "";
-      let text = body;
+      let text = store.getDocumentBody(result, parsedFromLine, maxLines) ?? "";
+            
+      const { filterAllowedCollections } = await import("./rbac.js");
+      const identity = requestIdentityScope.getStore();
+      if (identity && identity.allowedCollections !== "*") {
+        const allowed = filterAllowedCollections(identity, [result.collectionName]);
+        if (allowed.length === 0) {
+           return {
+              content: [{ type: "text", text: `RBAC denied: access to collection '${result.collectionName}' forbidden.` }],
+              isError: true,
+           };
+        }
+      }
+
       if (lineNumbers) {
         const startLine = parsedFromLine || 1;
         text = addLineNumbers(text, startLine);
@@ -1012,9 +1047,20 @@ Intent-aware lex (C++ performance, not sports):
         if (result.skipped) {
           content.push({
             type: "text",
-            text: `[SKIPPED: ${result.doc.displayPath} - ${result.skipReason}. Use 'qmd_get' with file="${result.doc.displayPath}" to retrieve.]`,
+            text: `[SKIPPED: ${result.doc.displayPath} - ${result.skipReason}. Use 'get' with file="${result.doc.displayPath}" to retrieve.]`,
           });
           continue;
+        }
+
+        // RBAC check — only for non-skipped results where collectionName is available
+        const { filterAllowedCollections } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity && identity.allowedCollections !== "*") {
+          const allowed = filterAllowedCollections(identity, [result.doc.collectionName]);
+          if (allowed.length === 0) {
+            content.push({ type: "text", text: `[SKIPPED: ${result.doc.displayPath} - RBAC denied access to collection '${result.doc.collectionName}' ]`});
+            continue;
+          }
         }
 
         let text = result.doc.body || "";
@@ -1643,7 +1689,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     const rawResults = await withLLMScope(
       scopeKey,
       () => raceWithTimeout(
-        structuredSearchWithDiagnostics(store, subSearches, {
+        (signal) => structuredSearchWithDiagnostics(store, subSearches, {
           collections: effectiveCollections && effectiveCollections.length > 0 ? effectiveCollections : undefined,
           limit: options.limit,
           minScore: options.minScore,
@@ -1657,6 +1703,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           rerankLimit: profilePolicy.rerankLimit,
           disableRerank: options.routingProfile === "fast",
           routingProfile: options.routingProfile,
+          signal,
           hooks: {
             onExpand: (_original, _expanded, elapsedMs) => { timings.expand_ms += elapsedMs; },
             onEmbedDone: (elapsedMs) => { timings.embed_ms += elapsedMs; },
@@ -1870,6 +1917,49 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     };
   }
 
+  const MAX_HTTP_CONCURRENCY = parseInt(process.env.KINDX_HTTP_CONCURRENCY || "150", 10);
+  let activeHttpRequests = 0;
+  const activeHttpRequestsByTenant = new Map<string, number>();
+  // F-CONC-1: Configurable per-tenant concurrency limit (was hardcoded at 10)
+  const MAX_CONCURRENCY_PER_TENANT = (() => {
+    const raw = parseInt(process.env.KINDX_MAX_CONCURRENCY_PER_TENANT || "10", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10;
+  })();
+
+  class ConcurrencyLimitError extends Error {
+    constructor(public message: string) { super(message); }
+  }
+
+  async function withConcurrencyPolicy<T>(
+    identity: import("./rbac.js").ResolvedIdentity | null,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    if (activeHttpRequests >= MAX_HTTP_CONCURRENCY) {
+      throw new ConcurrencyLimitError("Too Many Requests: Server is at capacity.");
+    }
+    if (identity) {
+      const tenantConcur = activeHttpRequestsByTenant.get(identity.tenantId) || 0;
+      if (tenantConcur >= MAX_CONCURRENCY_PER_TENANT) {
+        throw new ConcurrencyLimitError("Too Many Requests: Tenant concurrency limit exceeded.");
+      }
+      activeHttpRequestsByTenant.set(identity.tenantId, tenantConcur + 1);
+    }
+    activeHttpRequests++;
+    try {
+      return await fn();
+    } finally {
+      activeHttpRequests--;
+      if (identity) {
+        const current = activeHttpRequestsByTenant.get(identity.tenantId) || 0;
+        if (current <= 1) {
+          activeHttpRequestsByTenant.delete(identity.tenantId);
+        } else {
+          activeHttpRequestsByTenant.set(identity.tenantId, current - 1);
+        }
+      }
+    }
+  }
+
   const httpServer = createServer(async (nodeReq: IncomingMessage, nodeRes: ServerResponse) => {
     const reqStart = Date.now();
     const pathname = nodeReq.url || "/";
@@ -1979,11 +2069,28 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         }
       }
 
+      if (requestIdentity) {
+        try {
+          const { enforceRateLimit, RateLimitExceededError } = await import("./rbac.js");
+          enforceRateLimit(requestIdentity.tenantId);
+        } catch (err: any) {
+          if (err.name === "RateLimitExceededError") {
+            nodeRes.writeHead(429, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: err.message }));
+            recordHttpMetrics(429);
+            logger.info(`429 Too Many Requests: tenant=${requestIdentity.tenantId}`);
+            return;
+          }
+          throw err;
+        }
+      }
+
       // REST endpoint: POST /search — structured search without MCP protocol
       // REST endpoint: POST /query (alias: /search) — structured search without MCP protocol
       if ((pathname === "/query" || pathname === "/search") && nodeReq.method === "POST") {
-        const rawBody = await collectBody(nodeReq);
-        const params = JSON.parse(rawBody);
+        await withConcurrencyPolicy(requestIdentity, async () => {
+          const rawBody = await collectBody(nodeReq);
+          const params = JSON.parse(rawBody);
 
         // RBAC: enforce query permission
         if (requestIdentity) {
@@ -2105,6 +2212,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           total_ms: metadata.timings.total_ms,
         }));
         logger.info(`POST /query ${params.searches.length} queries (${Date.now() - reqStart}ms)`);
+        });
         return;
       }
 
@@ -2186,7 +2294,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               memory_mark_accessed: "memory_mark_accessed",
             };
             const op = toolToOp[toolName];
-            if (op && !isPermitted(requestIdentity, op)) {
+            if (op === undefined || (op && !isPermitted(requestIdentity, op))) {
               nodeRes.writeHead(403, { "Content-Type": "application/json" });
               nodeRes.end(JSON.stringify({
                 jsonrpc: "2.0",
@@ -2250,11 +2358,14 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           }
         }
 
-        const execute = async () => {
-          const request = new Request(url, { method: "POST", headers, body: rawBody });
+        const execute = async (signal?: AbortSignal) => {
+          const request = new Request(url, { method: "POST", headers, body: rawBody, signal });
           const response = await requestScopeContext.run(
             activeContext,
-            async () => transport.handleRequest(request, { parsedBody: body }),
+            () => requestIdentityScope.run(
+              requestIdentity,
+              async () => transport.handleRequest(request, { parsedBody: body })
+            )
           );
           const responseBody = Buffer.from(await response.arrayBuffer()).toString("utf-8");
           return {
@@ -2264,14 +2375,16 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           };
         };
         const executeWithPolicy = async () => {
-          if (body?.method === "tools/call") {
-            return await raceWithTimeout(
-              execute(),
-              mcpControl.tool_timeout_sec * 1000,
-              "TOOL_TIMEOUT"
-            );
-          }
-          return await execute();
+          return await withConcurrencyPolicy(requestIdentity, async () => {
+            if (body?.method === "tools/call") {
+              return await raceWithTimeout(
+                (signal) => execute(signal),
+                mcpControl.tool_timeout_sec * 1000,
+                "TOOL_TIMEOUT"
+              );
+            }
+            return await execute();
+          });
         };
 
         let buffered: { status: number; headers: Record<string, string>; body: string };
@@ -2393,6 +2506,12 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       nodeRes.end("Not Found");
       recordHttpMetrics(404);
     } catch (err: any) {
+      if (err instanceof ConcurrencyLimitError) {
+        nodeRes.writeHead(429, { "Content-Type": "application/json" });
+        nodeRes.end(JSON.stringify({ error: err.message }));
+        recordHttpMetrics(429);
+        return;
+      }
       logger.error("HTTP handler error:", { error: err?.message || String(err) });
       const code = (err as any)?.code as string | undefined;
       const message = err instanceof Error ? err.message : "Internal Server Error";
@@ -2431,7 +2550,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   let url: string;
   try {
     boundHost = await raceWithTimeout(
-      bindHttpServerWithFallback(httpServer, port),
+      () => bindHttpServerWithFallback(httpServer, port),
       mcpControl.startup_timeout_sec * 1000,
       "STARTUP_TIMEOUT"
     );

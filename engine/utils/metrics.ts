@@ -66,13 +66,12 @@ export function renderPrometheusMetrics(extraGauges?: Array<{ name: string; valu
     const h = histograms.get(k);
     if (!h) continue;
     const base = k;
-    let cumulative = 0;
     const hasLabels = base.includes("{");
     const suffix = hasLabels ? base.slice(base.indexOf("{")) : "";
     const metric = hasLabels ? base.slice(0, base.indexOf("{")) : base;
     for (let i = 0; i < h.buckets.length; i++) {
       const b = h.buckets[i];
-      cumulative += h.counts[i] || 0;
+      const cumulative = h.counts[i] || 0;
       if (b === undefined) continue;
       const bucketLabels = suffix
         ? `${suffix.slice(0, -1)},le="${b}"}`

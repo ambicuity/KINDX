@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Database as MainDatabase } from "./runtime.js";
 import { openDatabase, loadSqliteVec, type Database } from "./runtime.js";
@@ -185,11 +185,38 @@ function readCheckpoint(path: string): CheckpointReadResult {
   }
 }
 
+let checkpointWriteFile: (path: string, data: string, encoding: BufferEncoding) => void = writeFileSync;
+
+export function __setCheckpointWriterForTests(
+  writer: ((path: string, data: string, encoding: BufferEncoding) => void) | null
+): void {
+  checkpointWriteFile = writer ?? writeFileSync;
+}
+
 function writeCheckpoint(path: string, checkpoint: ShardCheckpoint): void {
   mkdirSync(dirname(path), { recursive: true });
   checkpoint.updatedAt = new Date().toISOString();
   const tmpPath = `${path}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(checkpoint, null, 2), "utf-8");
+  const data = JSON.stringify(checkpoint, null, 2);
+
+  // If a test writer is injected, use it directly (preserves fault-injection test seam)
+  if (checkpointWriteFile !== writeFileSync) {
+    checkpointWriteFile(tmpPath, data, "utf-8");
+    renameSync(tmpPath, path);
+    return;
+  }
+
+  // F-INT-3: Atomic checkpoint write with fsync for crash durability
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmpPath, "w", 0o644);
+    writeSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch {}
+    }
+  }
   renameSync(tmpPath, path);
 }
 
@@ -252,11 +279,14 @@ function parseVecDimensions(db: Database, tableName: string): number | null {
 }
 
 function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount: number; vectorCount: number } {
-  const vectors = db.prepare(`
+  const vectors = (db.prepare(`
     SELECT hash_seq, embedding
     FROM vectors_vec
     ORDER BY hash_seq
-  `).all() as Array<{ hash_seq: string; embedding: Float32Array }>;
+  `).all() as Array<{ hash_seq: string; embedding: Buffer }>).map((v) => ({
+    hash_seq: v.hash_seq,
+    embedding: new Float32Array(v.embedding.buffer, v.embedding.byteOffset, v.embedding.byteLength / 4)
+  }));
   const vectorCount = vectors.length;
   if (vectorCount === 0) {
     db.exec(`DELETE FROM ann_assignments`);
@@ -341,6 +371,7 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
 
 function ensureShardSchema(db: Database, dimensions: number): void {
   db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA synchronous = FULL"); // F-INT-1: Match main DB durability — prevent vector data loss on OS crash
   db.exec("PRAGMA busy_timeout = 30000");
   db.exec(`
     CREATE TABLE IF NOT EXISTS shard_vectors (
@@ -678,99 +709,136 @@ export async function syncCollectionShardsFromMainDb(
 
     const resumed = !!options.resume;
     const handles = openShardHandles(dbPath, cfg.collection, cfg.shardCount, dimensions);
-
-    const rows = db.prepare(`
-      SELECT cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at, MIN(d.path) AS path, MIN(d.title) AS title
+    try {
+      const rows = db.prepare(`
+      SELECT cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at, MIN(d.path) AS path, MIN(d.title) AS title, v.embedding
       FROM content_vectors cv
       JOIN documents d ON d.hash = cv.hash
+      JOIN vectors_vec v ON v.hash_seq = cv.hash || '_' || cv.seq
       WHERE d.active = 1 AND d.collection = ?
-      GROUP BY cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at
+      GROUP BY cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at, v.embedding
       ORDER BY cv.hash, cv.seq
-    `).all(cfg.collection) as Array<{
-      hash: string;
-      seq: number;
-      pos: number;
-      model: string;
-      embedded_at: string;
-      path: string;
-      title: string;
-    }>;
+      `).all(cfg.collection) as Array<{
+        hash: string;
+        seq: number;
+        pos: number;
+        model: string;
+        embedded_at: string;
+        path: string;
+        title: string;
+        embedding: Buffer;
+      }>;
 
-    const total = rows.length;
-    let processed = 0;
-    let capped = false;
-    let queueProcessed = 0;
-    const queueLimit = cfg.embedQueueLimit ?? null;
-    const batchSize = cfg.embeddingBatchSize ?? 200;
-    const workers = cfg.embeddingWorkers ?? 1;
-    const collectionWarnings: string[] = [];
-    try {
-      let last = options.resume ? state.lastHashSeq : null;
-      if (last && !rows.some((row) => `${row.hash}_${row.seq}` === last)) {
-        collectionWarnings.push(`resume_cursor_invalid:${last}`);
-        last = null;
-      }
-      for (const row of rows) {
-        const hashSeq = `${row.hash}_${row.seq}`;
-        if (last && hashSeq <= last) {
-          processed += 1;
-          continue;
-        }
-        if (queueLimit !== null && queueProcessed >= queueLimit) {
-          capped = true;
-          collectionWarnings.push(`embed_queue_capped:${cfg.collection}:${queueLimit}`);
-          syncWarnings.push(`embed_queue_capped:${cfg.collection}:${queueLimit}`);
-          break;
+      const total = rows.length;
+      let processed = 0;
+      let capped = false;
+      let queueProcessed = 0;
+      const queueLimit = cfg.embedQueueLimit ?? null;
+      const batchSize = cfg.embeddingBatchSize ?? 200;
+      const workers = cfg.embeddingWorkers ?? 1;
+      const collectionWarnings: string[] = [];
+      let batchSuccess = true;
+      try {
+        let last = options.resume ? state.lastHashSeq : null;
+        if (last && !rows.some((row) => `${row.hash}_${row.seq}` === last)) {
+          collectionWarnings.push(`resume_cursor_invalid:${last}`);
+          last = null;
         }
 
-        const embeddingRow = db.prepare(`SELECT embedding FROM vectors_vec WHERE hash_seq = ?`).get(hashSeq) as { embedding?: Float32Array } | undefined;
-        if (!embeddingRow?.embedding) {
-          processed += 1;
-          queueProcessed += 1;
-          continue;
-        }
+        for (const shard of handles) shard.exec("BEGIN");
 
-        const shardIdx = hashToShard(row.hash, cfg.shardCount);
-        const shard = handles[shardIdx];
-        if (!shard) {
-          const reason = `shard_write_handle_missing:${cfg.collection}:${shardIdx}`;
-          collectionWarnings.push(reason);
-          syncWarnings.push(reason);
-          processed += 1;
-          queueProcessed += 1;
-          continue;
-        }
-        try {
-          shard.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(hashSeq, embeddingRow.embedding as any);
-          shard.prepare(`
+        for (const row of rows) {
+          const hashSeq = `${row.hash}_${row.seq}`;
+          if (last && hashSeq <= last) {
+            processed += 1;
+            continue;
+          }
+          if (queueLimit !== null && queueProcessed >= queueLimit) {
+            capped = true;
+            collectionWarnings.push(`embed_queue_capped:${cfg.collection}:${queueLimit}`);
+            syncWarnings.push(`embed_queue_capped:${cfg.collection}:${queueLimit}`);
+            break;
+          }
+
+          const shardIdx = hashToShard(row.hash, cfg.shardCount);
+          const shard = handles[shardIdx];
+          if (!shard) {
+            const reason = `shard_write_handle_missing:${cfg.collection}:${shardIdx}`;
+            collectionWarnings.push(reason);
+            syncWarnings.push(reason);
+            batchSuccess = false;
+            break;
+          }
+          try {
+            const typedArray = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+            shard.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(hashSeq, typedArray);
+            shard.prepare(`
             INSERT OR REPLACE INTO shard_vectors
               (hash_seq, hash, seq, pos, model, embedded_at, embedding_blob)
             VALUES (?, ?, ?, ?, ?, ?, ?)
           `).run(
-            hashSeq, row.hash, row.seq, row.pos, row.model, row.embedded_at, Buffer.from(embeddingRow.embedding.buffer)
-          );
-          shard.prepare(`INSERT OR REPLACE INTO shard_docs (collection, hash, path, title) VALUES (?, ?, ?, ?)`).run(
-            cfg.collection, row.hash, row.path || "", row.title || ""
-          );
-        } catch {
-          const reason = `shard_write_failed:${cfg.collection}:${shardIdx}`;
-          collectionWarnings.push(reason);
-          syncWarnings.push(reason);
+              hashSeq, row.hash, row.seq, row.pos, row.model, row.embedded_at, Buffer.from(row.embedding)
+            );
+            shard.prepare(`INSERT OR REPLACE INTO shard_docs (collection, hash, path, title) VALUES (?, ?, ?, ?)`).run(
+              cfg.collection, row.hash, row.path || "", row.title || ""
+            );
+          } catch (err) {
+            const reason = `shard_write_failed:${cfg.collection}:${shardIdx}:${err instanceof Error ? err.message : String(err)}`;
+            collectionWarnings.push(reason);
+            syncWarnings.push(reason);
+            batchSuccess = false;
+            break;
+          }
+
           processed += 1;
           queueProcessed += 1;
-          continue;
+          state.lastHashSeq = hashSeq;
+          state.processed = processed;
+          if (processed % batchSize === 0) {
+            // F-001: Push COMMIT securely into checkpoint synchronization loop
+            for (const shard of handles) {
+              shard.exec("COMMIT");
+              shard.exec("BEGIN");
+            }
+            checkpoint.collections[cfg.collection] = state;
+            writeCheckpoint(checkpointPath, checkpoint);
+          }
+          options.onProgress?.({ collection: cfg.collection, processed, total });
         }
 
-        processed += 1;
-        queueProcessed += 1;
-        state.lastHashSeq = hashSeq;
-        state.processed = processed;
-        if (processed % batchSize === 0) {
+        // Compute inactive seq bounds to clean orphaned shard items iteratively.
+        if (!capped && batchSuccess) {
+          try {
+            const activeHashesStr = JSON.stringify(rows.map((r) => `${r.hash}_${r.seq}`));
+            for (const shard of handles) {
+              shard.prepare(`DELETE FROM shard_vectors WHERE hash_seq NOT IN (SELECT value FROM json_each(?))`).run(activeHashesStr);
+              shard.prepare(`DELETE FROM vectors_vec WHERE hash_seq NOT IN (SELECT value FROM json_each(?))`).run(activeHashesStr);
+            }
+          } catch (err) {
+            const reason = `shard_cleanup_failed:${cfg.collection}:${err instanceof Error ? err.message : String(err)}`;
+            collectionWarnings.push(reason);
+            syncWarnings.push(reason);
+            batchSuccess = false;
+          }
+        }
+
+      } catch (err) {
+        batchSuccess = false;
+      } finally {
+        // Execute database commits first.
+        for (const shard of handles) {
+          if (batchSuccess) shard.exec("COMMIT");
+          else shard.exec("ROLLBACK");
+        }
+
+        // F-001: Align sync checkpoint with the trailing batch commit.
+        if (batchSuccess && !capped && processed > 0) {
           checkpoint.collections[cfg.collection] = state;
           writeCheckpoint(checkpointPath, checkpoint);
         }
-        options.onProgress?.({ collection: cfg.collection, processed, total });
       }
+
+      if (!batchSuccess) continue;
 
       state.completed = !capped && processed >= total;
       for (const shard of handles) {
@@ -1008,12 +1076,11 @@ export function searchShardedVectorsWithDiagnostics(
                   if (candidateIds.length > 0) {
                     const inClause = candidateIds.map(() => "?").join(",");
                     const candidateRows = sdb.prepare(`
-                      SELECT hash_seq, embedding
+                      SELECT hash_seq, vec_distance_cosine(embedding, ?) as distance
                       FROM vectors_vec
                       WHERE hash_seq IN (${inClause})
-                    `).all(...candidateIds) as Array<{ hash_seq: string; embedding: Float32Array }>;
+                    `).all(embedding, ...candidateIds) as Array<{ hash_seq: string; distance: number }>;
                     const approx = candidateRows
-                      .map((row) => ({ hash_seq: row.hash_seq, distance: cosineDistance(embedding, row.embedding) }))
                       .sort((a, b) => (a.distance - b.distance) || a.hash_seq.localeCompare(b.hash_seq))
                       .slice(0, perShardK);
                     matches.push(...approx);

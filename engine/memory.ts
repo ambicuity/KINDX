@@ -729,7 +729,7 @@ export function semanticSearchMemoryWithVector(
 
   const scored = rows
     .map((row) => {
-      const dist = distanceMap.get(Number(row.id)) || 1.0;
+      const dist = distanceMap.get(Number(row.id)) ?? 1.0;
       const sim = 1.0 - dist;
       return {
         id: Number(row.id),
