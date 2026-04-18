@@ -3,7 +3,11 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "dist",
-    "declaration": true
+    "declaration": true,
+    "baseUrl": ".",
+    "paths": {
+      "@ambicuity/kindx-schemas": ["../kindx-schemas/dist/src/index.d.ts"]
+    }
   },
   "include": ["src/**/*.ts", "specs/**/*.ts"],
   "exclude": ["dist", "node_modules"]

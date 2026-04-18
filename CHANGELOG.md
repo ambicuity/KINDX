@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed tenant role parsing so `kindx tenant add --role <admin|editor|viewer>` is parsed and validated correctly.
 - Fixed RBAC collection-isolation on HTTP `/query` and `/search` to prevent unauthorized collection leakage.
 - Hardened MCP `tools/call` query RBAC scoping so allowed collections are enforced even when `collections` is omitted.
+- Fixed release-gate TypeScript checks by excluding generated `specs/test-src` snapshots from `tsc --noEmit` while keeping them available as PR evidence artifacts.
 
 ### Verification
 
@@ -32,12 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `npm run test:packages` passed.
 - `npm run test:python` passed.
 - `npm run qa:customer-pov:all` passed (`required_failures=0`, `required_passes=5`, `skipped=1` optional container smoke).
+- `npx tsc --noEmit` passed.
+- Temp-prefix packaged installability passed (`npm pack`, `npm install -g --prefix /tmp/kindx-global`, `kindx --version`, `kindx --help`).
 - Added targeted regression coverage for tenant role parsing (`specs/ops-cli.test.ts`) and RBAC collection isolation in HTTP/MCP query paths (`specs/mcp.test.ts`).
 
 ## [1.3.1](https://github.com/ambicuity/KINDX/compare/v1.3.0...v1.3.1) (2026-04-08)
 
 ### Fixed
 
+- Regenerated lockfile for cross-platform CI compatibility.
 - Ensured `kindx arch` command group is fully documented in `kindx --help` output with detailed subcommands, options, environment variables, and architecture diagrams.
 - Aligned `arch:status` and `arch:refresh` npm helper scripts for dev workflow consistency.
 

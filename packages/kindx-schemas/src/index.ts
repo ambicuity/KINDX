@@ -26,12 +26,6 @@ export const KindxQueryResponseSchema = z.object({
   results: z.array(KindxSearchResultSchema),
 });
 
-export const KindxFeedbackInputSchema = z.object({
-  query: z.string().min(1),
-  chunkId: z.string().min(1),
-  signal: z.enum(["relevant", "irrelevant"]),
-});
-
 export const KindxGetInputSchema = z.object({
   file: z.string().min(1),
   fromLine: z.number().int().positive().optional(),
@@ -61,41 +55,31 @@ export const KindxStatusOutputSchema = z.object({
 });
 
 export const KindxMemoryPutInputSchema = z.object({
-  scope: z.enum(["global", "collection", "document"]).optional(),
-  collection: z.string().optional(),
-  file: z.string().optional(),
+  scope: z.string().optional(),
   key: z.string().min(1),
-  value: z.union([z.string(), z.number(), z.boolean(), z.object({}).passthrough(), z.array(z.unknown())]),
+  value: z.string().min(1),
   source: z.string().optional(),
   confidence: z.number().min(0).max(1).optional(),
-  ttlSeconds: z.number().int().positive().optional(),
+  semanticThreshold: z.number().min(0).max(1).optional(),
   tags: z.array(z.string()).optional(),
 });
 
 export const KindxMemorySearchInputSchema = z.object({
-  scope: z.enum(["global", "collection", "document"]).optional(),
-  collection: z.string().optional(),
-  file: z.string().optional(),
+  scope: z.string().optional(),
   query: z.string().min(1),
+  mode: z.enum(["semantic", "text"]).optional().default("semantic"),
+  threshold: z.number().min(0).max(1).optional(),
   limit: z.number().int().positive().optional().default(10),
 });
 
 export const KindxMemoryHistoryInputSchema = z.object({
-  scope: z.enum(["global", "collection", "document"]).optional(),
-  collection: z.string().optional(),
-  file: z.string().optional(),
+  scope: z.string().optional(),
   key: z.string().min(1),
-  limit: z.number().int().positive().optional().default(10),
 });
 
 export const KindxMemoryMarkInputSchema = z.object({
-  scope: z.enum(["global", "collection", "document"]).optional(),
-  collection: z.string().optional(),
-  file: z.string().optional(),
-  id: z.string().min(1),
-  useful: z.boolean().optional(),
-  ignored: z.boolean().optional(),
-  note: z.string().optional(),
+  scope: z.string().optional(),
+  id: z.number().int().positive(),
 });
 
 const ResourceItemSchema = z.object({
@@ -124,7 +108,6 @@ export type KindxSubSearch = z.infer<typeof KindxSubSearchSchema>;
 export type KindxQueryInput = z.infer<typeof KindxQueryInputSchema>;
 export type KindxSearchResult = z.infer<typeof KindxSearchResultSchema>;
 export type KindxQueryResponse = z.infer<typeof KindxQueryResponseSchema>;
-export type KindxFeedbackInput = z.infer<typeof KindxFeedbackInputSchema>;
 export type KindxGetInput = z.infer<typeof KindxGetInputSchema>;
 export type KindxMultiGetInput = z.infer<typeof KindxMultiGetInputSchema>;
 export type KindxStatusOutput = z.infer<typeof KindxStatusOutputSchema>;

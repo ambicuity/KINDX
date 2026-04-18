@@ -1,0 +1,100 @@
+{
+  "started_at": "2026-04-12T01:48:49.504Z",
+  "completed_at": "2026-04-12T01:50:41.438Z",
+  "phase": "all",
+  "summary": {
+    "overall": "pass",
+    "requiredFailures": 0,
+    "requiredPasses": 5,
+    "skipped": 1
+  },
+  "results": [
+    {
+      "id": "P0-1",
+      "phase": "P0",
+      "title": "Build CLI and runtime artifacts",
+      "required": true,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 2175
+    },
+    {
+      "id": "P0-2",
+      "phase": "P0",
+      "title": "Core launch-blocking regression suite (CLI/ops/retrieval/MCP/RBAC)",
+      "required": true,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 74689
+    },
+    {
+      "id": "P0-3",
+      "phase": "P0",
+      "title": "Containerized install smoke (build image only)",
+      "required": false,
+      "status": "skip",
+      "code": 1,
+      "durationMs": 3088,
+      "reason": "Optional when docker/podman is unavailable in CI or developer workstation"
+    },
+    {
+      "id": "P1-1",
+      "phase": "P1",
+      "title": "Outcome E2E suites for retrieval/output/session behavior",
+      "required": true,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 2809
+    },
+    {
+      "id": "P1-2",
+      "phase": "P1",
+      "title": "Release hardening benchmark sample",
+      "required": false,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 8136
+    },
+    {
+      "id": "P2-1",
+      "phase": "P2",
+      "title": "Resilience and diagnostics suite",
+      "required": true,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 7924
+    },
+    {
+      "id": "P2-2",
+      "phase": "P2",
+      "title": "Warm daemon benchmark with thresholds",
+      "required": false,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 1183
+    },
+    {
+      "id": "P3-1",
+      "phase": "P3",
+      "title": "Scale and parallelism suite",
+      "required": true,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 11904
+    },
+    {
+      "id": "P3-2",
+      "phase": "P3",
+      "title": "Cross-client/manual launch blockers",
+      "required": false,
+      "status": "pass",
+      "code": 0,
+      "durationMs": 5
+    }
+  ],
+  "notes": [
+    "Manual launch blockers (cross-platform matrix, real MCP client interoperability, privacy network proof, and 24h soak) must be attached separately using the evidence template.",
+    "Reference runbook: reference/runbooks/customer-pov-launch-readiness.md",
+    "Reference evidence template: reference/runbooks/customer-pov-evidence-template.md"
+  ]
+}
