@@ -19,8 +19,7 @@
 11. [Minimal Reproduction Example](#11-minimal-reproduction-example)
 12. [Failure Modes](#12-failure-modes)
 13. [Repository Structure](#13-repository-structure)
-14. [Implementation Roadmap](#14-implementation-roadmap)
-15. [Production Benchmark Execution Report (2026-04-18)](#15-production-benchmark-execution-report-2026-04-18)
+14. [Production Benchmark Execution Report (2026-04-18)](#15-production-benchmark-execution-report-2026-04-18)
 
 ---
 
