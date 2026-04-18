@@ -1,0 +1,152 @@
+{
+  "schema": "kindx-benchmark-judgments-v1",
+  "version": 1,
+  "dataset": "MS MARCO 1000",
+  "source_corpus": "tooling/benchmarks/test_corpus_msmarco",
+  "queries": [
+    {
+      "id": "msm-easy-01",
+      "difficulty": "easy",
+      "query": "communication among scientific minds in the Manhattan Project",
+      "relevance": { "doc_0000.md": 3 }
+    },
+    {
+      "id": "msm-easy-02",
+      "difficulty": "easy",
+      "query": "legacy of peaceful uses of atomic energy after World War II",
+      "relevance": { "doc_0001.md": 3 }
+    },
+    {
+      "id": "msm-easy-03",
+      "difficulty": "easy",
+      "query": "essay about whether the Manhattan Project made an atomic bomb possible",
+      "relevance": { "doc_0002.md": 3 }
+    },
+    {
+      "id": "msm-easy-04",
+      "difficulty": "easy",
+      "query": "project during World War II that developed the first atomic bomb",
+      "relevance": { "doc_0003.md": 3 }
+    },
+    {
+      "id": "msm-easy-05",
+      "difficulty": "easy",
+      "query": "Manhattan Project interactive history office of history and heritage resources",
+      "relevance": { "doc_0004.md": 3 }
+    },
+    {
+      "id": "msm-easy-06",
+      "difficulty": "easy",
+      "query": "first atomic bomb nicknamed Gadget detonated July 16 1945",
+      "relevance": { "doc_0005.md": 3 }
+    },
+    {
+      "id": "msm-med-01",
+      "difficulty": "medium",
+      "query": "literature about atomic bombs and the end of World War II",
+      "relevance": { "doc_0006.md": 3 }
+    },
+    {
+      "id": "msm-med-02",
+      "difficulty": "medium",
+      "query": "research and development undertaking that produced first nuclear weapons",
+      "relevance": { "doc_0007.md": 3 }
+    },
+    {
+      "id": "msm-med-03",
+      "difficulty": "medium",
+      "query": "secret name for the two atomic bombs started by Army Corps in 1942",
+      "relevance": { "doc_0008.md": 3 }
+    },
+    {
+      "id": "msm-med-04",
+      "difficulty": "medium",
+      "query": "why Hanford B Reactor site near the Columbia River was selected",
+      "relevance": { "doc_0009.md": 3 }
+    },
+    {
+      "id": "msm-med-05",
+      "difficulty": "medium",
+      "query": "victim offender dialogues require skilled facilitators for restorative processes",
+      "relevance": { "doc_0010.md": 3 }
+    },
+    {
+      "id": "msm-med-06",
+      "difficulty": "medium",
+      "query": "repair damage to victim and community through offender accountability",
+      "relevance": { "doc_0011.md": 3 }
+    },
+    {
+      "id": "msm-hard-01",
+      "difficulty": "hard",
+      "query": "cooperative justice processes focused on repairing harm from crime",
+      "relevance": { "doc_0012.md": 3 }
+    },
+    {
+      "id": "msm-hard-02",
+      "difficulty": "hard",
+      "query": "community panels and apology agreements in non-carceral justice",
+      "relevance": { "doc_0013.md": 3 }
+    },
+    {
+      "id": "msm-hard-03",
+      "difficulty": "hard",
+      "query": "empirical data and unresolved issues in criminal justice reform",
+      "relevance": { "doc_0014.md": 3 }
+    },
+    {
+      "id": "msm-hard-04",
+      "difficulty": "hard",
+      "query": "community of care and civil society harmed by crime",
+      "relevance": { "doc_0015.md": 3 }
+    },
+    {
+      "id": "msm-hard-05",
+      "difficulty": "hard",
+      "query": "crime as an offense against individuals and communities rather than the state",
+      "relevance": { "doc_0016.md": 3 }
+    },
+    {
+      "id": "msm-hard-06",
+      "difficulty": "hard",
+      "query": "ADR framing versus state-centered criminal process for victims and offenders",
+      "relevance": { "doc_0017.md": 3 }
+    },
+    {
+      "id": "msm-fusion-01",
+      "difficulty": "fusion",
+      "query": "criminal justice relationship between offender state and victim offender dispute",
+      "relevance": { "doc_0018.md": 3, "doc_0017.md": 2 }
+    },
+    {
+      "id": "msm-fusion-02",
+      "difficulty": "fusion",
+      "query": "circle process with victims offenders families and justice representatives",
+      "relevance": { "doc_0019.md": 3, "doc_0013.md": 2 }
+    },
+    {
+      "id": "msm-fusion-03",
+      "difficulty": "fusion",
+      "query": "phloem carries sugars while xylem circulates water and minerals",
+      "relevance": { "doc_0020.md": 3, "doc_0027.md": 2 }
+    },
+    {
+      "id": "msm-fusion-04",
+      "difficulty": "fusion",
+      "query": "vascular bundles where phloem and xylem work together in plants",
+      "relevance": { "doc_0021.md": 3, "doc_0022.md": 2 }
+    },
+    {
+      "id": "msm-fusion-05",
+      "difficulty": "fusion",
+      "query": "living phloem cells transport sap versus dead-cell xylem structure",
+      "relevance": { "doc_0024.md": 3, "doc_0028.md": 2 }
+    },
+    {
+      "id": "msm-fusion-06",
+      "difficulty": "fusion",
+      "query": "pressure flow mechanism moving sugars from source leaves to sink tissues",
+      "relevance": { "doc_0026.md": 3, "doc_0025.md": 2 }
+    }
+  ]
+}
