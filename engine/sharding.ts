@@ -710,7 +710,19 @@ export async function syncCollectionShardsFromMainDb(
     const resumed = !!options.resume;
     const handles = openShardHandles(dbPath, cfg.collection, cfg.shardCount, dimensions);
     try {
-      const rows = db.prepare(`
+      const totalRow = db.prepare(`
+        SELECT COUNT(*) as total FROM (
+          SELECT 1
+          FROM content_vectors cv
+          JOIN documents d ON d.hash = cv.hash
+          JOIN vectors_vec v ON v.hash_seq = cv.hash || '_' || cv.seq
+          WHERE d.active = 1 AND d.collection = ?
+          GROUP BY cv.hash, cv.seq
+        )
+      `).get(cfg.collection) as { total: number };
+      const total = totalRow?.total || 0;
+
+      const rowIter = db.prepare(`
       SELECT cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at, MIN(d.path) AS path, MIN(d.title) AS title, v.embedding
       FROM content_vectors cv
       JOIN documents d ON d.hash = cv.hash
@@ -718,7 +730,7 @@ export async function syncCollectionShardsFromMainDb(
       WHERE d.active = 1 AND d.collection = ?
       GROUP BY cv.hash, cv.seq, cv.pos, cv.model, cv.embedded_at, v.embedding
       ORDER BY cv.hash, cv.seq
-      `).all(cfg.collection) as Array<{
+      `).iterate(cfg.collection) as IterableIterator<{
         hash: string;
         seq: number;
         pos: number;
@@ -729,7 +741,7 @@ export async function syncCollectionShardsFromMainDb(
         embedding: Buffer;
       }>;
 
-      const total = rows.length;
+      // total evaluated via explicit SELECT COUNT above
       let processed = 0;
       let capped = false;
       let queueProcessed = 0;
@@ -740,15 +752,24 @@ export async function syncCollectionShardsFromMainDb(
       let batchSuccess = true;
       try {
         let last = options.resume ? state.lastHashSeq : null;
-        if (last && !rows.some((row) => `${row.hash}_${row.seq}` === last)) {
-          collectionWarnings.push(`resume_cursor_invalid:${last}`);
-          last = null;
+        if (last) {
+          const isValid = db.prepare(`
+            SELECT 1 FROM content_vectors cv 
+            JOIN documents d ON d.hash = cv.hash 
+            WHERE d.active = 1 AND d.collection = ? AND (cv.hash || '_' || cv.seq) = ?
+          `).get(cfg.collection, last);
+          if (!isValid) {
+            collectionWarnings.push(`resume_cursor_invalid:${last}`);
+            last = null;
+          }
         }
 
+        const activeHashesStrArr: string[] = [];
         for (const shard of handles) shard.exec("BEGIN");
 
-        for (const row of rows) {
+        for (const row of rowIter) {
           const hashSeq = `${row.hash}_${row.seq}`;
+          activeHashesStrArr.push(hashSeq);
           if (last && hashSeq <= last) {
             processed += 1;
             continue;
@@ -794,22 +815,28 @@ export async function syncCollectionShardsFromMainDb(
           queueProcessed += 1;
           state.lastHashSeq = hashSeq;
           state.processed = processed;
-          if (processed % batchSize === 0) {
+          if (processed > 0 && processed % batchSize === 0) {
             // F-001: Push COMMIT securely into checkpoint synchronization loop
             for (const shard of handles) {
               shard.exec("COMMIT");
-              shard.exec("BEGIN");
             }
             checkpoint.collections[cfg.collection] = state;
             writeCheckpoint(checkpointPath, checkpoint);
+            
+            // Unblock event loop
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            
+            for (const shard of handles) {
+              shard.exec("BEGIN");
+            }
           }
           options.onProgress?.({ collection: cfg.collection, processed, total });
         }
 
         // Compute inactive seq bounds to clean orphaned shard items iteratively.
-        if (!capped && batchSuccess) {
+        if (!capped && batchSuccess && activeHashesStrArr.length > 0) {
           try {
-            const activeHashesStr = JSON.stringify(rows.map((r) => `${r.hash}_${r.seq}`));
+            const activeHashesStr = JSON.stringify(activeHashesStrArr);
             for (const shard of handles) {
               shard.prepare(`DELETE FROM shard_vectors WHERE hash_seq NOT IN (SELECT value FROM json_each(?))`).run(activeHashesStr);
               shard.prepare(`DELETE FROM vectors_vec WHERE hash_seq NOT IN (SELECT value FROM json_each(?))`).run(activeHashesStr);
@@ -827,8 +854,19 @@ export async function syncCollectionShardsFromMainDb(
       } finally {
         // Execute database commits first.
         for (const shard of handles) {
-          if (batchSuccess) shard.exec("COMMIT");
-          else shard.exec("ROLLBACK");
+          try {
+            if (batchSuccess) {
+              shard.exec("COMMIT");
+            } else {
+              shard.exec("ROLLBACK");
+            }
+          } catch (txErr) {
+            const message = txErr instanceof Error ? txErr.message : String(txErr);
+            const noActiveTx = /no transaction is active/i.test(message);
+            if (!noActiveTx) {
+              throw txErr;
+            }
+          }
         }
 
         // F-001: Align sync checkpoint with the trailing batch commit.

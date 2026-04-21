@@ -12,7 +12,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { z } from "zod";
 import { getDefaultLLM, disposeDefaultLLM } from "../engine/inference.js";
 import { unlinkSync } from "node:fs";
-import { mkdtemp, writeFile, readdir, unlink, rmdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readdir, unlink, rmdir, readFile, mkdir, chmod, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import YAML from "yaml";
@@ -411,10 +411,10 @@ describe("MCP Server", () => {
   });
 
   // ===========================================================================
-  // Tool: qmd_get (Get Document)
+  // Tool: get (Get Document)
   // ===========================================================================
 
-  describe("qmd_get tool", () => {
+  describe("get tool", () => {
     test("retrieves document by display_path", () => {
       const meta = findDocument(testDb, "readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
@@ -488,10 +488,10 @@ describe("MCP Server", () => {
   });
 
   // ===========================================================================
-  // Tool: qmd_multi_get (Multi Get)
+  // Tool: multi_get (Multi Get)
   // ===========================================================================
 
-  describe("qmd_multi_get tool", () => {
+  describe("multi_get tool", () => {
     test("retrieves multiple documents by glob pattern", () => {
       const { docs, errors } = findDocuments(testDb, "meetings/*.md", { includeBody: true });
       expect(errors.length).toBe(0);
@@ -556,10 +556,10 @@ describe("MCP Server", () => {
   });
 
   // ===========================================================================
-  // Tool: qmd_status
+  // Tool: status
   // ===========================================================================
 
-  describe("qmd_status tool", () => {
+  describe("status tool", () => {
     test("returns index status", () => {
       const status = getStatus(testDb);
       expect(status.totalDocuments).toBe(5);
@@ -831,7 +831,7 @@ describe("MCP Server", () => {
     });
 
     test("embedded resources include name and title", () => {
-      // Simulate what qmd_get returns
+      // Simulate what get returns
       const meta = findDocument(testDb, "readme.md", { includeBody: false });
       expect("error" in meta).toBe(false);
       if ("error" in meta) return;
@@ -1013,6 +1013,79 @@ describe("MCP HTTP Transport", () => {
     expect(unauthorized.status).toBe(401);
     const health = await fetch(`${baseUrl}/health`);
     expect(health.status).toBe(200);
+  });
+
+  test("empty token file is treated as missing: token is regenerated and auth is still enforced", async () => {
+    const prevHome = process.env.HOME;
+    const prevToken = process.env.KINDX_MCP_TOKEN;
+
+    const isolatedHome = await mkdtemp(join(tmpdir(), "kindx-home-empty-token-"));
+    const tokenDir = join(isolatedHome, ".config", "kindx");
+    const tokenFile = join(tokenDir, "mcp_token");
+    await mkdir(tokenDir, { recursive: true });
+    await writeFile(tokenFile, "   \n", "utf-8");
+
+    let localHandle: HttpServerHandle | null = null;
+    try {
+      process.env.HOME = isolatedHome;
+      delete process.env.KINDX_MCP_TOKEN;
+
+      localHandle = await startMcpHttpServer(0, { quiet: true, dbPath: httpTestDbPath });
+      const localBaseUrl = `http://localhost:${localHandle.port}`;
+
+      const unauthorized = await fetch(`${localBaseUrl}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ searches: [{ type: "lex", query: "readme" }] }),
+      });
+      expect(unauthorized.status).toBe(401);
+
+      const generatedToken = (await readFile(tokenFile, "utf-8")).trim();
+      expect(generatedToken.length).toBeGreaterThan(0);
+
+      const authorized = await fetch(`${localBaseUrl}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${generatedToken}`,
+        },
+        body: JSON.stringify({ searches: [{ type: "lex", query: "readme" }], limit: 2 }),
+      });
+      expect(authorized.status).toBe(200);
+    } finally {
+      if (localHandle) await localHandle.stop();
+      if (prevHome !== undefined) process.env.HOME = prevHome;
+      else delete process.env.HOME;
+      if (prevToken !== undefined) process.env.KINDX_MCP_TOKEN = prevToken;
+      else delete process.env.KINDX_MCP_TOKEN;
+      await rm(isolatedHome, { recursive: true, force: true });
+    }
+  });
+
+  test("startup fails closed when token cannot be persisted", async () => {
+    const prevHome = process.env.HOME;
+    const prevToken = process.env.KINDX_MCP_TOKEN;
+
+    const isolatedHome = await mkdtemp(join(tmpdir(), "kindx-home-token-fail-"));
+    const configHome = join(isolatedHome, ".config");
+    await mkdir(configHome, { recursive: true });
+    await chmod(configHome, 0o500);
+
+    try {
+      process.env.HOME = isolatedHome;
+      delete process.env.KINDX_MCP_TOKEN;
+
+      await expect(startMcpHttpServer(0, { quiet: true, dbPath: httpTestDbPath }))
+        .rejects
+        .toThrow("Failed to initialize MCP auth token");
+    } finally {
+      await chmod(configHome, 0o700);
+      if (prevHome !== undefined) process.env.HOME = prevHome;
+      else delete process.env.HOME;
+      if (prevToken !== undefined) process.env.KINDX_MCP_TOKEN = prevToken;
+      else delete process.env.KINDX_MCP_TOKEN;
+      await rm(isolatedHome, { recursive: true, force: true });
+    }
   });
 
   // ---------------------------------------------------------------------------

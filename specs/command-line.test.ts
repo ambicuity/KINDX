@@ -1658,6 +1658,25 @@ describe("CLI Memory Commands", () => {
     expect(statsJson.scope).toBe("cli-test");
     expect(typeof statsJson.totalMemories).toBe("number");
   });
+
+  test("memory embed and consolidate render resolved non-JSON output", async () => {
+    const embed = await runQmd(
+      ["memory", "embed", "--scope", "cli-test"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(embed.exitCode).toBe(0);
+    expect(embed.stdout).toContain("Embedded");
+    expect(embed.stdout).not.toContain("${");
+
+    const consolidate = await runQmd(
+      ["memory", "consolidate", "--scope", "cli-test"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(consolidate.exitCode).toBe(0);
+    expect(consolidate.stdout).toContain("Consolidated memories");
+    expect(consolidate.stdout).toContain("Merged semantic overlaps");
+    expect(consolidate.stdout).not.toContain("${");
+  });
 });
 
 describe("CLI Migrate Chroma Command", () => {

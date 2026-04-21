@@ -6,7 +6,9 @@ This document tracks known issues and planned improvements inherited from the pr
 
 ## Bug Fixes
 
-### 1. Reranker context size too small for longer document chunks
+### 1. ✅ Reranker context size too small for longer document chunks
+
+**Status:** Resolved — `KINDX_RERANK_CONTEXT_SIZE` env var added, default raised to 4096.
 
 **Labels:** `bug`, `good first issue`
 
@@ -18,7 +20,9 @@ The reranker's context window (2048 tokens) truncates longer document chunks dur
 
 ---
 
-### 2. BM25 search fails on snake_case identifiers
+### 2. ✅ BM25 search fails on snake_case identifiers
+
+**Status:** Resolved — `sanitizeFTS5Term` now preserves underscores.
 
 **Labels:** `bug`
 
@@ -30,7 +34,9 @@ The FTS5 term sanitizer (`sanitizeFTS5Term`) strips underscores from search quer
 
 ---
 
-### 3. `kindx embed` crashes when first chunk exceeds context size
+### 3. ✅ `kindx embed` crashes when first chunk exceeds context size
+
+**Status:** Resolved — `embedBatch` catches per-text errors and returns `null` instead of crashing.
 
 **Labels:** `bug`
 
@@ -42,7 +48,9 @@ When the first chunk of a document exceeds the EmbeddingGemma context window, th
 
 ---
 
-### 4. Reranker crashes on CJK content (context size overflow)
+### 4. ✅ Reranker crashes on CJK content (context size overflow)
+
+**Status:** Resolved — reranker context raised to 4096 tokens (configurable via env var).
 
 **Labels:** `bug`
 
@@ -56,7 +64,9 @@ CJK (Chinese, Japanese, Korean) text has a higher token-to-character ratio, caus
 
 ## Enhancements
 
-### 5. Re-index on search (stale data detection)
+### 5. ✅ Detect stale data on search
+
+**Status:** Resolved — Search API now checks `statSync` against the DB's `modified_at` up to a boundary of `limit` to prevent IO contention. Exposes array of stale files via `metadata.diagnostics.staleFiles`.
 
 **Labels:** `enhancement`
 
@@ -68,7 +78,9 @@ When a user runs a search and some documents have been modified since the last i
 
 ---
 
-### 6. Update specific collection
+### 6. ✅ Update specific collection
+
+**Status:** Resolved — `--collection` flag exists on update/index commands.
 
 **Labels:** `enhancement`
 
@@ -82,7 +94,9 @@ kindx update --collection notes
 
 ---
 
-### 7. Unified env var configuration for model paths and tuning
+### 7. ✅ Unified env var configuration for model paths and tuning
+
+**Status:** Resolved — Implemented unified config using `KINDX_EMBED_MODEL`, `KINDX_RERANK_MODEL`, `KINDX_GENERATE_MODEL`, `KINDX_RERANK_CONTEXT_SIZE`, `KINDX_VRAM_RESERVE_MB`, etc.
 
 **Labels:** `enhancement`, `architecture`
 
@@ -96,7 +110,9 @@ Consolidate all model configuration into a unified environment variable scheme o
 
 ---
 
-### 8. Force CPU execution on older GPU architectures
+### 8. ✅ Force CPU execution on older GPU architectures
+
+**Status:** Resolved — Implemented the `KINDX_CPU_ONLY=1` environment variable.
 
 **Labels:** `enhancement`
 
@@ -108,7 +124,9 @@ Users with older NVIDIA GPUs (e.g., Pascal architecture) cannot use KINDX becaus
 
 ---
 
-### 9. Provide pre-built binaries for low-memory environments
+### 9. ✅ Provide pre-built binaries for low-memory environments
+
+**Status:** Resolved — `.github/workflows/release-please.yml` now builds arch-specific binaries via a matrix job (`ubuntu-latest`, `ubuntu-24.04-arm`) using `npm ci && npm run build && npm prune --omit=dev`, and attaches tarballs (`kindx-linux-x64.tar.gz`, `kindx-linux-arm64.tar.gz`) to GitHub releases.
 
 **Labels:** `enhancement`, `distribution`
 
@@ -118,7 +136,9 @@ Installation via npm requires compiling native modules, which fails on servers w
 
 ---
 
-### 10. Address deprecated `prebuild-install` dependency
+### 10. ✅ Address deprecated `prebuild-install` dependency
+
+**Status:** Resolved — Overridden `prebuild-install` in `package.json` with `npm:@radically-straightforward/prebuild-install@^7.1.5` to eliminate deprecation warnings during source builds. Also bypassed fundamentally for production via pre-built tarball distribution.
 
 **Labels:** `chore`, `dependencies`
 
@@ -128,7 +148,9 @@ The `prebuild-install@7.1.3` dependency is no longer maintained. Evaluate altern
 
 ---
 
-### 11. Collection mask update command
+### 11. ✅ Collection mask update command
+
+**Status:** Resolved — `kindx collection update-mask <name> <pattern>` subcommand implemented and wired to `catalogs.ts`.
 
 **Labels:** `enhancement`
 
@@ -146,14 +168,16 @@ kindx collection update-mask notes "**/*.md,**/*.txt"
 
 Once the KINDX repository is live on GitHub, each item above should be filed as a separate issue using the appropriate template:
 
-- **Bugs 1-4:** Use the `Bug Report` template
+- **Bugs 1-4:** Use the `Bug Report` template (all resolved)
 - **Enhancements 5-11:** Use the `Feature Request` template
 
 Apply the labels listed under each item.
 
 ---
 
-### 12. `kindx watch` — Real-Time Incremental Indexing
+### 12. ✅ `kindx watch` — Real-Time Incremental Indexing
+
+**Status:** Resolved — `WatchDaemon` class implemented in `engine/watcher.ts` with chokidar, debouncing, and atomic per-file re-indexing.
 
 **Labels:** `enhancement`, `strategic`
 

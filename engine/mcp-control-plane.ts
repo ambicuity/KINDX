@@ -242,14 +242,17 @@ export function buildResolvedHttpHeaders(control: ResolvedMcpServerControl): Rec
 
 export function isToolEnabledByPolicy(control: ResolvedMcpServerControl, toolName: string): boolean {
   if (control.project_scoped && !control.trusted_project) return false;
-  
-  // F-003: Strict deny-by-default execution. 
-  // We forbid executing unknown or implicitly missing mappings.
-  const isExcluded = control.disabled_tools.includes(toolName);
-  if (isExcluded) return false;
 
-  const inEnabled = Array.isArray(control.enabled_tools) && control.enabled_tools.includes(toolName);
-  return inEnabled;
+  // Explicit deny always wins.
+  if (control.disabled_tools.includes(toolName)) return false;
+
+  // If enabled_tools is set, treat it as an allowlist.
+  if (Array.isArray(control.enabled_tools)) {
+    return control.enabled_tools.includes(toolName);
+  }
+
+  // No explicit allowlist configured: allow by default.
+  return true;
 }
 
 export function applyToolPolicy(control: ResolvedMcpServerControl, toolNames: string[]): string[] {

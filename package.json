@@ -1,6 +1,6 @@
 {
   "name": "@ambicuity/kindx",
-  "version": "1.3.3",
+  "version": "1.3.2",
   "description": "KINDX - On-device hybrid search engine for markdown documents with BM25, vector embeddings, and LLM reranking",
   "type": "module",
   "workspaces": [
@@ -26,6 +26,7 @@
     "test": "vitest run --reporter=verbose specs/",
     "test:packages": "npm run test -w @ambicuity/kindx-schemas && npm run test -w @ambicuity/kindx-client",
     "test:python": "python3 -m unittest discover -s python/kindx-langchain/tests -v",
+    "test:openclaw-integration": "pnpm --dir openclaw-integration exec vitest run --config vitest.unit.config.ts src/memory/kindx-manager.test.ts",
     "test:all": "npm run pretest:all && npm run test && npm run test:packages && npm run test:python",
     "kindx": "tsx engine/kindx.ts",
     "index": "tsx engine/kindx.ts index",
@@ -61,6 +62,9 @@
     "type": "git",
     "url": "git+https://github.com/ambicuity/KINDX.git"
   },
+  "overrides": {
+    "prebuild-install": "npm:@radically-straightforward/prebuild-install@^7.1.5"
+  },
   "homepage": "https://github.com/ambicuity/KINDX#readme",
   "bugs": {
     "url": "https://github.com/ambicuity/KINDX/issues"
@@ -72,7 +76,7 @@
     "fast-glob": "^3.3.0",
     "node-llama-cpp": "^3.17.1",
     "picomatch": "^4.0.4",
-    "sqlite-vec": "0.1.9",
+    "sqlite-vec": "0.1.7",
     "yaml": "^2.8.2",
     "zod": "^4.2.1"
   },

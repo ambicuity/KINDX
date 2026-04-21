@@ -67,7 +67,7 @@ describe("mcp control plane", () => {
     expect(applyToolPolicy(resolved, ["query", "get", "status"])).toEqual(["query", "get"]);
   });
 
-  test("deny-by-default blocks tools when enabled list is missing", () => {
+  test("allows tools by default when enabled list is missing", () => {
     const resolved = resolveMcpServerControl("kindx", {
       runtime: null,
       project: null,
@@ -76,8 +76,9 @@ describe("mcp control plane", () => {
       projectHash: "p",
     });
     expect(resolved.enabled_tools).toBeNull();
-    expect(isToolEnabledByPolicy(resolved, "query")).toBe(false);
-    expect(applyToolPolicy(resolved, ["query", "get"])).toEqual([]);
+    expect(isToolEnabledByPolicy(resolved, "query")).toBe(true);
+    expect(isToolEnabledByPolicy(resolved, "get")).toBe(true);
+    expect(applyToolPolicy(resolved, ["query", "get"])).toEqual(["query", "get"]);
   });
 
   test("deny-by-default blocks unknown tools not explicitly allowlisted", () => {

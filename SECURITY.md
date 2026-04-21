@@ -69,8 +69,10 @@ When running KINDX in HTTP daemon mode (`kindx mcp --http`), the MCP endpoint bi
 
 Authentication token source (in order):
 1. `KINDX_MCP_TOKEN` if explicitly set.
-2. Existing token file at `~/.config/kindx/mcp_token`.
+2. Existing token file at `~/.config/kindx/mcp_token` when it contains a non-empty token.
 3. Auto-generated token persisted to `~/.config/kindx/mcp_token` (mode `0600`) on first HTTP startup.
+
+If the token file exists but is empty/whitespace, KINDX treats it as missing and regenerates a fresh token before serving requests.
 
 For shared hosts and networked deployments, set and rotate `KINDX_MCP_TOKEN` explicitly:
 
