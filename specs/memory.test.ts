@@ -6,6 +6,7 @@ import {
   upsertMemory,
   textSearchMemory,
   semanticSearchMemory,
+  purgeExpiredMemories,
   getMemoryHistory,
   getMemoryStats,
   markMemoryAccessed,
@@ -265,5 +266,37 @@ describe("memory subsystem", () => {
     const results = await semanticSearchMemory(db, "s1", "kindx", 5, 0.3, [1, 0, 0]);
     expect(results.length).toBe(1);
     expect(results[0]?.key).toBe("profile:project");
+  });
+
+  test("purgeExpiredMemories purges expired rows across all scopes when no scope is provided", () => {
+    const db = createMemoryDb();
+    const now = Date.now();
+    const expiredIso = new Date(now - 60_000).toISOString();
+    const futureIso = new Date(now + 60_000).toISOString();
+    const insert = db.prepare(`
+      INSERT INTO memories (
+        scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, expires_at, search_text
+      ) VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?)
+    `);
+
+    const defaultExpired = insert.run("default", "k:default:expired", "v1", expiredIso, "k:default:expired v1");
+    const teamExpired = insert.run("team-a", "k:team:expired", "v2", expiredIso, "k:team:expired v2");
+    insert.run("team-a", "k:team:active", "v3", futureIso, "k:team:active v3");
+    insert.run("team-b", "k:team:no-ttl", "v4", null, "k:team:no-ttl v4");
+
+    const purged = purgeExpiredMemories(db);
+    expect(purged).toBe(2);
+
+    const defaultGone = db.prepare(`SELECT id FROM memories WHERE id = ?`).get(Number(defaultExpired.lastInsertRowid));
+    const teamGone = db.prepare(`SELECT id FROM memories WHERE id = ?`).get(Number(teamExpired.lastInsertRowid));
+    const remaining = db.prepare(`SELECT scope, key FROM memories ORDER BY scope, key`).all() as Array<{ scope: string; key: string }>;
+
+    expect(defaultGone).toBeUndefined();
+    expect(teamGone).toBeUndefined();
+    expect(remaining).toEqual([
+      { scope: "team-a", key: "k:team:active" },
+      { scope: "team-b", key: "k:team:no-ttl" },
+    ]);
   });
 });

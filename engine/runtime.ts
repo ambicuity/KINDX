@@ -194,6 +194,7 @@ export interface Statement {
   run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
   get(...params: any[]): any;
   all(...params: any[]): any[];
+  iterate(...params: any[]): IterableIterator<any>;
 }
 
 /**

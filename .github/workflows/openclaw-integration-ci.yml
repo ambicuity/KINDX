@@ -1,0 +1,56 @@
+name: OpenClaw Integration CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "openclaw-integration/**"
+      - "engine/kindx.ts"
+      - "package.json"
+      - ".github/workflows/openclaw-integration-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "openclaw-integration/**"
+      - "engine/kindx.ts"
+      - "package.json"
+      - ".github/workflows/openclaw-integration-ci.yml"
+
+concurrency:
+  group: openclaw-integration-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  openclaw-integration:
+    name: OpenClaw KINDX Integration Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: "openclaw-integration/pnpm-lock.yaml"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+
+      - name: Install OpenClaw integration dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: openclaw-integration
+        env:
+          CI: "true"
+
+      - name: Run OpenClaw integration smoke tests
+        run: npm run test:openclaw-integration

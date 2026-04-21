@@ -15,7 +15,13 @@ import {
   normalizeDocid,
   isDocid,
   handelize,
+  insertContent,
+  insertDocument,
+  upsertDocumentLinks,
+  getGraphConnectedCandidates,
 } from "../engine/repository.js";
+import { openDatabase } from "../engine/runtime.js";
+import { initializeCoreSchema } from "../engine/schema.js";
 
 // =============================================================================
 // Path Utilities
@@ -78,6 +84,31 @@ describe("Path Utilities", () => {
     const result = getRealPath("/tmp");
     expect(result).toBeTruthy();
     expect(result === "/tmp" || result === "/private/tmp").toBe(true);
+  });
+});
+
+describe("Link Graph Candidates", () => {
+  test("formats virtual and display paths for graph-connected candidates", () => {
+    const db = openDatabase(":memory:");
+    try {
+      initializeCoreSchema(db);
+      const now = new Date().toISOString();
+      const hashA = "hash-a";
+      const hashB = "hash-b";
+
+      insertContent(db, hashA, "doc A", now);
+      insertContent(db, hashB, "doc B", now);
+      insertDocument(db, "docs", "a.md", "A", hashA, now, now);
+      insertDocument(db, "docs", "b.md", "B", hashB, now, now);
+      upsertDocumentLinks(db, "docs", "a.md", ["b.md"]);
+
+      const candidates = getGraphConnectedCandidates(db, ["kindx://docs/a.md"]);
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]?.file).toBe("kindx://docs/b.md");
+      expect(candidates[0]?.displayPath).toBe("docs/b.md");
+    } finally {
+      db.close();
+    }
   });
 });
 

@@ -56,6 +56,7 @@ import {
   type SessionScopeContext,
 } from "./session.js";
 import { getShardHealthSummary } from "./sharding.js";
+import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary } from "./audit.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
   McpToolListCache,
@@ -150,6 +151,8 @@ const KINDX_MCP_TOOL_NAMES = [
   "memory_history",
   "memory_stats",
   "memory_mark_accessed",
+  "memory_delete",
+  "memory_bulk",
 ] as const;
 
 type QueryTimings = {
@@ -214,6 +217,61 @@ function pushSpan(timings: QueryTimings, stage: string, startMs: number): void {
     end_ms: endMs,
     duration_ms: endMs - startMs,
   });
+}
+
+/**
+ * Content-level snippet deduplication.
+ *
+ * Removes search results whose snippets are near-identical to a higher-scored result.
+ * Uses token-set Jaccard similarity for fast comparison.
+ * Results are already sorted by score (descending), so we keep the first (best) match.
+ *
+ * Inspired by LlamaIndex's NodeDedup and Haystack's DeduplicationFilter.
+ */
+function snippetDedup<T extends { _rawSnippet: string; score: number }>(
+  results: T[],
+  threshold: number,
+): T[] {
+  if (results.length <= 1 || threshold <= 0) return results;
+
+  const tokenize = (text: string): Set<string> => {
+    const tokens = text.toLowerCase().split(/\s+/).filter((t) => t.length > 2);
+    return new Set(tokens);
+  };
+
+  const jaccardSimilarity = (a: Set<string>, b: Set<string>): number => {
+    if (a.size === 0 && b.size === 0) return 1;
+    let intersection = 0;
+    const smaller = a.size <= b.size ? a : b;
+    const larger = a.size <= b.size ? b : a;
+    for (const token of smaller) {
+      if (larger.has(token)) intersection++;
+    }
+    const union = a.size + b.size - intersection;
+    return union === 0 ? 0 : intersection / union;
+  };
+
+  const kept: T[] = [];
+  const keptTokens: Set<string>[] = [];
+
+  for (const result of results) {
+    const tokens = tokenize(result._rawSnippet);
+    let isDuplicate = false;
+
+    for (const existingTokens of keptTokens) {
+      if (jaccardSimilarity(tokens, existingTokens) >= threshold) {
+        isDuplicate = true;
+        break;
+      }
+    }
+
+    if (!isDuplicate) {
+      kept.push(result);
+      keptTokens.push(tokens);
+    }
+  }
+
+  return kept;
 }
 
 function parseQueryTimeoutMs(): number {
@@ -654,7 +712,7 @@ function createMcpServer(
 ): McpServer {
   const mcpControl = options?.mcpControl;
   const server = new McpServer(
-    { name: "kindx", version: "1.3.3" },
+    { name: "kindx", version: "1.3.4" },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
@@ -951,7 +1009,7 @@ Intent-aware lex (C++ performance, not sports):
         || searches.find((s: any) => s.type === 'vec')?.query
         || searches[0]?.query || "";
 
-      const filtered: SearchResultItem[] = results.results.map(r => {
+      const filtered = results.results.map(r => {
         const { line, snippet } = extractSnippet(r.bestChunk, primaryQuery, 300);
         let finalSnippet = snippet;
         // Context compression: truncate snippets when maxSnippetLines is set
@@ -968,8 +1026,16 @@ Intent-aware lex (C++ performance, not sports):
           score: Math.round(r.score * 100) / 100,
           context: r.context,
           snippet: addLineNumbers(finalSnippet, line),
+          _rawSnippet: finalSnippet,
         };
       });
+
+      // Content-level snippet dedup: remove results with near-identical snippets.
+      // Inspired by LlamaIndex node dedup and Haystack dedup filter.
+      // Keeps the higher-scored result when two snippets share >80% token overlap.
+      const deduped = snippetDedup(filtered, 0.8);
+      // Strip internal _rawSnippet field before returning
+      const cleanResults: SearchResultItem[] = deduped.map(({ _rawSnippet: _, ...rest }) => rest);
 
       const metadata: QueryMetadata = {
         timings,
@@ -997,7 +1063,7 @@ Intent-aware lex (C++ performance, not sports):
         collections: effectiveCollections,
         options: { limit, minScore, candidateLimit: profilePolicy.candidateLimit },
         metadata,
-        results: filtered,
+        results: cleanResults,
       });
       metadata.replay_artifact_path = metadata.replay_artifact;
       const annRoute = inferAnnRoute(metadata);
@@ -1026,9 +1092,18 @@ Intent-aware lex (C++ performance, not sports):
         total_ms: metadata.timings.total_ms,
       }));
 
+      // Audit logging (fire-and-forget, never fails the query)
+      recordAudit(store.db, {
+        action: "query",
+        scope: scopeKey,
+        detail: `results=${cleanResults.length} profile=${profile} degraded=${metadata.degraded_mode}`,
+        durationMs: metadata.timings.total_ms,
+        success: true,
+      });
+
       return {
-        content: [{ type: "text", text: formatSearchSummary(filtered, primaryQuery) }],
-        structuredContent: { results: filtered, metadata, timings },
+        content: [{ type: "text", text: formatSearchSummary(cleanResults, primaryQuery) }],
+        structuredContent: { results: cleanResults, metadata, timings },
       };
       } catch (error) {
         return {
@@ -1040,7 +1115,7 @@ Intent-aware lex (C++ performance, not sports):
   );
 
   // ---------------------------------------------------------------------------
-  // Tool: qmd_get (Retrieve document)
+  // Tool: get (Retrieve document)
   // ---------------------------------------------------------------------------
 
   maybeRegisterTool(
@@ -1138,7 +1213,7 @@ Intent-aware lex (C++ performance, not sports):
   );
 
   // ---------------------------------------------------------------------------
-  // Tool: qmd_multi_get (Retrieve multiple documents)
+  // Tool: multi_get (Retrieve multiple documents)
   // ---------------------------------------------------------------------------
 
   maybeRegisterTool(
@@ -1229,7 +1304,7 @@ Intent-aware lex (C++ performance, not sports):
   );
 
   // ---------------------------------------------------------------------------
-  // Tool: qmd_status (Index status)
+  // Tool: status (Index status)
   // ---------------------------------------------------------------------------
 
   maybeRegisterTool(
@@ -1495,6 +1570,12 @@ Intent-aware lex (C++ performance, not sports):
         semanticThreshold,
         ttl,
       });
+      recordAudit(store.db, {
+        action: "memory_put",
+        scope: resolved.scope,
+        detail: `key=${key} id=${memory.id}${ttl ? ` ttl=${ttl}s` : ""}`,
+        success: true,
+      });
       return {
         content: [{ type: "text", text: `stored memory #${memory.id} in scope '${resolved.scope}'` }],
         structuredContent: { scope: resolved.scope, memory },
@@ -1648,14 +1729,89 @@ Intent-aware lex (C++ performance, not sports):
       const { deleteMemory } = await import("./memory.js");
       const deleted = deleteMemory(store.db, resolved.scope, id);
       if (!deleted) {
+        recordAudit(store.db, {
+          action: "memory_delete",
+          scope: resolved.scope,
+          detail: `id=${id} not_found`,
+          success: false,
+        });
         return {
           content: [{ type: "text", text: `memory #${id} not found in scope '${resolved.scope}'` }],
           isError: true,
         };
       }
+      recordAudit(store.db, {
+        action: "memory_delete",
+        scope: resolved.scope,
+        detail: `id=${id}`,
+        success: true,
+      });
       return {
         content: [{ type: "text", text: `deleted memory #${id} from scope '${resolved.scope}'` }],
         structuredContent: { scope: resolved.scope, id, deleted: true },
+      };
+    }
+  );
+
+  maybeRegisterTool(
+    "memory_bulk",
+    {
+      title: "Memory Bulk Operations",
+      description: "Batch execute multiple memory insertions and deletions efficiently. Highly recommended when summarizing blocks or migrating multiple related facts at once.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        scope: z.string().optional().describe("Fallback memory scope if not specified per item. Resolved as explicit > session > workspace > default."),
+        operations: z.array(z.object({
+           action: z.enum(["put", "delete"]),
+           id: z.number().int().positive().optional().describe("Required for 'delete'. The memory ID to delete."),
+           input: z.object({
+             key: z.string(),
+             value: z.string(),
+             tags: z.array(z.string()).optional(),
+             source: z.string().optional(),
+             confidence: z.number().optional(),
+             ttl: z.number().optional(),
+             disableSemanticDedup: z.boolean().optional(),
+           }).optional().describe("Required for 'put'. The item to upsert.")
+        })).describe("List of operations to perform batched. Max 50."),
+      },
+    },
+    async ({ scope, operations }: any) => {
+      const resolved = resolveToolScope({ scope });
+      if (!resolved.scope) {
+        return {
+          content: [{ type: "text", text: resolved.errorText || "scope_resolution_failed" }],
+          isError: true,
+        };
+      }
+      
+      if (!Array.isArray(operations) || operations.length === 0) {
+        return {
+           content: [{ type: "text", text: "operations array is empty or missing" }],
+           isError: true,
+        };
+      }
+      if (operations.length > 50) {
+        return {
+           content: [{ type: "text", text: "Too many operations in one batch (max 50)" }],
+           isError: true,
+        };
+      }
+
+      const { processBulkMemories } = await import("./memory.js");
+      const result = await processBulkMemories(store.db, resolved.scope, operations);
+      
+      recordAudit(store.db, {
+        action: "memory_bulk",
+        scope: resolved.scope,
+        detail: `success=\${result.successful} failed=\${result.failed}`,
+        success: result.failed === 0,
+      });
+
+      return {
+        content: [{ type: "text", text: `Bulk operation complete. Successful: \${result.successful}, Failed: \${result.failed}.` }],
+        structuredContent: result,
+        isError: result.failed > 0,
       };
     }
   );
@@ -1768,18 +1924,32 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const inFlightBySession = new Map<string, Map<string, Promise<{ results: SearchResultItem[]; metadata: QueryMetadata }>>>();
   const inFlightMcpBySession = new Map<string, Map<string, Promise<{ status: number; headers: Record<string, string>; body: string }>>>();
 
-  // Read token once at startup.
-  let mcpToken = controlHeaders.Authorization?.replace(/^Bearer\s+/i, "").trim()
-    || process.env.KINDX_MCP_TOKEN?.trim()
-    || null;
+  const normalizeAuthToken = (raw: string | null | undefined): string | null => {
+    if (typeof raw !== "string") return null;
+    const token = raw.replace(/^Bearer\s+/i, "").trim();
+    return token.length > 0 ? token : null;
+  };
 
-  // Enforce auth: Auto-generate and persist a token if none is configured
+  // Read token once at startup and fail closed on bootstrap errors.
+  const configDir = resolve(homedir(), ".config", "kindx");
+  const tokenFile = resolve(configDir, "mcp_token");
+  let mcpToken = normalizeAuthToken(controlHeaders.Authorization)
+    ?? normalizeAuthToken(process.env.KINDX_MCP_TOKEN);
+
+  if (!mcpToken && existsSync(tokenFile)) {
+    try {
+      mcpToken = normalizeAuthToken(readFileSync(tokenFile, "utf-8"));
+    } catch (err) {
+      throw new Error(
+        `Failed to read MCP auth token from ${tokenFile}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  // Enforce auth: Auto-generate and persist a token if none is configured.
+  // Empty/whitespace token files are treated as missing and regenerated.
   if (!mcpToken) {
-    const configDir = resolve(homedir(), ".config", "kindx");
-    const tokenFile = resolve(configDir, "mcp_token");
-    if (existsSync(tokenFile)) {
-      mcpToken = readFileSync(tokenFile, "utf-8").trim();
-    } else {
+    try {
       if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
       }
@@ -1790,6 +1960,10 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       if (!quiet) {
         logger.info(`KINDX: Generated new MCP authorization token at ${tokenFile}`);
       }
+    } catch (err) {
+      throw new Error(
+        `Failed to initialize MCP auth token at ${tokenFile}: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 
@@ -2131,7 +2305,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     const method = nodeReq.method || "UNKNOWN";
     const metricRoute = pathname.startsWith("/mcp")
       ? "/mcp"
-      : (pathname === "/search" ? "/query" : pathname);
+      : (pathname === "/search" ? "/query" : (pathname === "/query/stream" ? "/query/stream" : pathname));
     const recordHttpMetrics = (statusCode: number): void => {
       const elapsed = Date.now() - reqStart;
       incCounter("kindx_http_requests_total", 1, { route: metricRoute, method, status: String(statusCode) });
@@ -2381,6 +2555,172 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         return;
       }
 
+      // -----------------------------------------------------------------------
+      // SSE Streaming endpoint: POST /query/stream
+      // Streams search progress events as Server-Sent Events, reducing
+      // agent-perceived latency by surfacing pipeline phase transitions.
+      // -----------------------------------------------------------------------
+      if (pathname === "/query/stream" && nodeReq.method === "POST") {
+        await withConcurrencyPolicy(requestIdentity, async () => {
+          const rawBody = await collectBody(nodeReq);
+          const params = JSON.parse(rawBody);
+
+          // RBAC: enforce query permission
+          if (requestIdentity) {
+            const { isPermitted } = await import("./rbac.js");
+            if (!isPermitted(requestIdentity, "query")) {
+              nodeRes.writeHead(403, { "Content-Type": "application/json" });
+              nodeRes.end(JSON.stringify({ error: `Forbidden: tenant '${requestIdentity.tenantId}' cannot perform queries` }));
+              recordHttpMetrics(403);
+              return;
+            }
+          }
+
+          if (!params.searches || !Array.isArray(params.searches)) {
+            nodeRes.writeHead(400, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({ error: "Missing required field: searches (array)" }));
+            recordHttpMetrics(400);
+            return;
+          }
+
+          const subSearches: StructuredSubSearch[] = params.searches.map((s: any) => ({
+            type: s.type as 'lex' | 'vec' | 'hyde',
+            query: String(s.query || ""),
+          }));
+
+          let effectiveCollections: string[] = params.collections ?? getDefaultCollectionNames();
+          if (requestIdentity && requestIdentity.allowedCollections !== "*") {
+            const { filterAllowedCollections } = await import("./rbac.js");
+            effectiveCollections = filterAllowedCollections(requestIdentity, effectiveCollections);
+            if (effectiveCollections.length === 0) {
+              nodeRes.writeHead(403, { "Content-Type": "application/json" });
+              nodeRes.end(JSON.stringify({ error: `Forbidden: tenant '${requestIdentity.tenantId}' has no access to the requested collections` }));
+              recordHttpMetrics(403);
+              return;
+            }
+          }
+
+          const routingProfile = normalizeRoutingProfile(params.routingProfile);
+
+          // Begin SSE response
+          nodeRes.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  // Disable nginx buffering
+          });
+
+          const sendSSE = (event: string, data: Record<string, unknown>) => {
+            if (nodeRes.destroyed) return;
+            nodeRes.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          };
+
+          sendSSE("phase", { phase: "started", routing_profile: routingProfile, searches: subSearches.length });
+
+          const timings = newTimings();
+          const started = Date.now();
+          const profilePolicy = resolveProfilePolicy(routingProfile, params.candidateLimit);
+          const effectiveTimeout = resolveTimeoutByProfile(queryTimeoutMs, routingProfile);
+          const scopeKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
+
+          try {
+            const rawResults = await withLLMScope(
+              scopeKey,
+              () => raceWithTimeout(
+                (signal) => structuredSearchWithDiagnostics(store, subSearches, {
+                  collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+                  limit: params.limit ?? 10,
+                  minScore: params.minScore ?? 0,
+                  candidateLimit: profilePolicy.candidateLimit,
+                  maxRerankCandidates: params.maxRerankCandidates,
+                  rerankTimeoutMs: params.rerankTimeoutMs,
+                  rerankQueueLimit: params.rerankQueueLimit,
+                  rerankConcurrency: params.rerankConcurrency,
+                  rerankDropPolicy: params.rerankDropPolicy,
+                  vectorFanoutWorkers: params.vectorFanoutWorkers,
+                  rerankLimit: profilePolicy.rerankLimit,
+                  disableRerank: routingProfile === "fast",
+                  routingProfile,
+                  signal,
+                  hooks: {
+                    onExpandStart: () => { sendSSE("phase", { phase: "expand_start" }); },
+                    onExpand: (_original, _expanded, elapsedMs) => {
+                      timings.expand_ms += elapsedMs;
+                      sendSSE("phase", { phase: "expand_done", elapsed_ms: elapsedMs });
+                    },
+                    onEmbedStart: (count) => { sendSSE("phase", { phase: "embed_start", count }); },
+                    onEmbedDone: (elapsedMs) => {
+                      timings.embed_ms += elapsedMs;
+                      sendSSE("phase", { phase: "embed_done", elapsed_ms: elapsedMs });
+                    },
+                    onRetrievalDone: (elapsedMs) => {
+                      timings.retrieval_ms = elapsedMs;
+                      sendSSE("phase", { phase: "retrieval_done", elapsed_ms: elapsedMs });
+                    },
+                    onRerankStart: (chunkCount) => { sendSSE("phase", { phase: "rerank_start", chunk_count: chunkCount }); },
+                    onRerankInitDone: (elapsedMs) => {
+                      timings.rerank_init_ms += elapsedMs;
+                      sendSSE("phase", { phase: "rerank_init_done", elapsed_ms: elapsedMs });
+                    },
+                    onRerankDone: (elapsedMs) => {
+                      timings.rerank_ms += elapsedMs;
+                      sendSSE("phase", { phase: "rerank_done", elapsed_ms: elapsedMs });
+                    },
+                    onDegradedMode: (reason) => { sendSSE("phase", { phase: "degraded", reason }); },
+                  },
+                }),
+                effectiveTimeout,
+                "query_timeout"
+              )
+            );
+
+            const primaryQuery = subSearches.find((s) => s.type === "lex")?.query
+              || subSearches.find((s) => s.type === "vec")?.query
+              || subSearches[0]?.query
+              || "";
+
+            const formatted: SearchResultItem[] = rawResults.results.map(r => {
+              const { line, snippet } = extractSnippet(r.bestChunk, primaryQuery, 300);
+              return {
+                docid: `#${r.docid}`,
+                file: r.displayPath,
+                title: r.title,
+                score: Math.round(r.score * 100) / 100,
+                context: r.context,
+                snippet: addLineNumbers(snippet, line),
+              };
+            });
+
+            timings.total_ms = Date.now() - started;
+            const metadata: QueryMetadata = {
+              timings,
+              degraded_mode: rawResults.diagnostics.degradedMode,
+              fallback_reason: rawResults.diagnostics.fallbackReasons[0] ?? null,
+              fallback_reasons: rawResults.diagnostics.fallbackReasons,
+              routing_profile: routingProfile,
+              scope: scopeKey,
+              dedupe_joined: false,
+              dedupe_join_hits: false,
+              replay_artifact: null,
+              replay_artifact_path: null,
+              diagnostics: rawResults.diagnostics,
+            };
+
+            sendSSE("result", { results: formatted, metadata });
+            sendSSE("done", {});
+            recordHttpMetrics(200);
+            logger.info(`POST /query/stream ${subSearches.length} queries (${Date.now() - reqStart}ms)`);
+          } catch (err: any) {
+            const message = err instanceof Error ? err.message : "Internal Server Error";
+            sendSSE("error", { error: message, code: err?.code || "internal_error" });
+            recordHttpMetrics(err?.code === "query_timeout" ? 408 : 500);
+          }
+
+          nodeRes.end();
+        });
+        return;
+      }
+
       if (pathname === "/mcp" && nodeReq.method === "POST") {
         const rawBody = await collectBody(nodeReq);
         const body = JSON.parse(rawBody);
@@ -2457,6 +2797,8 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               memory_history: "memory_history",
               memory_stats: "memory_stats",
               memory_mark_accessed: "memory_mark_accessed",
+              memory_delete: "memory_delete" as import("./rbac.js").RBACOperation,
+              memory_bulk: "memory_bulk" as import("./rbac.js").RBACOperation,
             };
             const op = toolToOp[toolName];
             if (op === undefined || (op && !isPermitted(requestIdentity, op))) {

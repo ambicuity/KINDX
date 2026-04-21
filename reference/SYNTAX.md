@@ -157,6 +157,12 @@ MCP control-plane policy is configurable via `mcp-servers.json` (project `.kindx
 - `mcp_servers.<id>.bearer_token_env_var`
 - `mcp_servers.<id>.project_scoped`
 
+Tool policy semantics:
+- If `enabled_tools` is set, it acts as an allowlist.
+- If `enabled_tools` is omitted, tools are allowed by default.
+- `disabled_tools` always denies matching tools.
+- When `project_scoped: true`, untrusted projects are denied regardless of allow/deny lists.
+
 ## CLI
 
 ```bash

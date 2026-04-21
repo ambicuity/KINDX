@@ -18,6 +18,9 @@ jobs:
   release-please:
     name: Create Release
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
 
     steps:
       - name: Release Please
@@ -107,7 +110,7 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: ${{ steps.release.outputs.release_created }}
-        run: npm pkg set publishConfig.registry=https://npm.pkg.github.com && npm publish --registry=https://npm.pkg.github.com
+        run: npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -116,3 +119,43 @@ jobs:
         uses: sigstore/gh-action-sigstore-python@v3.3.0
         with:
           inputs: ./dist/**/*.js
+
+  publish-binaries:
+    name: Publish Linux Binaries
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build
+        run: npm run build
+        
+      - name: Prune dev dependencies
+        run: npm prune --omit=dev
+        
+      - name: Package binary
+        run: tar -czvf kindx-linux-${{ matrix.arch }}.tar.gz package.json dist/ bin/ node_modules/
+        
+      - name: Upload to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} kindx-linux-${{ matrix.arch }}.tar.gz

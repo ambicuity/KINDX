@@ -90,6 +90,16 @@ export type UpsertMemoryInput = {
   ttl?: number;
 };
 
+export type BulkMemoryOperation = 
+  | { action: "put"; input: UpsertMemoryInput }
+  | { action: "delete"; id: number };
+
+export type BulkMemoryResult = {
+  successful: number;
+  failed: number;
+  errors: Array<{ index: number; error: string }>;
+};
+
 export type MemoryScopeResolution = {
   scope: string;
   source: "explicit" | "session" | "workspace" | "default";
@@ -900,10 +910,10 @@ export function purgeExpiredMemories(db: Database, scopeInput?: string): number 
     : `WHERE expires_at IS NOT NULL AND expires_at <= ?`;
   const params = scope ? [now, scope] : [now];
 
-  const rows = db.prepare(`SELECT id FROM memories ${whereClause}`).all(...params) as { id: number }[];
+  const rows = db.prepare(`SELECT id, scope FROM memories ${whereClause}`).all(...params) as { id: number; scope: string }[];
   for (const row of rows) {
     // Reuse deleteMemory for consistent cleanup (tags, embeddings, links)
-    const deleted = deleteMemory(db, scope || DEFAULT_SCOPE, row.id);
+    const deleted = deleteMemory(db, row.scope, row.id);
     if (deleted) purged++;
   }
   return purged;
@@ -998,4 +1008,142 @@ export async function embedMemories(
   }
 
   return { embedded: embeddedCount, totalCandidates: rows.length };
+}
+
+export async function processBulkMemories(
+  db: Database,
+  defaultScope: string,
+  operations: BulkMemoryOperation[]
+): Promise<BulkMemoryResult> {
+  const result: BulkMemoryResult = { successful: 0, failed: 0, errors: [] };
+  
+  // Precompute vectors for 'put' actions in batch if appropriate
+  const toEmbed: { index: number; text: string }[] = [];
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    if (op && op.action === "put" && !op.input.disableSemanticDedup && (!op.input.precomputedVector || op.input.precomputedVector.length === 0)) {
+       const key = (op.input.key || "").trim();
+       const value = (op.input.value || "").trim();
+       if (key && value) {
+         toEmbed.push({ index: i, text: `${key}: ${value}` });
+       }
+    }
+  }
+
+  if (toEmbed.length > 0) {
+    try {
+      const formatted = toEmbed.map(x => formatDocForEmbedding(x.text));
+      const vectors = await withLLMSession(async (session) => {
+        const embedded = await session.embedBatch(formatted);
+        return embedded.map((e) => e?.embedding);
+      }, { maxDuration: 10 * 60 * 1000, name: "memory-bulk-embed" });
+
+      for (let v = 0; v < toEmbed.length; v++) {
+        const opIndex = toEmbed[v]?.index;
+        const vec = vectors[v];
+        if (opIndex !== undefined && vec && vec.length > 0) {
+           const op = operations[opIndex];
+           if (op && op.action === "put") {
+              op.input.precomputedVector = vec;
+           }
+        }
+      }
+    } catch (err: any) {
+      // Proceed without semantic precomputation; exact dedup will still work
+    }
+  }
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    if (!op) continue;
+    try {
+      if (op.action === "put") {
+        op.input.scope = normalizeScope(op.input.scope || defaultScope);
+        await upsertMemory(db, op.input);
+      } else if (op.action === "delete") {
+        const deleted = deleteMemory(db, normalizeScope(defaultScope), op.id);
+        if (!deleted) throw new Error(`Memory \${op.id} not found or unauthorized for scope \${defaultScope}`);
+      } else {
+        throw new Error("Unknown bulk operation");
+      }
+      result.successful++;
+    } catch (e: any) {
+      result.failed++;
+      result.errors.push({ index: i, error: e.message || String(e) });
+    }
+  }
+  return result;
+}
+
+export function consolidateMemories(
+  db: Database,
+  scopeInput: string,
+  semanticThreshold: number = DEFAULT_SEMANTIC_THRESHOLD
+): { merged: number; deprecated: number } {
+  const scope = normalizeScope(scopeInput);
+  let merged = 0;
+  let deprecated = 0;
+
+  const rows = db.prepare(`
+    SELECT id, key
+    FROM memories
+    WHERE scope = ? AND superseded_by IS NULL
+  `).all(scope) as { id: number; key: string }[];
+
+  const prefixMap = new Map<string, number[]>();
+  for (const r of rows) {
+    const p = keyPrefix(r.key);
+    const list = prefixMap.get(p) || [];
+    list.push(r.id);
+    prefixMap.set(p, list);
+  }
+
+  for (const [prefix, ids] of prefixMap.entries()) {
+    if (ids.length <= 1) continue;
+    
+    // Pull full vectors for this prefix
+    const candidates = getSemanticCandidates(db, scope, prefix);
+    if (candidates.length <= 1) continue;
+    
+    // Process newer to older
+    candidates.sort((a, b) => b.id - a.id);
+    
+    const active = new Set(candidates.map(c => c.id));
+    const toDeprecate = new Map<number, number>();
+
+    for (let i = 0; i < candidates.length; i++) {
+       const newer = candidates[i];
+       if (!newer || !active.has(newer.id)) continue;
+       const normN = normalizeVector(newer.embedding);
+       
+       for (let j = i + 1; j < candidates.length; j++) {
+         const older = candidates[j];
+         if (!older || !active.has(older.id)) continue;
+         const sim = cosineSimilarityNormalized(normN, older.embedding);
+         if (sim >= semanticThreshold) {
+           toDeprecate.set(older.id, newer.id);
+           active.delete(older.id);
+         }
+       }
+    }
+    
+    for (const [oldId, newId] of toDeprecate.entries()) {
+      withTransaction(db, () => {
+        const now = new Date().toISOString();
+        db.prepare(`
+          UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE id = ?
+        `).run(newId, now, oldId);
+        db.prepare(`
+          UPDATE memories 
+          SET appeared_count = appeared_count + (SELECT appeared_count FROM memories WHERE id = ?),
+              accessed_count = accessed_count + (SELECT accessed_count FROM memories WHERE id = ?)
+          WHERE id = ?
+        `).run(oldId, oldId, newId);
+      });
+      deprecated++;
+      merged++;
+    }
+  }
+
+  return { merged, deprecated };
 }

@@ -12,10 +12,24 @@
  */
 
 import { openDatabase, loadSqliteVec } from "./runtime.js";
+import {
+  CHUNK_SIZE_TOKENS,
+  CHUNK_OVERLAP_TOKENS,
+  CHUNK_SIZE_CHARS,
+  CHUNK_OVERLAP_CHARS,
+  CHUNK_WINDOW_TOKENS,
+  CHUNK_WINDOW_CHARS,
+  scanBreakPoints,
+  findCodeFences,
+  isInsideCodeFence,
+  findBestCutoff,
+  type BreakPoint,
+  type CodeFenceRegion
+} from "./chunker.js";
 import type { Database } from "./runtime.js";
 import picomatch from "picomatch";
 import { createHash } from "crypto";
-import { dirname, resolve as pathResolve, relative } from "path";
+import { dirname, resolve as pathResolve, relative, join } from "path";
 import { existsSync, realpathSync, statSync, mkdirSync, unlinkSync } from "node:fs";
 import { ingestFile } from "./ingestion.js";
 import {
@@ -42,13 +56,16 @@ import {
   type NamedCollection,
 } from "./catalogs.js";
 // SessionRegistry import removed — signal now propagated via options.signal
-import { initializeMemorySchema } from "./memory.js";
+import { initializeCoreSchema } from "./schema.js";
 import { describeEncryptionState, ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
 import {
   getShardRuntimeStatus,
   getAnnRuntimeStatus,
   searchShardedVectorsWithDiagnostics,
 } from "./sharding.js";
+
+export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
+export type { BreakPoint, CodeFenceRegion };
 
 // =============================================================================
 // Configuration
@@ -102,173 +119,7 @@ function getCollectionRerankSettings(collectionName?: string): {
   };
 }
 
-// Chunking: 900 tokens per chunk with 15% overlap
-// Increased from 800 to accommodate smart chunking finding natural break points
-export const CHUNK_SIZE_TOKENS = 900;
-export const CHUNK_OVERLAP_TOKENS = Math.floor(CHUNK_SIZE_TOKENS * 0.15);  // 135 tokens (15% overlap)
-// Fallback char-based approximation for sync chunking (~4 chars per token)
-export const CHUNK_SIZE_CHARS = CHUNK_SIZE_TOKENS * 4;  // 3600 chars
-export const CHUNK_OVERLAP_CHARS = CHUNK_OVERLAP_TOKENS * 4;  // 540 chars
-// Search window for finding optimal break points (in tokens, ~200 tokens)
-export const CHUNK_WINDOW_TOKENS = 200;
-export const CHUNK_WINDOW_CHARS = CHUNK_WINDOW_TOKENS * 4;  // 800 chars
-
-// =============================================================================
-// Smart Chunking - Break Point Detection
-// =============================================================================
-
-/**
- * A potential break point in the document with a base score indicating quality.
- */
-export interface BreakPoint {
-  pos: number;    // character position
-  score: number;  // base score (higher = better break point)
-  type: string;   // for debugging: 'h1', 'h2', 'blank', etc.
-}
-
-/**
- * A region where a code fence exists (between ``` markers).
- * We should never split inside a code fence.
- */
-export interface CodeFenceRegion {
-  start: number;  // position of opening ```
-  end: number;    // position of closing ``` (or document end if unclosed)
-}
-
-/**
- * Patterns for detecting break points in markdown documents.
- * Higher scores indicate better places to split.
- * Scores are spread wide so headings decisively beat lower-quality breaks.
- * Order matters for scoring - more specific patterns first.
- */
-export const BREAK_PATTERNS: [RegExp, number, string][] = [
-  [/\n#{1}(?!#)/g, 100, 'h1'],     // # but not ##
-  [/\n#{2}(?!#)/g, 90, 'h2'],      // ## but not ###
-  [/\n#{3}(?!#)/g, 80, 'h3'],      // ### but not ####
-  [/\n#{4}(?!#)/g, 70, 'h4'],      // #### but not #####
-  [/\n#{5}(?!#)/g, 60, 'h5'],      // ##### but not ######
-  [/\n#{6}(?!#)/g, 50, 'h6'],      // ######
-  [/\n```/g, 80, 'codeblock'],     // code block boundary (same as h3)
-  [/\n(?:---|\*\*\*|___)\s*\n/g, 60, 'hr'],  // horizontal rule
-  [/\n\n+/g, 20, 'blank'],         // paragraph boundary
-  [/\n[-*]\s/g, 5, 'list'],        // unordered list item
-  [/\n\d+\.\s/g, 5, 'numlist'],    // ordered list item
-  [/\n/g, 1, 'newline'],           // minimal break
-];
-
-/**
- * Scan text for all potential break points.
- * Returns sorted array of break points with higher-scoring patterns taking precedence
- * when multiple patterns match the same position.
- */
-export function scanBreakPoints(text: string): BreakPoint[] {
-  const points: BreakPoint[] = [];
-  const seen = new Map<number, BreakPoint>();  // pos -> best break point at that pos
-
-  for (const [pattern, score, type] of BREAK_PATTERNS) {
-    for (const match of text.matchAll(pattern)) {
-      const pos = match.index!;
-      const existing = seen.get(pos);
-      // Keep higher score if position already seen
-      if (!existing || score > existing.score) {
-        const bp = { pos, score, type };
-        seen.set(pos, bp);
-      }
-    }
-  }
-
-  // Convert to array and sort by position
-  for (const bp of seen.values()) {
-    points.push(bp);
-  }
-  return points.sort((a, b) => a.pos - b.pos);
-}
-
-/**
- * Find all code fence regions in the text.
- * Code fences are delimited by ``` and we should never split inside them.
- */
-export function findCodeFences(text: string): CodeFenceRegion[] {
-  const regions: CodeFenceRegion[] = [];
-  const fencePattern = /\n```/g;
-  let inFence = false;
-  let fenceStart = 0;
-
-  for (const match of text.matchAll(fencePattern)) {
-    if (!inFence) {
-      fenceStart = match.index!;
-      inFence = true;
-    } else {
-      regions.push({ start: fenceStart, end: match.index! + match[0].length });
-      inFence = false;
-    }
-  }
-
-  // Handle unclosed fence - extends to end of document
-  if (inFence) {
-    regions.push({ start: fenceStart, end: text.length });
-  }
-
-  return regions;
-}
-
-/**
- * Check if a position is inside a code fence region.
- */
-export function isInsideCodeFence(pos: number, fences: CodeFenceRegion[]): boolean {
-  return fences.some(f => pos > f.start && pos < f.end);
-}
-
-/**
- * Find the best cut position using scored break points with distance decay.
- *
- * Uses squared distance for gentler early decay - headings far back still win
- * over low-quality breaks near the target.
- *
- * @param breakPoints - Pre-scanned break points from scanBreakPoints()
- * @param targetCharPos - The ideal cut position (e.g., maxChars boundary)
- * @param windowChars - How far back to search for break points (default ~200 tokens)
- * @param decayFactor - How much to penalize distance (0.7 = 30% score at window edge)
- * @param codeFences - Code fence regions to avoid splitting inside
- * @returns The best position to cut at
- */
-export function findBestCutoff(
-  breakPoints: BreakPoint[],
-  targetCharPos: number,
-  windowChars: number = CHUNK_WINDOW_CHARS,
-  decayFactor: number = 0.7,
-  codeFences: CodeFenceRegion[] = []
-): number {
-  const windowStart = targetCharPos - windowChars;
-  let bestScore = -1;
-  let bestPos = targetCharPos;
-
-  for (const bp of breakPoints) {
-    if (bp.pos < windowStart) continue;
-    if (bp.pos > targetCharPos) break;  // sorted, so we can stop
-
-    // Skip break points inside code fences
-    if (isInsideCodeFence(bp.pos, codeFences)) continue;
-
-    const distance = targetCharPos - bp.pos;
-    // Squared distance decay: gentle early, steep late
-    // At target: multiplier = 1.0
-    // At 25% back: multiplier = 0.956
-    // At 50% back: multiplier = 0.825
-    // At 75% back: multiplier = 0.606
-    // At window edge: multiplier = 0.3
-    const normalizedDist = distance / windowChars;
-    const multiplier = 1.0 - (normalizedDist * normalizedDist) * decayFactor;
-    const finalScore = bp.score * multiplier;
-
-    if (finalScore > bestScore) {
-      bestScore = finalScore;
-      bestPos = bp.pos;
-    }
-  }
-
-  return bestPos;
-}
+// Chunking logic extracted to engine/chunker.ts
 
 // Hybrid query: strong BM25 signal detection thresholds
 // Skip expensive LLM expansion when top result is strong AND clearly separated from runner-up
@@ -686,147 +537,7 @@ function initializeDatabase(db: Database): void {
   db.exec("PRAGMA busy_timeout = 30000"); // Allow concurrent processes to wait for lock
   db.exec("PRAGMA foreign_keys = ON");
 
-  // Drop legacy tables that are now managed in YAML
-  db.exec(`DROP TABLE IF EXISTS path_contexts`);
-  db.exec(`DROP TABLE IF EXISTS collections`);
-
-  // Content-addressable storage - the source of truth for document content
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS content (
-      hash TEXT PRIMARY KEY,
-      doc TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  // Documents table - file system layer mapping virtual paths to content hashes
-  // Collections are now managed in ~/.config/kindx/index.yml
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS documents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      collection TEXT NOT NULL,
-      path TEXT NOT NULL,
-      title TEXT NOT NULL,
-      hash TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      modified_at TEXT NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1,
-      FOREIGN KEY (hash) REFERENCES content(hash) ON DELETE CASCADE,
-      UNIQUE(collection, path)
-    )
-  `);
-
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_collection ON documents(collection, active)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path, active)`);
-
-  // Cache table for LLM API calls
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS llm_cache (
-      hash TEXT PRIMARY KEY,
-      result TEXT NOT NULL,
-      created_at TEXT NOT NULL
-    )
-  `);
-
-  // Index capability metadata (used for runtime compatibility and diagnostics)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS index_capabilities (
-      capability TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `);
-
-  // Ingestion diagnostics per document path.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS document_ingest (
-      collection TEXT NOT NULL,
-      path TEXT NOT NULL,
-      format TEXT NOT NULL,
-      extractor TEXT NOT NULL,
-      warnings_json TEXT NOT NULL DEFAULT '[]',
-      extracted_at TEXT NOT NULL,
-      content_hash TEXT NOT NULL,
-      PRIMARY KEY (collection, path)
-    )
-  `);
-
-  // Content vectors
-  const cvInfo = db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
-  const hasSeqColumn = cvInfo.some(col => col.name === 'seq');
-  if (cvInfo.length > 0 && !hasSeqColumn) {
-    db.exec(`DROP TABLE IF EXISTS content_vectors`);
-    db.exec(`DROP TABLE IF EXISTS vectors_vec`);
-  }
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS content_vectors (
-      hash TEXT NOT NULL,
-      seq INTEGER NOT NULL DEFAULT 0,
-      pos INTEGER NOT NULL DEFAULT 0,
-      model TEXT NOT NULL,
-      embedded_at TEXT NOT NULL,
-      PRIMARY KEY (hash, seq)
-    )
-  `);
-
-  // FTS - index filepath (collection/path), title, and content
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-      filepath, title, body,
-      tokenize='porter unicode61'
-    )
-  `);
-
-  // Triggers to keep FTS in sync
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents
-    WHEN new.active = 1
-    BEGIN
-      INSERT INTO documents_fts(rowid, filepath, title, body)
-      SELECT
-        new.id,
-        new.collection || '/' || new.path,
-        new.title,
-        (SELECT doc FROM content WHERE hash = new.hash)
-      WHERE new.active = 1;
-    END
-  `);
-
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-      DELETE FROM documents_fts WHERE rowid = old.id;
-    END
-  `);
-
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents
-    BEGIN
-      -- Always delete old FTS entry first (FTS5 does not cleanly support INSERT OR REPLACE)
-      DELETE FROM documents_fts WHERE rowid = old.id;
-
-      -- Insert new FTS entry if active
-      INSERT INTO documents_fts(rowid, filepath, title, body)
-      SELECT
-        new.id,
-        new.collection || '/' || new.path,
-        new.title,
-        (SELECT doc FROM content WHERE hash = new.hash)
-      WHERE new.active = 1;
-    END
-  `);
-
-  // Agent memory subsystem (m13v-style), scoped by namespace.
-  initializeMemorySchema(db);
-
-  const now = new Date().toISOString();
-  const setCapability = db.prepare(`
-    INSERT OR REPLACE INTO index_capabilities (capability, value, updated_at)
-    VALUES (?, ?, ?)
-  `);
-  setCapability.run("ann", "centroid-v1", now);
-  setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
-  setCapability.run("extractors", "native-text+pdf-docx-adapter-v1", now);
+  initializeCoreSchema(db);
   
   ensureVectorIndexIntegrity(db);
 }
@@ -1202,6 +913,7 @@ export type RankedResult = {
   title: string;
   body: string;
   score: number;
+  modifiedAt?: string;
 };
 
 export type RRFContributionTrace = {
@@ -1587,6 +1299,64 @@ export function upsertDocumentIngestion(
     payload.extractedAt,
     payload.contentHash
   );
+}
+
+export function upsertDocumentLinks(db: Database, collectionName: string, sourcePath: string, targetPaths: string[]): void {
+  // We explicitly wipe any old links from this source first
+  db.prepare(`DELETE FROM document_links WHERE collection = ? AND source_path = ?`).run(collectionName, sourcePath);
+  
+  if (targetPaths.length === 0) return;
+
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO document_links (collection, source_path, target_path)
+    VALUES (?, ?, ?)
+  `);
+
+  for (const target of targetPaths) {
+    stmt.run(collectionName, sourcePath, target);
+  }
+}
+
+export function getLinkedDocuments(db: Database, collectionName: string, sourcePath: string): string[] {
+  const rows = db.prepare(`SELECT target_path FROM document_links WHERE collection = ? AND source_path = ?`)
+    .all(collectionName, sourcePath) as { target_path: string }[];
+  return rows.map(r => r.target_path);
+}
+
+export function getBacklinkedDocuments(db: Database, collectionName: string, targetPath: string): string[] {
+  const rows = db.prepare(`SELECT source_path FROM document_links WHERE collection = ? AND target_path = ?`)
+    .all(collectionName, targetPath) as { source_path: string }[];
+  return rows.map(r => r.source_path);
+}
+
+export function getGraphConnectedCandidates(db: Database, virtualPaths: string[]): any[] {
+  const result: any[] = [];
+  const stmt = db.prepare(`
+    SELECT DISTINCT d.collection, d.path, d.title, content.doc as body
+    FROM documents d
+    JOIN content ON content.hash = d.hash
+    WHERE d.collection = ? AND d.active = 1 AND (
+      d.path IN (SELECT target_path FROM document_links WHERE collection = ? AND source_path = ?)
+      OR
+      d.path IN (SELECT source_path FROM document_links WHERE collection = ? AND target_path = ?)
+    )
+  `);
+
+  for (const vp of virtualPaths) {
+    const p = parseVirtualPath(vp);
+    if (!p) continue;
+    const rows = stmt.all(p.collectionName, p.collectionName, p.path, p.collectionName, p.path) as any[];
+    for (const r of rows) {
+      result.push({
+        file: `kindx://${r.collection}/${r.path}`,
+        displayPath: `${r.collection}/${r.path}`,
+        title: r.title,
+        body: r.body,
+        score: 0.1, // Base expansion score
+      });
+    }
+  }
+  return result;
 }
 
 export function getIndexCapabilities(db: Database): Record<string, string> {
@@ -2515,6 +2285,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
       'kindx://' || d.collection || '/' || d.path as filepath,
       d.collection || '/' || d.path as display_path,
       d.title,
+      d.modified_at,
       content.doc as body,
       d.hash,
       bm25(documents_fts, 10.0, 1.0) as bm25_score
@@ -2534,7 +2305,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   sql += ` ORDER BY bm25_score ASC LIMIT ?`;
   params.push(limit);
 
-  const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
+  const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; modified_at: string; body: string; hash: string; bm25_score: number }[];
   return rows.map(row => {
     const collectionName = row.filepath.split('//')[1]?.split('/')[0] || "";
     // Convert bm25 (negative, lower is better) into a stable [0..1) score where higher is better.
@@ -2549,7 +2320,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
       hash: row.hash,
       docid: getDocid(row.hash),
       collectionName,
-      modifiedAt: "",  // Not available in FTS query
+      modifiedAt: row.modified_at,
       bodyLength: row.body.length,
       body: row.body,
       context: getContextForFile(db, row.filepath),
@@ -2591,6 +2362,7 @@ function mapVectorMatchesToDocuments(
       'kindx://' || d.collection || '/' || d.path as filepath,
       d.collection || '/' || d.path as display_path,
       d.title,
+      d.modified_at,
       content.doc as body
     FROM content_vectors cv
     JOIN documents d ON d.hash = cv.hash AND d.active = 1
@@ -2605,7 +2377,7 @@ function mapVectorMatchesToDocuments(
 
   const docRows = db.prepare(docSql).all(...params) as {
     hash_seq: string; hash: string; pos: number; filepath: string;
-    display_path: string; title: string; body: string;
+    display_path: string; title: string; modified_at: string; body: string;
   }[];
 
   const seen = new Map<string, { row: typeof docRows[0]; bestDist: number }>();
@@ -2629,7 +2401,7 @@ function mapVectorMatchesToDocuments(
         hash: row.hash,
         docid: getDocid(row.hash),
         collectionName,
-        modifiedAt: "",
+        modifiedAt: row.modified_at,
         bodyLength: row.body.length,
         body: row.body,
         context: getContextForFile(db, row.filepath),
@@ -3890,6 +3662,7 @@ export interface StructuredSearchDiagnostics {
     route: "ann" | "exact_fallback" | "n/a";
     state: "ready" | "stale" | "missing" | "degraded" | "n/a";
   };
+  staleFiles: string[];
   throughput: {
     queue: {
       depth: number;
@@ -4410,6 +4183,7 @@ export async function structuredSearchWithDiagnostics(
     deferred: false,
     fairness: initialQueueSnapshot.fairness,
   };
+  const staleFiles: string[] = [];
   const mapScaleWarningToFallbackReason = (warning: string): string | undefined => {
     if (warning.startsWith("ann_missing:")) {
       return "ann_missing";
@@ -4491,6 +4265,7 @@ export async function structuredSearchWithDiagnostics(
       },
       degradedReasons: plannerDegradedReasons,
     },
+    staleFiles,
     throughput: {
       queue: queueState,
     },
@@ -4563,6 +4338,7 @@ export async function structuredSearchWithDiagnostics(
           rankedLists.push(ftsResults.map(r => ({
             file: r.filepath, displayPath: r.displayPath,
             title: r.title, body: r.body || "", score: r.score,
+            modifiedAt: r.modifiedAt,
           })));
           rankedListMeta.push({
             source: "fts",
@@ -4677,6 +4453,7 @@ export async function structuredSearchWithDiagnostics(
           rankedLists.push(item.vecResults.map(r => ({
             file: r.filepath, displayPath: r.displayPath,
             title: r.title, body: r.body || "", score: r.score,
+            modifiedAt: r.modifiedAt,
           })));
           rankedListMeta.push({
             source: "vec",
@@ -4699,6 +4476,17 @@ export async function structuredSearchWithDiagnostics(
   const fused = reciprocalRankFusion(rankedLists, weights);
   const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
   const candidates = fused.slice(0, candidateLimit);
+
+  // Step 3.5: Graph-Augmented Recall Expansion (Connectivity Boosting)
+  const existingFiles = new Set(candidates.map(c => c.file));
+  const candidatePaths = candidates.map(c => c.file);
+  const connected = getGraphConnectedCandidates(store.db, candidatePaths);
+  for (const conn of connected) {
+    if (!existingFiles.has(conn.file)) {
+       existingFiles.add(conn.file);
+       candidates.push({ ...conn, score: conn.score });
+    }
+  }
 
   if (candidates.length === 0) {
     return {
@@ -4814,7 +4602,7 @@ export async function structuredSearchWithDiagnostics(
 
   // Step 6: Blend RRF position score with reranker score
   const candidateMap = new Map(candidates.map(c => [c.file, {
-    displayPath: c.displayPath, title: c.title, body: c.body,
+    displayPath: c.displayPath, title: c.title, body: c.body, modifiedAt: c.modifiedAt,
   }]));
   const rrfRankMap = new Map(candidates.map((c, i) => [c.file, i + 1]));
 
@@ -4866,9 +4654,9 @@ export async function structuredSearchWithDiagnostics(
     };
   }).sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));
 
-  // Step 7: Dedup by file
+  // Step 7: Dedup by file and filter
   const seenFiles = new Set<string>();
-  const results = blended
+  let results = blended
     .filter(r => {
       if (seenFiles.has(r.file)) return false;
       seenFiles.add(r.file);
@@ -4876,6 +4664,38 @@ export async function structuredSearchWithDiagnostics(
     })
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+
+  // Step 8: Detect stale files among the returned results
+  for (const res of results) {
+    const candidate = candidateMap.get(res.file);
+    if (!candidate?.modifiedAt) continue;
+    try {
+      if (res.file.startsWith("kindx://")) {
+        const parts = res.file.slice("kindx://".length).split('/');
+        const colName = parts[0];
+        const relativePath = parts.slice(1).join('/');
+        const collSettings = getCollection(colName || "");
+        if (collSettings?.path) {
+          const absolutePath = join(collSettings.path, relativePath);
+          const stat = statSync(absolutePath);
+          // sqlite stores ISO strings. We can directly compare them if they're both ISO format.
+          // statSync.mtime.toISOString() could be newer than candidate.modifiedAt
+          const diskMtime = stat.mtime.getTime();
+          const dbMtime = new Date(candidate.modifiedAt).getTime();
+          // We allow 1000ms drift to account for precision differences
+          if (diskMtime > dbMtime + 1000) {
+            staleFiles.push(res.file);
+          }
+        }
+      }
+    } catch (err) {
+      // ignore stat errors (e.g., file deleted) - we could consider them stale or missing
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        staleFiles.push(res.file);
+      }
+    }
+  }
+
   const finalQueueSnapshot = getRerankQueueSnapshot(queueConfig);
   queueState.depth = finalQueueSnapshot.depth;
   queueState.active = finalQueueSnapshot.active;
@@ -4936,6 +4756,11 @@ async function indexSingleFile(
         contentHash: hash,
         extractedAt: now,
       });
+
+      const { extractInternalLinks } = await import("./link-extractor.js");
+      const links = extractInternalLinks(content, relativePath);
+      upsertDocumentLinks(db, collectionName, path, links);
+
       db.exec("COMMIT");
       return "embedded"; // Properly enqueued for BM25 and embedding 
     } catch (e) {

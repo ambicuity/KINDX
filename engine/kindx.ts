@@ -1869,6 +1869,11 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
         contentHash: hash,
         extractedAt: now,
       });
+      // Extract and flush cross-reference links
+      const { extractInternalLinks } = await import("./link-extractor.js");
+      const { upsertDocumentLinks } = await import("./repository.js");
+      const links = extractInternalLinks(content, relativeFile);
+      upsertDocumentLinks(db, collectionName, path, links);
     } else {
       // New document - insert content and document
       indexed++;
@@ -1884,7 +1889,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
         contentHash: hash,
         extractedAt: now,
       });
+      // Extract and flush cross-reference links
+      const { extractInternalLinks } = await import("./link-extractor.js");
+      const { upsertDocumentLinks } = await import("./repository.js");
+      const links = extractInternalLinks(content, relativeFile);
+      upsertDocumentLinks(db, collectionName, path, links);
     }
+
 
     processed++;
     progress.set((processed / total) * 100);
@@ -3622,6 +3633,36 @@ if (isMain) {
           }
           break;
         }
+        case "update-mask":
+        case "set-pattern": {
+          const name = cli.args[1];
+          const newPattern = cli.args.slice(2).join(' ');
+          if (!name || !newPattern) {
+            console.error("Usage: kindx collection update-mask <name> <pattern>");
+            console.error("  Update the glob pattern for an existing collection");
+            console.error("");
+            console.error("Examples:");
+            console.error("  kindx collection update-mask notes '**/*.md,**/*.txt'");
+            console.error("  kindx collection update-mask code '**/*.ts'");
+            process.exit(1);
+          }
+          const { updateCollectionPattern, getCollection } = await import("./catalogs.js");
+          const col = getCollection(name);
+          if (!col) {
+            console.error(`Collection not found: ${name}`);
+            process.exit(1);
+          }
+          const oldPattern = col.pattern;
+          const updated = updateCollectionPattern(name, newPattern);
+          if (updated) {
+            console.log(`✓ Updated pattern for '${name}': ${oldPattern} → ${newPattern}`);
+            console.log(`  Run 'kindx index' to re-index with the new pattern.`);
+          } else {
+            console.error(`Failed to update pattern for '${name}'.`);
+            process.exit(1);
+          }
+          break;
+        }
 
         case "help":
         case undefined: {
@@ -3634,12 +3675,14 @@ if (isMain) {
           console.log("  rename <old> <new>        Rename a collection");
           console.log("  show <name>               Show collection details");
           console.log("  update-cmd <name> [cmd]   Set pre-update command (e.g., 'git pull')");
+          console.log("  update-mask <name> <glob>  Update glob pattern for a collection");
           console.log("  include <name>            Include in default queries");
           console.log("  exclude <name>            Exclude from default queries");
           console.log("");
           console.log("Examples:");
           console.log("  kindx collection add ~/notes --name notes");
           console.log("  kindx collection update-cmd brain 'git pull'");
+          console.log("  kindx collection update-mask notes '**/*.md,**/*.txt'");
           console.log("  kindx collection exclude archive");
           process.exit(0);
         }
@@ -3784,6 +3827,21 @@ if (isMain) {
           break;
         }
 
+        case "consolidate": {
+          const thresholdRaw = cli.values.threshold as string | undefined;
+          const threshold = thresholdRaw ? Number.parseFloat(thresholdRaw) : 0.92;
+          const { consolidateMemories } = await import("./memory.js");
+          const result = consolidateMemories(db, scope, threshold);
+          if (cli.opts.format === "json") {
+            outputMemoryPayload({ scope, threshold, ...result }, "json");
+          } else {
+            console.log(`${c.green}✓${c.reset} Consolidated memories in scope '${scope}'`);
+            console.log(`  Merged semantic overlaps: ${result.merged}`);
+            console.log(`  Deprecated redundant nodes: ${result.deprecated}`);
+          }
+          break;
+        }
+
         case "help":
         case undefined: {
           console.log("Usage: kindx memory <subcommand> [options]");
@@ -3795,6 +3853,7 @@ if (isMain) {
           console.log("  stats          Show scoped memory stats");
           console.log("  mark-accessed  Bump access counter for a memory id");
           console.log("  embed          Backfill memory embeddings for this scope");
+          console.log("  consolidate    Merge semantically redundant active memories");
           console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
           process.exit(0);
         }

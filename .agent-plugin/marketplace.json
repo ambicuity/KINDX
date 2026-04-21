@@ -9,7 +9,7 @@
 			"name": "kindx",
 			"source": "./",
 			"description": "Production-grade on-device knowledge infrastructure for hybrid retrieval and MCP-native agent workflows.",
-			"version": "1.3.3",
+			"version": "1.3.4",
 			"author": {
 				"name": "ambicuity",
 				"email": "contact@riteshrana.engineer"
