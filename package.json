@@ -1,6 +1,6 @@
 {
   "name": "@ambicuity/kindx",
-  "version": "1.3.2",
+  "version": "1.3.4",
   "description": "KINDX - On-device hybrid search engine for markdown documents with BM25, vector embeddings, and LLM reranking",
   "type": "module",
   "workspaces": [

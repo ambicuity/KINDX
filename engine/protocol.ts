@@ -712,7 +712,7 @@ function createMcpServer(
 ): McpServer {
   const mcpControl = options?.mcpControl;
   const server = new McpServer(
-    { name: "kindx", version: "1.3.2" },
+    { name: "kindx", version: "1.3.4" },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
