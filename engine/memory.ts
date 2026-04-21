@@ -33,6 +33,8 @@ export type MemoryRecord = {
   supersededBy: number | null;
   supersededAt: string | null;
   searchText: string | null;
+  /** ISO-8601 expiration timestamp. NULL means never expires. */
+  expiresAt: string | null;
 };
 
 export type MemorySearchResult = {
@@ -80,6 +82,12 @@ export type UpsertMemoryInput = {
   semanticThreshold?: number;
   precomputedVector?: number[];
   disableSemanticDedup?: boolean;
+  /**
+   * Time-to-live in seconds. When set, the memory will expire after this duration.
+   * Expired memories are filtered from search results and eligible for cleanup.
+   * Inspired by Zep's temporal decay pattern.
+   */
+  ttl?: number;
 };
 
 export type MemoryScopeResolution = {
@@ -220,6 +228,16 @@ function normalizeTags(tags?: string[]): string[] {
   return [...out];
 }
 
+function isExpired(expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false;
+  return new Date(expiresAt).getTime() <= Date.now();
+}
+
+function computeExpiresAt(ttl?: number): string | null {
+  if (!ttl || !Number.isFinite(ttl) || ttl <= 0) return null;
+  return new Date(Date.now() + ttl * 1000).toISOString();
+}
+
 function toMemoryRecord(row: any): MemoryRecord {
   return {
     id: Number(row.id),
@@ -236,6 +254,7 @@ function toMemoryRecord(row: any): MemoryRecord {
     supersededBy: row.superseded_by == null ? null : Number(row.superseded_by),
     supersededAt: row.superseded_at ?? null,
     searchText: row.search_text ?? null,
+    expiresAt: row.expires_at ?? null,
   };
 }
 
@@ -362,6 +381,7 @@ function insertNewMemory(db: Database, params: {
   searchText: string;
   tags: string[];
   vector?: number[] | Float32Array;
+  expiresAt?: string | null;
 }): number {
   const now = nowIso();
   const run = db.prepare(`
@@ -369,8 +389,8 @@ function insertNewMemory(db: Database, params: {
       scope, key, value, confidence, source,
       appeared_count, accessed_count,
       created_at, last_appeared_at, last_accessed_at,
-      search_text
-    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?)
+      search_text, expires_at
+    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?, ?)
   `).run(
     params.scope,
     params.key,
@@ -380,6 +400,7 @@ function insertNewMemory(db: Database, params: {
     now,
     now,
     params.searchText,
+    params.expiresAt ?? null,
   );
   const memoryId = Number(run.lastInsertRowid);
   ensureTags(db, memoryId, params.tags);
@@ -464,9 +485,16 @@ export function initializeMemorySchema(db: Database): void {
     }
   }
 
+  // Migration: add expires_at column for TTL support (backward-compatible)
+  const colNames = new Set((db.prepare(`PRAGMA table_info(memories)`).all() as { name: string }[]).map(c => c.name));
+  if (!colNames.has("expires_at")) {
+    db.exec(`ALTER TABLE memories ADD COLUMN expires_at TEXT`);
+  }
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_key_active ON memories(scope, key, superseded_by)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_search ON memories(scope, search_text)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_accessed ON memories(scope, accessed_count)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_links_source ON memory_links(source_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_links_target ON memory_links(target_id)`);
@@ -614,6 +642,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
 
   // 4) New insert
   vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+  const expiresAt = computeExpiresAt(input.ttl);
   return withTransaction(db, () => {
     const newId = insertNewMemory(db, {
       scope,
@@ -624,6 +653,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       searchText,
       tags,
       vector,
+      expiresAt,
     });
 
     const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
@@ -648,7 +678,9 @@ export function textSearchMemory(db: Database, scopeInput: string, queryInput: s
       ELSE CAST(m.accessed_count AS REAL) / m.appeared_count END AS hit_rate,
       m.search_text
     FROM memories m
-    WHERE m.scope = ? AND m.superseded_by IS NULL AND ${where}
+    WHERE m.scope = ? AND m.superseded_by IS NULL
+      AND (m.expires_at IS NULL OR m.expires_at > datetime('now'))
+      AND ${where}
     ORDER BY hit_rate DESC, m.accessed_count DESC
     LIMIT ?
   `).all(scope, ...params, limit) as {
@@ -717,6 +749,7 @@ export function semanticSearchMemoryWithVector(
     WHERE m.id IN (${placeholders}) 
       AND m.scope = ? 
       AND m.superseded_by IS NULL
+      AND (m.expires_at IS NULL OR m.expires_at > datetime('now'))
   `).all(...memoryIds, scope) as {
     id: number;
     scope: string;
@@ -821,10 +854,65 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
   return Number(run.changes) > 0;
 }
 
+/**
+ * Delete a memory record by ID within a scope.
+ * Returns true if the memory was found and deleted.
+ * Also cleans up associated tags, embeddings, and vector index entries.
+ */
+export function deleteMemory(db: Database, scopeInput: string, memoryId: number): boolean {
+  const scope = normalizeScope(scopeInput);
+  return withTransaction(db, () => {
+    // Verify the memory belongs to this scope before deleting
+    const exists = db.prepare(
+      `SELECT id FROM memories WHERE id = ? AND scope = ?`
+    ).get(memoryId, scope) as { id: number } | undefined;
+    if (!exists) return false;
+
+    // Clean up tags (CASCADE should handle this, but be explicit)
+    db.prepare(`DELETE FROM memory_tags WHERE memory_id = ?`).run(memoryId);
+    // Clean up embeddings
+    db.prepare(`DELETE FROM memory_embeddings WHERE memory_id = ?`).run(memoryId);
+    // Clean up vector index (best-effort)
+    try {
+      db.prepare(`DELETE FROM memory_vectors_vec WHERE memory_id = CAST(? AS INTEGER)`).run(memoryId);
+    } catch { /* table may not exist */ }
+    // Clean up links
+    db.prepare(`DELETE FROM memory_links WHERE source_id = ? OR target_id = ?`).run(memoryId, memoryId);
+    // Nullify superseded_by references pointing to this memory
+    db.prepare(`UPDATE memories SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(memoryId);
+    // Delete the memory itself
+    const run = db.prepare(`DELETE FROM memories WHERE id = ? AND scope = ?`).run(memoryId, scope);
+    return Number(run.changes) > 0;
+  });
+}
+
+/**
+ * Purge all expired memories in a scope (or globally if scope is omitted).
+ * Returns the count of purged records.
+ */
+export function purgeExpiredMemories(db: Database, scopeInput?: string): number {
+  const now = nowIso();
+  let purged = 0;
+
+  const scope = scopeInput ? normalizeScope(scopeInput) : null;
+  const whereClause = scope
+    ? `WHERE expires_at IS NOT NULL AND expires_at <= ? AND scope = ?`
+    : `WHERE expires_at IS NOT NULL AND expires_at <= ?`;
+  const params = scope ? [now, scope] : [now];
+
+  const rows = db.prepare(`SELECT id FROM memories ${whereClause}`).all(...params) as { id: number }[];
+  for (const row of rows) {
+    // Reuse deleteMemory for consistent cleanup (tags, embeddings, links)
+    const deleted = deleteMemory(db, scope || DEFAULT_SCOPE, row.id);
+    if (deleted) purged++;
+  }
+  return purged;
+}
+
 export function getMemoryStats(db: Database, scopeInput: string): MemoryStats {
   const scope = normalizeScope(scopeInput);
 
-  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NULL`).get(scope) as { cnt: number };
+  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`).get(scope) as { cnt: number };
   const superseded = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NOT NULL`).get(scope) as { cnt: number };
   const links = db.prepare(`
     SELECT COUNT(*) AS cnt

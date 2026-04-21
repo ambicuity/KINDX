@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3](https://github.com/ambicuity/KINDX/compare/v1.3.2...v1.3.3) (2026-04-21)
+
+### Added
+
+- Added memory TTL support and `memory_delete` MCP tool for lifecycle-safe memory management.
+- Added query trace spans and adaptive query classification metadata in structured query paths.
+
+### Changed
+
+- Added query context compression support via max snippet line limits in MCP query responses.
+- Synchronized release metadata to `1.3.3` across package, lockfile, release manifest, MCP `serverInfo.version`, and marketplace metadata.
+
 ## [1.3.2](https://github.com/ambicuity/KINDX/compare/v1.3.1...v1.3.2) (2026-04-11)
 
 ### Added

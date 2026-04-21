@@ -159,6 +159,21 @@ type QueryTimings = {
   rerank_init_ms: number;
   rerank_ms: number;
   total_ms: number;
+  /** Adaptive query classification time (when auto-classification is used) */
+  classify_ms: number;
+  /**
+   * Per-stage trace spans with named stages and wall-clock timing.
+   * Inspired by Phoenix/OTEL span hierarchies for pipeline debugging.
+   * Each span records the pipeline stage name, start/end timestamps, and duration.
+   */
+  spans: QueryTraceSpan[];
+};
+
+type QueryTraceSpan = {
+  stage: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
 };
 
 type QueryMetadata = {
@@ -173,6 +188,8 @@ type QueryMetadata = {
   replay_artifact: string | null;
   replay_artifact_path: string | null;
   diagnostics: StructuredSearchDiagnostics;
+  /** Detected query strategy from auto-classification (when applicable) */
+  detected_strategy?: string;
 };
 
 function newTimings(): QueryTimings {
@@ -183,7 +200,20 @@ function newTimings(): QueryTimings {
     rerank_init_ms: 0,
     rerank_ms: 0,
     total_ms: 0,
+    classify_ms: 0,
+    spans: [],
   };
+}
+
+/** Record a trace span with wall-clock timing relative to query start */
+function pushSpan(timings: QueryTimings, stage: string, startMs: number): void {
+  const endMs = Date.now();
+  timings.spans.push({
+    stage,
+    start_ms: startMs,
+    end_ms: endMs,
+    duration_ms: endMs - startMs,
+  });
 }
 
 function parseQueryTimeoutMs(): number {
@@ -195,6 +225,77 @@ function parseQueryTimeoutMs(): number {
     return 0;
   }
   return parsed;
+}
+
+/**
+ * Adaptive query strategy auto-classification.
+ * Inspired by LangGraph's conditional edge routing and Haystack's pipeline routing.
+ *
+ * Classifies a raw query string to determine the optimal sub-query strategy:
+ * - 'exact': Short terms, snake_case identifiers, quoted phrases → lex only (skip embedding overhead)
+ * - 'question': Natural language questions → lex + vec (best recall)
+ * - 'analytical': Complex analytical queries → lex + vec + hyde (maximum precision)
+ *
+ * This is a suggestion, not a gate. Users can always manually specify sub-queries.
+ */
+type QueryStrategy = 'exact' | 'question' | 'analytical';
+
+function classifyQueryStrategy(query: string): QueryStrategy {
+  const trimmed = query.trim();
+  const words = trimmed.split(/\s+/);
+  const wordCount = words.length;
+
+  // Exact match indicators: quoted phrases, snake_case, very short
+  if (/^".*"$/.test(trimmed)) return 'exact';
+  if (wordCount <= 2 && /[_.-]/.test(trimmed)) return 'exact';
+  if (wordCount === 1) return 'exact';
+
+  // Question indicators: starts with interrogative, ends with ?
+  const questionStarters = /^(what|how|why|when|where|which|who|is|are|does|do|can|could|should|would|will|has|have|explain|describe)\b/i;
+  if (questionStarters.test(trimmed) || trimmed.endsWith('?')) return 'question';
+
+  // Analytical indicators: long queries, comparative language, abstract concepts
+  if (wordCount >= 15) return 'analytical';
+  const analyticalPatterns = /\b(compare|tradeoff|trade-off|versus|vs\.?|difference|relationship|impact|architecture|design|pattern|approach)\b/i;
+  if (analyticalPatterns.test(trimmed)) return 'analytical';
+
+  // Default to question for medium-length natural language
+  if (wordCount >= 3) return 'question';
+
+  return 'exact';
+}
+
+/**
+ * Expand a single raw query into appropriate sub-searches based on auto-classification.
+ * Returns the classified strategy and the expanded sub-search array.
+ */
+function autoExpandQuery(query: string): { strategy: QueryStrategy; searches: Array<{ type: string; query: string }> } {
+  const strategy = classifyQueryStrategy(query);
+
+  switch (strategy) {
+    case 'exact':
+      return {
+        strategy,
+        searches: [{ type: 'lex', query }],
+      };
+    case 'question':
+      return {
+        strategy,
+        searches: [
+          { type: 'lex', query },
+          { type: 'vec', query },
+        ],
+      };
+    case 'analytical':
+      return {
+        strategy,
+        searches: [
+          { type: 'lex', query },
+          { type: 'vec', query },
+          { type: 'hyde', query },
+        ],
+      };
+  }
 }
 
 function getDedupeMode(): "join" | "off" {
@@ -553,7 +654,7 @@ function createMcpServer(
 ): McpServer {
   const mcpControl = options?.mcpControl;
   const server = new McpServer(
-    { name: "kindx", version: "1.3.2" },
+    { name: "kindx", version: "1.3.3" },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
@@ -757,9 +858,12 @@ Intent-aware lex (C++ performance, not sports):
           "Retrieval routing profile: fast (lower latency), balanced (default), max_precision (higher recall/precision)."
         ),
         collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
+        maxSnippetLines: z.number().optional().describe(
+          "Maximum lines per result snippet. Truncates to the most relevant excerpt. Reduces token usage for agents with limited context windows."
+        ),
       },
     },
-    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections }: any) => {
+    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections, maxSnippetLines }: any) => {
       try {
       const totalStart = Date.now();
       const timings = newTimings();
@@ -813,11 +917,26 @@ Intent-aware lex (C++ performance, not sports):
             routingProfile: profile,
             signal,
             hooks: {
-              onExpand: (_original, _expanded, elapsedMs) => { timings.expand_ms += elapsedMs; },
-              onEmbedDone: (elapsedMs) => { timings.embed_ms += elapsedMs; },
-              onRetrievalDone: (elapsedMs) => { timings.retrieval_ms = elapsedMs; },
-              onRerankInitDone: (elapsedMs) => { timings.rerank_init_ms += elapsedMs; },
-              onRerankDone: (elapsedMs) => { timings.rerank_ms += elapsedMs; },
+              onExpand: (_original, _expanded, elapsedMs) => {
+                timings.expand_ms += elapsedMs;
+                pushSpan(timings, "expand", Date.now() - elapsedMs);
+              },
+              onEmbedDone: (elapsedMs) => {
+                timings.embed_ms += elapsedMs;
+                pushSpan(timings, "embed", Date.now() - elapsedMs);
+              },
+              onRetrievalDone: (elapsedMs) => {
+                timings.retrieval_ms = elapsedMs;
+                pushSpan(timings, "retrieve", Date.now() - elapsedMs);
+              },
+              onRerankInitDone: (elapsedMs) => {
+                timings.rerank_init_ms += elapsedMs;
+                pushSpan(timings, "rerank_init", Date.now() - elapsedMs);
+              },
+              onRerankDone: (elapsedMs) => {
+                timings.rerank_ms += elapsedMs;
+                pushSpan(timings, "rerank", Date.now() - elapsedMs);
+              },
             },
           }),
           resolveTimeoutByProfile(timeoutMs, profile),
@@ -825,6 +944,7 @@ Intent-aware lex (C++ performance, not sports):
         )
       );
       timings.total_ms = Date.now() - totalStart;
+      pushSpan(timings, "total", totalStart);
 
       // Use first lex or vec query for snippet extraction
       const primaryQuery = searches.find((s: any) => s.type === 'lex')?.query
@@ -833,13 +953,21 @@ Intent-aware lex (C++ performance, not sports):
 
       const filtered: SearchResultItem[] = results.results.map(r => {
         const { line, snippet } = extractSnippet(r.bestChunk, primaryQuery, 300);
+        let finalSnippet = snippet;
+        // Context compression: truncate snippets when maxSnippetLines is set
+        if (maxSnippetLines && Number.isFinite(maxSnippetLines) && maxSnippetLines > 0) {
+          const lines = finalSnippet.split('\n');
+          if (lines.length > maxSnippetLines) {
+            finalSnippet = lines.slice(0, maxSnippetLines).join('\n') + `\n[... ${lines.length - maxSnippetLines} more lines]`;
+          }
+        }
         return {
           docid: `#${r.docid}`,
           file: r.displayPath,
           title: r.title,
           score: Math.round(r.score * 100) / 100,
           context: r.context,
-          snippet: addLineNumbers(snippet, line),
+          snippet: addLineNumbers(finalSnippet, line),
         };
       });
 
@@ -1345,9 +1473,10 @@ Intent-aware lex (C++ performance, not sports):
         source: z.string().optional().describe("Optional source attribution"),
         confidence: z.number().optional().describe("Optional confidence value"),
         semanticThreshold: z.number().optional().describe("Optional semantic supersession threshold"),
+        ttl: z.number().optional().describe("Time-to-live in seconds. Memory expires after this duration. Omit for permanent storage."),
       },
     },
-    async ({ scope, key, value, tags, source, confidence, semanticThreshold }: any) => {
+    async ({ scope, key, value, tags, source, confidence, semanticThreshold, ttl }: any) => {
       const resolved = resolveToolScope({ scope });
       if (!resolved.scope) {
         return {
@@ -1364,6 +1493,7 @@ Intent-aware lex (C++ performance, not sports):
         source,
         confidence,
         semanticThreshold,
+        ttl,
       });
       return {
         content: [{ type: "text", text: `stored memory #${memory.id} in scope '${resolved.scope}'` }],
@@ -1491,6 +1621,41 @@ Intent-aware lex (C++ performance, not sports):
       return {
         content: [{ type: "text", text: `marked memory #${id} accessed` }],
         structuredContent: { scope: resolved.scope, id, marked: true },
+      };
+    }
+  );
+
+  maybeRegisterTool(
+    "memory_delete",
+    {
+      title: "Memory Delete",
+      description: "Delete a memory record by its ID. Removes associated tags, embeddings, and links.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
+        id: z.number().int().positive().describe("Memory id to delete"),
+      },
+    },
+    async ({ scope, id }: any) => {
+      const resolved = resolveToolScope({ scope });
+      if (!resolved.scope) {
+        return {
+          content: [{ type: "text", text: resolved.errorText || "scope_resolution_failed" }],
+          isError: true,
+        };
+      }
+
+      const { deleteMemory } = await import("./memory.js");
+      const deleted = deleteMemory(store.db, resolved.scope, id);
+      if (!deleted) {
+        return {
+          content: [{ type: "text", text: `memory #${id} not found in scope '${resolved.scope}'` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `deleted memory #${id} from scope '${resolved.scope}'` }],
+        structuredContent: { scope: resolved.scope, id, deleted: true },
       };
     }
   );
