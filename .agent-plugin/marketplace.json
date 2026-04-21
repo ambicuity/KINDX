@@ -9,19 +9,27 @@
 			"name": "kindx",
 			"source": "./",
 			"description": "Production-grade on-device knowledge infrastructure for hybrid retrieval and MCP-native agent workflows.",
-			"version": "1.3.2",
+			"version": "1.3.3",
 			"author": {
 				"name": "ambicuity",
 				"email": "contact@riteshrana.engineer"
 			},
 			"repository": "https://github.com/ambicuity/KINDX",
 			"license": "MIT",
-			"keywords": ["markdown", "search", "kindx"],
-			"skills": ["./skills/"],
+			"keywords": [
+				"markdown",
+				"search",
+				"kindx"
+			],
+			"skills": [
+				"./skills/"
+			],
 			"mcpServers": {
 				"kindx": {
 					"command": "kindx",
-					"args": ["mcp"]
+					"args": [
+						"mcp"
+					]
 				}
 			}
 		}
