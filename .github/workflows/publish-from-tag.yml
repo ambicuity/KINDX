@@ -117,7 +117,7 @@ jobs:
 
       - name: Publish to GitHub Packages (dry run)
         if: ${{ github.event.inputs.dry_run == 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
-        run: npm publish --registry=https://npm.pkg.github.com --dry-run
+        run: npm pkg set publishConfig.registry=https://npm.pkg.github.com && npm publish --registry=https://npm.pkg.github.com --dry-run
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -129,6 +129,6 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: ${{ github.event.inputs.dry_run != 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
-        run: npm publish --registry=https://npm.pkg.github.com
+        run: npm pkg set publishConfig.registry=https://npm.pkg.github.com && npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
