@@ -62,9 +62,6 @@
     "type": "git",
     "url": "git+https://github.com/ambicuity/KINDX.git"
   },
-  "overrides": {
-    "prebuild-install": "npm:@radically-straightforward/prebuild-install@^7.1.5"
-  },
   "homepage": "https://github.com/ambicuity/KINDX#readme",
   "bugs": {
     "url": "https://github.com/ambicuity/KINDX/issues"
