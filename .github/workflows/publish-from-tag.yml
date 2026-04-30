@@ -117,7 +117,12 @@ jobs:
 
       - name: Publish to GitHub Packages (dry run)
         if: ${{ github.event.inputs.dry_run == 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
-        run: npm pkg set publishConfig.registry=https://npm.pkg.github.com && npm publish --registry=https://npm.pkg.github.com --dry-run
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://npm.pkg.github.com\n' > .npmrc
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.publishConfig={...(p.publishConfig||{}), registry:'https://npm.pkg.github.com'}; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
+          npm publish --registry=https://npm.pkg.github.com --dry-run
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -129,6 +134,11 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: ${{ github.event.inputs.dry_run != 'true' && (github.event.inputs.publish_targets == 'both' || github.event.inputs.publish_targets == 'github') }}
-        run: npm pkg set publishConfig.registry=https://npm.pkg.github.com && npm publish --registry=https://npm.pkg.github.com
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://npm.pkg.github.com\n' > .npmrc
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.publishConfig={...(p.publishConfig||{}), registry:'https://npm.pkg.github.com'}; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
+          npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

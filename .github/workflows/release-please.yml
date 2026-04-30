@@ -110,7 +110,12 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: ${{ steps.release.outputs.release_created }}
-        run: npm publish --registry=https://npm.pkg.github.com
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://npm.pkg.github.com\n' > .npmrc
+          node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.publishConfig={...(p.publishConfig||{}), registry:'https://npm.pkg.github.com'}; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
+          npm publish --registry=https://npm.pkg.github.com
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
