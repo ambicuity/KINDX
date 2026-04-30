@@ -1,0 +1,4 @@
+name: KINDX CodeQL config
+
+paths-ignore:
+  - openclaw-integration/**
