@@ -65,9 +65,11 @@ jobs:
           NAME=$(jq -r '.name' package.json)
           VERSION=$(jq -r '.version' package.json)
           MARKET_VERSION=$(jq -r '.plugins[0].version' .agent-plugin/marketplace.json)
-          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "market_version=${MARKET_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=${NAME}"
+            echo "version=${VERSION}"
+            echo "market_version=${MARKET_VERSION}"
+          } >> "$GITHUB_OUTPUT"
           echo "Publishing candidate: ${NAME}@${VERSION} from tag ${{ github.event.inputs.tag }}"
 
       - name: Guardrail (marketplace metadata in sync)
@@ -120,7 +122,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://npm.pkg.github.com\n' > .npmrc
+          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\nregistry=https://npm.pkg.github.com\n' "$NODE_AUTH_TOKEN" > .npmrc
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.publishConfig={...(p.publishConfig||{}), registry:'https://npm.pkg.github.com'}; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
           npm publish --registry=https://npm.pkg.github.com --dry-run
         env:
@@ -137,7 +139,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}\nregistry=https://npm.pkg.github.com\n' > .npmrc
+          printf '@ambicuity:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\nregistry=https://npm.pkg.github.com\n' "$NODE_AUTH_TOKEN" > .npmrc
           node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.publishConfig={...(p.publishConfig||{}), registry:'https://npm.pkg.github.com'}; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
           npm publish --registry=https://npm.pkg.github.com
         env:
