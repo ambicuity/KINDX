@@ -16,7 +16,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ambicuity/KINDX/badge)](https://scorecard.dev/viewer/?uri=github.com/ambicuity/KINDX)
 
-KINDX is an on-device knowledge index for local document collections. It provides a command-line interface, a Model Context Protocol (MCP) server, and HTTP endpoints for indexing files, searching them with SQLite FTS5/BM25 and sqlite-vec, retrieving documents, and storing scoped agent memories.
+KINDX is a local-first hybrid CLI/MCP search engine for personal knowledge bases and agentic workflows, combining BM25, vector retrieval, and LLM reranking locally via node-llama-cpp/GGUF. It provides a command-line interface, a Model Context Protocol (MCP) server, and HTTP endpoints for indexing files, retrieving documents, and storing scoped agent memories.
 
 The core package is a Node.js/TypeScript project. It can run local GGUF models through `node-llama-cpp`, or use an OpenAI-compatible remote backend such as Ollama or LM Studio for embedding, expansion, and reranking.
 
@@ -181,6 +181,28 @@ flowchart TD
   - A C/C++ build toolchain for native Node modules when prebuilt binaries are unavailable.
 
 ## Getting Started
+
+Install the published CLI:
+
+```bash
+npm install -g @ambicuity/kindx
+kindx --help
+```
+
+Configure MCP clients with the global binary:
+
+```json
+{
+  "mcpServers": {
+    "kindx": {
+      "command": "kindx",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For local development from source:
 
 ```bash
 git clone https://github.com/ambicuity/KINDX.git

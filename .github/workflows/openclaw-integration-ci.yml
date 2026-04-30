@@ -34,23 +34,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Detect OpenClaw integration fixture
+        id: openclaw
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f openclaw-integration/pnpm-lock.yaml && -f openclaw-integration/vitest.unit.config.ts && -f openclaw-integration/src/memory/kindx-manager.test.ts ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::OpenClaw KINDX integration fixture is not present in this checkout; skipping integration smoke."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up pnpm
+        if: ${{ steps.openclaw.outputs.available == 'true' }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.23.0
+
       - name: Set up Node.js
+        if: ${{ steps.openclaw.outputs.available == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "pnpm"
           cache-dependency-path: "openclaw-integration/pnpm-lock.yaml"
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.23.0
-
       - name: Install OpenClaw integration dependencies
+        if: ${{ steps.openclaw.outputs.available == 'true' }}
         run: pnpm install --frozen-lockfile
         working-directory: openclaw-integration
         env:
           CI: "true"
 
       - name: Run OpenClaw integration smoke tests
+        if: ${{ steps.openclaw.outputs.available == 'true' }}
         run: npm run test:openclaw-integration

@@ -907,6 +907,7 @@ describe("MCP HTTP Transport", () => {
   const origConfigDir = process.env.KINDX_CONFIG_DIR;
   const origMcpToken = process.env.KINDX_MCP_TOKEN;
   const origMcpServersJson = process.env.KINDX_MCP_SERVERS_JSON;
+  const origMaintenanceTools = process.env.KINDX_ENABLE_MAINTENANCE_TOOLS;
   const testMcpToken = "kindx-test-token";
 
   beforeAll(async () => {
@@ -934,6 +935,7 @@ describe("MCP HTTP Transport", () => {
     process.env.INDEX_PATH = httpTestDbPath;
     process.env.KINDX_CONFIG_DIR = httpTestConfigDir;
     process.env.KINDX_MCP_TOKEN = testMcpToken;
+    process.env.KINDX_ENABLE_MAINTENANCE_TOOLS = "1";
     process.env.KINDX_MCP_SERVERS_JSON = JSON.stringify({
       mcp_servers: {
         "kindx": {
@@ -962,6 +964,8 @@ describe("MCP HTTP Transport", () => {
     else delete process.env.KINDX_MCP_TOKEN;
     if (origMcpServersJson !== undefined) process.env.KINDX_MCP_SERVERS_JSON = origMcpServersJson;
     else delete process.env.KINDX_MCP_SERVERS_JSON;
+    if (origMaintenanceTools !== undefined) process.env.KINDX_ENABLE_MAINTENANCE_TOOLS = origMaintenanceTools;
+    else delete process.env.KINDX_ENABLE_MAINTENANCE_TOOLS;
 
     // Clean up test files
     try { unlinkSync(httpTestDbPath); } catch { }
