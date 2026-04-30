@@ -8,7 +8,7 @@
 		{
 			"name": "kindx",
 			"source": "./",
-			"description": "Production-grade on-device knowledge infrastructure for hybrid retrieval and MCP-native agent workflows.",
+			"description": "Local-first hybrid CLI/MCP search engine for personal knowledge bases and agentic workflows, combining BM25, vector retrieval, and LLM reranking locally via node-llama-cpp/GGUF.",
 			"version": "1.3.4",
 			"author": {
 				"name": "ambicuity",

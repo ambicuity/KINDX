@@ -6,7 +6,7 @@
 |_|\_\_|_| \_|____/ /_/\_\
 ```
 
-# KINDX — Production-Quality On-Device Knowledge Infrastructure
+# KINDX
 
 [![MCP-Compatible](https://img.shields.io/badge/MCP-Compatible-6f42c1?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHJ4PSIyIiBmaWxsPSIjNmY0MmMxIi8+PC9zdmc+)](https://modelcontextprotocol.io)
 [![Local-First](https://img.shields.io/badge/Local--First-Privacy%20Guaranteed-22c55e?style=flat-square)](https://github.com/ambicuity/KINDX)
@@ -15,9 +15,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](./LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ambicuity/KINDX/badge)](https://scorecard.dev/viewer/?uri=github.com/ambicuity/KINDX)
 
-**Knowledge Infrastructure for AI Agents.** KINDX is a high-performance, local-first backend for Agentic Context Injection — enabling AI agents to perform deterministic, privacy-preserving Contextual Retrieval over document corpora without a single byte leaving the edge.
+KINDX is a local-first hybrid CLI/MCP search engine for personal knowledge bases and agentic workflows, combining BM25, vector retrieval, and LLM reranking locally via `node-llama-cpp` and GGUF models.
 
-KINDX combines BM25 full-text retrieval, vector semantic retrieval, and LLM re-ranking — all running locally via `node-llama-cpp` with GGUF models. It is designed to be called by agents, not typed by humans.
+KINDX provides a command-line interface, a Model Context Protocol (MCP) server, and HTTP endpoints for indexing local document collections, retrieving source files, and storing scoped agent memories.
 
 | Capability | Status |
 |---|:---:|
@@ -64,17 +64,14 @@ Position-Aware Blending merges BM25 symbolic retrieval with neural vector simila
 
 ---
 
-## Quick Start — Local-First Agentic Stack
+## Quick Start
 
 ```bash
-# Install globally (Node or Bun)
+# Install globally
 npm install -g @ambicuity/kindx
-# or
-bun install -g @ambicuity/kindx
 
 # Or invoke without installing
 npx @ambicuity/kindx ...
-bunx @ambicuity/kindx ...
 
 > **Note:** The term "collection" in this documentation corresponds to a `collection` in the CLI.
 
