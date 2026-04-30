@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/ambicuity/KINDX/compare/v1.3.4...v1.4.0) (2026-04-30)
+
+
+### Features
+
+* integrate KINDX reliability and release surface updates ([23ae8fb](https://github.com/ambicuity/KINDX/commit/23ae8fbf5f5cb7bb7e016d09e6f8c9286ea68055))
+
 ## [1.3.4] - 2026-04-21
 
 ### Added
