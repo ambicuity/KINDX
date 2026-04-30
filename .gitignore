@@ -3,10 +3,12 @@ node_modules/
 
 # Build output
 dist/
+packages/*/dist/
 
 # IDE
 .idea/
 .vscode/
+.settings/
 *.swp
 *.swo
 *~
@@ -19,6 +21,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+!.env.example
 
 # Lock files (Bun)
 bun.lock
@@ -29,9 +32,29 @@ coverage/
 test_corpus/
 test_watch_collection/
 mock_chroma.sqlite3
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+test-*.ts
+test_*.ts
+test-*.sh
+test_*.sh
+test_backup.*
 
-# Embedded integration repos
-openclaw-integration/
+# OpenClaw integration is intentionally uploaded with this branch.
+# Keep its generated/dependency output local.
+openclaw-integration/.git/
+openclaw-integration/**/node_modules/
+openclaw-integration/dist/
+openclaw-integration/**/dist/
+openclaw-integration/coverage/
+openclaw-integration/**/coverage/
+openclaw-integration/.pnpm-store/
+!openclaw-integration/pnpm-lock.yaml
 
 # KINDX cache (local development)
 .cache/kindx/
@@ -50,6 +73,18 @@ training/.venv/
 __pycache__/
 *.pyc
 *.pyo
+
+# Package artifacts and logs
+*.tgz
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local scratch space
+tmp/
+temp/
 
 # GGUF models (large binary files)
 *.gguf

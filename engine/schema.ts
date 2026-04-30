@@ -1,6 +1,7 @@
 import type { Database } from "./runtime.js";
 import { initializeMemorySchema } from "./memory.js";
 import { initializeAuditSchema } from "./audit.js";
+import { initializeAiUsageSchema } from "./ai-usage.js";
 
 export function initializeCoreSchema(db: Database): void {
   // Drop legacy tables that are now managed in YAML
@@ -151,6 +152,9 @@ export function initializeCoreSchema(db: Database): void {
 
   // Audit logging subsystem — append-only operation log.
   initializeAuditSchema(db);
+
+  // AI usage ledger — immutable per-call token consumption tracking.
+  initializeAiUsageSchema(db);
 
   const now = new Date().toISOString();
   const setCapability = db.prepare(`

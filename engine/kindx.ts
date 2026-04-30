@@ -134,6 +134,7 @@ import {
   getShardRuntimeStatus,
   syncCollectionShardsFromMainDb,
 } from "./sharding.js";
+import { recordDirectUsage, flushAiUsageQueue } from "./ai-usage.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -159,6 +160,7 @@ function getDb(): Database {
 
 function closeDb(): void {
   if (store) {
+    flushAiUsageQueue();
     store.close();
     store = null;
   }
@@ -201,6 +203,8 @@ import {
   formatMs,
   formatBytes,
   renderProgressBar,
+  spinner,
+  Spinner
 } from "./utils/ui.js";
 
 const isTTY = process.stderr.isTTY;
@@ -2012,15 +2016,19 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   await withLLMSession(async (session) => {
     // Get embedding dimensions from first chunk
     progress.indeterminate();
+    const initSpinner = spinner("Loading embedding model and connecting to GPU/CPU...").start();
     const firstChunk = allChunks[0];
     if (!firstChunk) {
+      initSpinner.fail("No chunks available");
       throw new Error("No chunks available to embed");
     }
     const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
     const firstResult = await session.embed(firstText);
     if (!firstResult) {
+      initSpinner.fail("Model loading failed");
       throw new Error(`Failed to embed first chunk. The embedding model may not be available or failed to load.\n  Model: ${model}\n  Check the model exists and you have network access for the initial download.`);
     }
+    initSpinner.succeed("Model loaded successfully");
     ensureVecTable(db, firstResult.embedding.length);
 
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
@@ -2039,7 +2047,9 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
 
       try {
         // Batch embed all texts at once
+        const batchEmbedStart = Date.now();
         const embeddings = await session.embedBatch(texts);
+        const batchEmbedDuration = Date.now() - batchEmbedStart;
 
         // Collect successful embeddings and insert them in a single transaction.
         // This amortises the WAL flush cost across the entire batch (32 chunks
@@ -2048,6 +2058,11 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
           hash: string; seq: number; pos: number;
           embedding: Float32Array; model: string; embeddedAt: string;
         }[] = [];
+
+        // Aggregate usage across the batch for a single ledger entry.
+        let batchInputTokens = 0;
+        let batchTotalTokens = 0;
+        let batchSuccessCount = 0;
 
         for (let i = 0; i < batch.length; i++) {
           const chunk = batch[i]!;
@@ -2063,6 +2078,13 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
               embeddedAt: now,
             });
             chunksEmbedded++;
+            batchSuccessCount++;
+
+            // Accumulate usage from each embedding result.
+            if (embedding.usage) {
+              batchInputTokens += embedding.usage.prompt_tokens;
+              batchTotalTokens += embedding.usage.total_tokens;
+            }
           } else {
             errors++;
             console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
@@ -2072,15 +2094,45 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
 
         // Commit all successful embeddings atomically
         bulkInsertEmbeddings(db, toInsert);
+
+        // Record batch-level AI usage to the ledger.
+        if (batchSuccessCount > 0) {
+          const provider = process.env.KINDX_LLM_BACKEND === "remote" ? "remote_openai" as const : "llama_cpp" as const;
+          recordDirectUsage(db, {
+            operation: "embed_batch",
+            model,
+            provider,
+            usage: {
+              prompt_tokens: batchInputTokens,
+              completion_tokens: 0,
+              total_tokens: batchTotalTokens,
+            },
+            durationMs: batchEmbedDuration,
+            context: { batch_size: batch.length, success_count: batchSuccessCount },
+          });
+        }
       } catch (err) {
         // If batch fails, try individual embeddings as fallback
         for (const chunk of batch) {
           try {
+            const singleEmbedStart = Date.now();
             const text = formatDocForEmbedding(chunk.text, chunk.title);
             const result = await session.embed(text);
+            const singleEmbedDuration = Date.now() - singleEmbedStart;
             if (result) {
               insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
               chunksEmbedded++;
+
+              // Record individual embed usage.
+              const provider = process.env.KINDX_LLM_BACKEND === "remote" ? "remote_openai" as const : "llama_cpp" as const;
+              recordDirectUsage(db, {
+                operation: "embed",
+                model,
+                provider,
+                usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+                durationMs: singleEmbedDuration,
+                context: { hash: chunk.hash, seq: chunk.seq, fallback: true },
+              });
             } else {
               errors++;
             }
@@ -2100,13 +2152,19 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       const remainingBytes = totalBytes - bytesProcessed;
       const etaSec = remainingBytes / bytesPerSec;
 
-      const bar = renderProgressBar(percent);
-      const percentStr = percent.toFixed(0).padStart(3);
       const throughput = `${formatBytes(bytesPerSec)}/s`;
-      const eta = elapsed > 2 ? formatETA(etaSec) : "...";
-      const errStr = errors > 0 ? ` ${c.yellow}${errors} err${c.reset}` : "";
+      const errStr = errors > 0 ? ` ${c.red}${errors} err${c.reset}` : "";
+      const suffix = `${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput}${c.reset}`;
+      
+      const bar = renderProgressBar(percent, 40, {
+        etaSeconds: elapsed > 2 ? etaSec : undefined,
+        suffix: suffix
+      });
 
-      if (isTTY) process.stderr.write(`\r${c.cyan}${bar}${c.reset} ${c.bold}${percentStr}%${c.reset} ${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput} ETA ${eta}${c.reset}   `);
+      if (isTTY) {
+        cursor.clearLine();
+        process.stderr.write(`${bar}`);
+      }
     }
 
     progress.clear();
@@ -2114,10 +2172,17 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     const totalTimeSec = (Date.now() - startTime) / 1000;
     const avgThroughput = formatBytes(totalBytes / totalTimeSec);
 
-    console.log(`\r${c.green}${renderProgressBar(100)}${c.reset} ${c.bold}100%${c.reset}                                    `);
-    console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    if (isTTY) {
+      cursor.clearLine();
+      console.log(renderProgressBar(100, 40, { suffix: `${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}` }));
+    } else {
+      console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    }
+    if (isTTY) {
+      console.log(`${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    }
     if (errors > 0) {
-      console.log(`${c.yellow}⚠ ${errors} chunks failed${c.reset}`);
+      console.log(`${c.red}✖ ${errors} chunks failed${c.reset}`);
     }
   }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
 
@@ -4030,7 +4095,8 @@ if (isMain) {
       break;
     }
 
-    case "tenant": {
+    case "tenant":
+    case "token": {
       const code = runTenantCommand(cli.args, cli.values as Record<string, unknown>, cli.opts.format);
       if (code !== 0) process.exit(code);
       break;
@@ -4167,6 +4233,35 @@ if (isMain) {
         runQuerySearch: querySearch as (query: string, opts: unknown) => Promise<void>,
       });
       if (code !== 0) process.exit(code);
+      break;
+    }
+
+    case "usage": {
+      const { getAiUsageSummary, getAiUsageByOperation } = await import("./ai-usage.js");
+      const { c, formatMs } = await import("./utils/ui.js");
+      const db = getDb();
+      
+      const summary = getAiUsageSummary(db);
+      console.log(`\n${c.bold}KINDX AI Token Usage Ledger${c.reset}`);
+      console.log("──────────────────────────────────────────────────");
+      console.log(`Total Calls:         ${c.cyan}${summary.total_calls}${c.reset}`);
+      console.log(`Total Input Tokens:  ${c.yellow}${summary.total_input_tokens.toLocaleString()}${c.reset}`);
+      console.log(`Total Output Tokens: ${c.yellow}${summary.total_output_tokens.toLocaleString()}${c.reset}`);
+      console.log(`Total Tokens:        ${c.green}${summary.total_tokens.toLocaleString()}${c.reset}`);
+      console.log(`Error Count:         ${summary.error_count > 0 ? c.red : ''}${summary.error_count}${c.reset}`);
+      console.log(`Models Used:         ${c.cyan}${summary.models_used}${c.reset}`);
+      console.log(`Total Duration:      ${formatMs(summary.total_duration_ms)}\n`);
+      
+      const byOp = getAiUsageByOperation(db);
+      if (byOp.length > 0) {
+        console.log(`${c.bold}Usage by Operation${c.reset}`);
+        console.log("──────────────────────────────────────────────────");
+        for (const op of byOp) {
+          console.log(`  ${c.cyan}${op.operation.padEnd(15)}${c.reset} | Calls: ${op.call_count.toString().padEnd(5)} | Tokens: ${c.green}${op.total_tokens.toLocaleString()}${c.reset} | Time: ${formatMs(op.total_duration_ms)}`);
+        }
+      }
+      console.log("");
+      closeDb();
       break;
     }
 

@@ -15,12 +15,18 @@ import {
   type Token as LlamaToken,
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
+import { Spinner, renderProgressBar, formatBytes, cursor, progress as termProgress, c } from "./utils/ui.js";
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync, promises as fs } from "node:fs";
 import * as os from "node:os";
 import { resolve, join } from "path";
 import { homedir } from "node:os";
+import type { ModelUsage } from "./ai-usage.js";
+
+// Re-export ModelUsage so consumers of inference.ts can access it without
+// importing ai-usage.ts directly.
+export type { ModelUsage } from "./ai-usage.js";
 
 // =============================================================================
 // Embedding Formatting Functions
@@ -79,6 +85,7 @@ export type TokenLogProb = {
 export type EmbeddingResult = {
   embedding: number[];
   model: string;
+  usage?: ModelUsage;
 };
 
 /**
@@ -89,6 +96,7 @@ export type GenerateResult = {
   model: string;
   logprobs?: TokenLogProb[];
   done: boolean;
+  usage?: ModelUsage;
 };
 
 /**
@@ -106,6 +114,7 @@ export type RerankDocumentResult = {
 export type RerankResult = {
   results: RerankDocumentResult[];
   model: string;
+  usage?: ModelUsage;
 };
 
 /**
@@ -296,32 +305,62 @@ export async function pullModels(
 
     let lastPercent = -1;
     let started = false;
+    let downloadStartTime = 0;
+    const modelLabel = filename || model;
+    const pullSpinner = new Spinner(`Pulling inference model ${c.bold}${modelLabel}${c.reset}`);
+
     const path = await resolveModelFile(model, {
       directory: cacheDir,
       cli: false,
       onProgress: (status) => {
         if (!started) {
-          process.stderr.write(`KINDX: Pulling inference model ${filename || model}...\n`);
+          downloadStartTime = Date.now();
+          pullSpinner.start();
           started = true;
         }
         if (status.totalSize > 0) {
-          const percent = Math.round((status.downloadedSize / status.totalSize) * 100);
-          if (percent !== lastPercent) {
-            process.stderr.write(`\r  Downloading... [${percent}% of ${Math.round(status.totalSize / (1024 * 1024))}MB]`);
-            lastPercent = percent;
+          const percent = (status.downloadedSize / status.totalSize) * 100;
+          const roundedPercent = Math.round(percent);
+          if (roundedPercent !== lastPercent) {
+            lastPercent = roundedPercent;
+            // Calculate speed and ETA
+            const elapsedSec = Math.max(0.1, (Date.now() - downloadStartTime) / 1000);
+            const bytesPerSec = status.downloadedSize / elapsedSec;
+            const remainingBytes = status.totalSize - status.downloadedSize;
+            const etaSeconds = bytesPerSec > 0 ? remainingBytes / bytesPerSec : undefined;
+            const speedStr = `${c.dim}${formatBytes(Math.round(bytesPerSec))}/s${c.reset}`;
+
+            // Update OSC 9;4 terminal-tab progress
+            termProgress.set(roundedPercent);
+
+            // Render rich progress bar
+            cursor.clearLine();
+            const bar = renderProgressBar(percent, 30, {
+              prefix: `  ${c.cyan}↓${c.reset}`,
+              etaSeconds,
+              suffix: `${formatBytes(status.downloadedSize)}/${formatBytes(status.totalSize)} ${speedStr}`,
+            });
+            process.stderr.write(bar);
           }
         } else if (status.downloadedSize > 0) {
+          // Indeterminate size: show spinner with downloaded bytes
           const mb = Math.round(status.downloadedSize / (1024 * 1024));
           if (mb !== lastPercent) {
-            process.stderr.write(`\r  Downloading... [${mb}MB]`);
             lastPercent = mb;
+            termProgress.indeterminate();
+            pullSpinner.text = `Pulling ${c.bold}${modelLabel}${c.reset} ${c.dim}(${formatBytes(status.downloadedSize)})${c.reset}`;
           }
         }
       }
     });
 
     if (started) {
-      process.stderr.write(" - Done.\n");
+      termProgress.clear();
+      if (lastPercent >= 0 && process.stderr.isTTY) {
+        // Clear the progress bar line, then print success
+        cursor.clearLine();
+      }
+      pullSpinner.stop(`${c.green}✔${c.reset}`, `Model ${c.bold}${modelLabel}${c.reset} ready ${c.dim}(${formatBytes(existsSync(path) ? statSync(path).size : 0)})${c.reset}`);
     }
     const sizeBytes = existsSync(path) ? statSync(path).size : 0;
     if (hfRef && filename) {
@@ -1154,9 +1193,20 @@ export class LlamaCpp implements LLM {
       const context = await this.ensureEmbedContext();
       const embedding = await context.getEmbeddingFor(text);
 
+      // Estimate token count for usage tracking.
+      // Full tokenization is synchronous on the embed model, but calling it
+      // per-embed in a large batch adds measurable overhead. Use char/4 heuristic
+      // for embeddings — accuracy is acceptable for accounting purposes.
+      const estimatedInputTokens = Math.ceil(text.length / 4);
+
       return {
         embedding: Array.from(embedding.vector),
         model: this.embedModelUri,
+        usage: {
+          prompt_tokens: estimatedInputTokens,
+          completion_tokens: 0,
+          total_tokens: estimatedInputTokens,
+        },
       };
     } catch (error) {
       console.error("Embedding error:", error);
@@ -1266,10 +1316,21 @@ export class LlamaCpp implements LLM {
         },
       });
 
+      // Estimate usage from prompt + response lengths.
+      // LlamaCpp doesn't provide an OpenAI-style usage object, so we use
+      // the char/4 heuristic which is standard for GPT-style tokenizers.
+      const estimatedPromptTokens = Math.ceil(prompt.length / 4);
+      const estimatedCompletionTokens = Math.ceil(result.length / 4);
+
       return {
         text: result,
         model: this.generateModelUri,
         done: true,
+        usage: {
+          prompt_tokens: estimatedPromptTokens,
+          completion_tokens: estimatedCompletionTokens,
+          total_tokens: estimatedPromptTokens + estimatedCompletionTokens,
+        },
       };
     } finally {
       // Dispose context (which disposes dependent sequences/sessions per lifecycle rules)

@@ -629,7 +629,12 @@ export function isValidCollectionName(name: string): boolean {
  */
 export function updateCollectionPattern(name: string, newPattern: string): boolean {
   const config = loadConfig();
-  const collection = config.collections[name];
+  let collection: any;
+  if (Array.isArray(config.collections)) {
+    collection = config.collections.find((c: any) => c.name === name);
+  } else {
+    collection = config.collections[name];
+  }
   if (!collection) return false;
 
   collection.pattern = newPattern;

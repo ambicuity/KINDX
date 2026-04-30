@@ -63,6 +63,7 @@ import {
   getAnnRuntimeStatus,
   searchShardedVectorsWithDiagnostics,
 } from "./sharding.js";
+import { recordDirectUsage } from "./ai-usage.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -2648,8 +2649,10 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   }
 
   const llm = getDefaultLLM();
+  const expandStart = Date.now();
   // Note: LLM usages rely on configuration logic internally
   const results = await llm.expandQuery(query);
+  const expandDuration = Date.now() - expandStart;
 
   // Map Queryable[] → ExpandedQuery[] (same shape, decoupled from inference.ts internals).
   // Filter out entries that duplicate the original query text.
@@ -2660,6 +2663,26 @@ export async function expandQuery(query: string, model: string = DEFAULT_QUERY_M
   if (expanded.length > 0) {
     setCachedResult(db, cacheKey, JSON.stringify(expanded));
   }
+
+  // Record query expansion AI usage.
+  // expandQuery uses the generate model internally; estimate tokens from query + result.
+  const provider = process.env.KINDX_LLM_BACKEND === "remote" ? "remote_openai" as const : "llama_cpp" as const;
+  const estimatedInputTokens = Math.ceil(query.length / 4);
+  const estimatedOutputTokens = Math.ceil(
+    results.reduce((sum, r) => sum + r.text.length, 0) / 4
+  );
+  recordDirectUsage(db, {
+    operation: "expand_query",
+    model,
+    provider,
+    usage: {
+      prompt_tokens: estimatedInputTokens,
+      completion_tokens: estimatedOutputTokens,
+      total_tokens: estimatedInputTokens + estimatedOutputTokens,
+    },
+    durationMs: expandDuration,
+    context: { query_length: query.length, expansions: expanded.length },
+  });
 
   return expanded;
 }
@@ -2698,7 +2721,9 @@ export async function rerank(
   if (uncachedDocsByChunk.size > 0) {
     const llm = getDefaultLLM();
     const uncachedDocs = [...uncachedDocsByChunk.values()];
+    const rerankStart = Date.now();
     const rerankResult = await llm.rerank(query, uncachedDocs, { model, onRerankInit: options.onRerankInit });
+    const rerankDuration = Date.now() - rerankStart;
 
     // Cache results by chunk text so identical chunks across files are scored once.
     const textByFile = new Map(uncachedDocs.map(d => [d.file, d.text]));
@@ -2708,6 +2733,27 @@ export async function rerank(
       setCachedResult(db, cacheKey, result.score.toString());
       cachedResults.set(chunk, result.score);
     }
+
+    // Record rerank AI usage.
+    const provider = process.env.KINDX_LLM_BACKEND === "remote" ? "remote_openai" as const : "llama_cpp" as const;
+    // If the rerank response carries usage metadata, use it; otherwise estimate.
+    const usage = rerankResult.usage ?? {
+      prompt_tokens: Math.ceil(
+        (query.length + uncachedDocs.reduce((s, d) => s + d.text.length, 0)) / 4
+      ),
+      completion_tokens: 0,
+      total_tokens: Math.ceil(
+        (query.length + uncachedDocs.reduce((s, d) => s + d.text.length, 0)) / 4
+      ),
+    };
+    recordDirectUsage(db, {
+      operation: "rerank",
+      model,
+      provider,
+      usage,
+      durationMs: rerankDuration,
+      context: { documents_count: uncachedDocs.length, query_length: query.length },
+    });
   }
 
   // Return all results sorted by score

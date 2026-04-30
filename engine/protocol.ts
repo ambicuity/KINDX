@@ -143,16 +143,9 @@ const KINDX_MCP_TOOL_NAMES = [
   "query",
   "get",
   "multi_get",
-  "status",
-  "arch_status",
   "arch_query",
   "memory_put",
   "memory_search",
-  "memory_history",
-  "memory_stats",
-  "memory_mark_accessed",
-  "memory_delete",
-  "memory_bulk",
 ] as const;
 
 type QueryTimings = {
@@ -723,6 +716,22 @@ function createMcpServer(
     if (mcpControl && !isToolEnabledByPolicy(mcpControl, name)) {
       return;
     }
+    
+    // Dynamic Tool Scoping: Prune maintenance tools to save token overhead unless explicitly requested.
+    const maintenanceTools = [
+      "status",
+      "arch_status",
+      "arch_query",
+      "memory_stats",
+      "memory_bulk",
+      "memory_delete",
+      "memory_mark_accessed",
+      "memory_history"
+    ];
+    if (maintenanceTools.includes(name) && !process.env.KINDX_ENABLE_MAINTENANCE_TOOLS) {
+      return;
+    }
+
     server.registerTool(name, def, handler);
   };
 
@@ -1820,11 +1829,106 @@ Intent-aware lex (C++ performance, not sports):
 }
 
 // =============================================================================
+// Resilient Store Wrapper
+// =============================================================================
+
+export function createResilientStore(dbPath?: string): Store {
+  let innerStore = createStore(dbPath);
+
+  function checkError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("disk image is malformed") || msg.includes("SQLITE_CORRUPT") || msg.includes("readonly database")) {
+      logger.warn(`KINDX Recovery: Database connection stale (${msg}), recycling connection...`);
+      try { innerStore.close(); } catch {}
+      innerStore = createStore(dbPath);
+      return true;
+    }
+    return false;
+  }
+
+  const dbProxy = new Proxy({} as any, {
+    get(target, prop) {
+      if (prop === "transaction") {
+         return function(fn: any) {
+           return function(...tArgs: any[]) {
+              try {
+                return (innerStore.db.transaction(fn) as any)(...tArgs);
+              } catch (e) {
+                 if (checkError(e)) {
+                    return (innerStore.db.transaction(fn) as any)(...tArgs);
+                 }
+                 throw e;
+              }
+           }
+         }
+      }
+
+      const dbVal = (innerStore.db as any)[prop];
+      if (typeof dbVal === "function") {
+        return function(...args: any[]) {
+          try {
+            const res = dbVal.apply(innerStore.db, args);
+            if (prop === "prepare") {
+               return new Proxy(res, {
+                 get(sTarget, sProp) {
+                   const sVal = res[sProp];
+                   if (typeof sVal === "function") {
+                     return function(...sArgs: any[]) {
+                        try {
+                          return sVal.apply(res, sArgs);
+                        } catch (e) {
+                          if (checkError(e)) {
+                             const newStmt = innerStore.db.prepare(args[0]);
+                             return (newStmt as any)[sProp].apply(newStmt, sArgs);
+                          }
+                          throw e;
+                        }
+                     }
+                   }
+                   return sVal;
+                 }
+               });
+            }
+            return res;
+          } catch (e) {
+             if (checkError(e)) {
+               return (innerStore.db as any)[prop].apply(innerStore.db, args);
+             }
+             throw e;
+          }
+        };
+      }
+      return dbVal;
+    }
+  });
+
+  return new Proxy({} as Store, {
+    get(target, prop) {
+      if (prop === "db") return dbProxy;
+      const val = (innerStore as any)[prop];
+      if (typeof val === "function") {
+        return function(...args: any[]) {
+          try {
+            return val.apply(innerStore, args);
+          } catch (e) {
+            if (checkError(e)) {
+               return (innerStore as any)[prop].apply(innerStore, args);
+            }
+            throw e;
+          }
+        }
+      }
+      return val;
+    }
+  });
+}
+
+// =============================================================================
 // Transport: stdio (default)
 // =============================================================================
 
 export async function startMcpServer(dbPath?: string): Promise<void> {
-  const store = createStore(dbPath);
+  const store = createResilientStore(dbPath);
   const loadedControl = loadMcpControlPlaneConfig();
   const mcpControl = resolveMcpServerControl(KINDX_MCP_SERVER_ID, loadedControl);
   if (mcpControl.project_scoped && !mcpControl.trusted_project) {
@@ -1912,7 +2016,7 @@ export async function bindHttpServerWithFallback(
  */
 export async function startMcpHttpServer(port: number, options?: { quiet?: boolean; dbPath?: string }): Promise<HttpServerHandle> {
   const quiet = options?.quiet ?? false;
-  const store = createStore(options?.dbPath);
+  const store = createResilientStore(options?.dbPath);
   const loadedControl = loadMcpControlPlaneConfig();
   const mcpControl = resolveMcpServerControl(KINDX_MCP_SERVER_ID, loadedControl);
   const controlHeaders = buildResolvedHttpHeaders(mcpControl);

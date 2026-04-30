@@ -16,9 +16,13 @@ import type {
   Queryable,
   RerankDocument,
   RerankResult,
-  QueryType
+  QueryType,
+  ModelUsage
 } from "./inference.js";
 import { formatQueryForEmbedding, formatDocForEmbedding, isQwen3EmbeddingModel } from "./inference.js";
+
+const _queryExpansionCache = new Map<string, Queryable[]>();
+const MAX_EXPANSION_CACHE_SIZE = 1000;
 
 function getBaseUrl(): string {
   // Default to Ollama's local OpenAI compatibility layer if not provided
@@ -77,9 +81,19 @@ export class RemoteLLM implements LLM {
         return null;
       }
 
+      const usage: ModelUsage | undefined = data.usage
+        ? {
+            prompt_tokens: data.usage.prompt_tokens ?? 0,
+            completion_tokens: data.usage.completion_tokens ?? 0,
+            total_tokens: data.usage.total_tokens ?? 0,
+            cached_tokens: data.usage.cached_tokens ?? 0,
+          }
+        : undefined;
+
       return {
         embedding: data.data[0].embedding,
         model,
+        usage,
       };
     } catch (err) {
       console.error("Remote embedding failed:", err);
@@ -115,11 +129,30 @@ export class RemoteLLM implements LLM {
         throw new Error("Invalid response format from embeddings API");
       }
 
+      const batchUsage: ModelUsage | undefined = data.usage
+        ? {
+            prompt_tokens: data.usage.prompt_tokens ?? 0,
+            completion_tokens: data.usage.completion_tokens ?? 0,
+            total_tokens: data.usage.total_tokens ?? 0,
+            cached_tokens: data.usage.cached_tokens ?? 0,
+          }
+        : undefined;
+
       // Reconstruct exactly in order. OpenAI guarantees order of data array matches input.
       for (let i = 0; i < texts.length; i++) {
         const item = data.data.find((d: any) => d.index === i) || data.data[i];
         if (item && item.embedding) {
-          results.push({ embedding: item.embedding, model });
+          // Distribute batch-level usage proportionally across items.
+          // Most endpoints report aggregate usage for the batch, not per-item.
+          const perItemUsage: ModelUsage | undefined = batchUsage
+            ? {
+                prompt_tokens: Math.round(batchUsage.prompt_tokens / texts.length),
+                completion_tokens: Math.round(batchUsage.completion_tokens / texts.length),
+                total_tokens: Math.round(batchUsage.total_tokens / texts.length),
+                cached_tokens: Math.round((batchUsage.cached_tokens ?? 0) / texts.length),
+              }
+            : undefined;
+          results.push({ embedding: item.embedding, model, usage: perItemUsage });
         } else {
           results.push(null);
         }
@@ -161,10 +194,20 @@ export class RemoteLLM implements LLM {
       const data = await res.json() as any;
       const text = data.choices?.[0]?.message?.content || "";
 
+      const usage: ModelUsage | undefined = data.usage
+        ? {
+            prompt_tokens: data.usage.prompt_tokens ?? 0,
+            completion_tokens: data.usage.completion_tokens ?? 0,
+            total_tokens: data.usage.total_tokens ?? 0,
+            cached_tokens: data.usage.cached_tokens ?? 0,
+          }
+        : undefined;
+
       return {
         text,
         model,
-        done: true
+        done: true,
+        usage,
       };
     } catch (err) {
       console.error("Remote generation failed:", err);
@@ -206,6 +249,14 @@ export class RemoteLLM implements LLM {
       const bypass: Queryable[] = [{ type: 'vec', text: query }];
       if (includeLexical) bypass.unshift({ type: 'lex', text: query });
       return bypass;
+    }
+
+    const cacheKey = `${query}|${includeLexical}|${context || ''}`;
+    if (_queryExpansionCache.has(cacheKey)) {
+      const cached = _queryExpansionCache.get(cacheKey)!;
+      _queryExpansionCache.delete(cacheKey);
+      _queryExpansionCache.set(cacheKey, cached);
+      return cached;
     }
 
     const domainInstruction = context
@@ -270,7 +321,13 @@ export class RemoteLLM implements LLM {
         ) as Queryable[];
 
         if (queryables.length > 0) {
-          return includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+          const finalResult = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');
+          if (_queryExpansionCache.size >= MAX_EXPANSION_CACHE_SIZE) {
+            const firstKey = _queryExpansionCache.keys().next().value;
+            if (firstKey) _queryExpansionCache.delete(firstKey);
+          }
+          _queryExpansionCache.set(cacheKey, finalResult);
+          return finalResult;
         }
       }
       throw new Error("Invalid output structure");

@@ -9,12 +9,14 @@ export const c = {
   green: useColor ? "\x1b[32m" : "",
   magenta: useColor ? "\x1b[35m" : "",
   blue: useColor ? "\x1b[34m" : "",
+  red: useColor ? "\x1b[31m" : "",
 };
 
 // Terminal cursor control
 export const cursor = {
   hide() { process.stderr.write('\x1b[?25l'); },
   show() { process.stderr.write('\x1b[?25h'); },
+  clearLine() { process.stderr.write('\r\x1b[K'); },
 };
 
 // Ensure cursor is restored on exit
@@ -46,6 +48,64 @@ export const progress = {
   },
 };
 
+// Zero-dependency rich terminal spinner
+export class Spinner {
+  text: string;
+  frames: string[] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  frameIndex: number = 0;
+  interval: number = 80;
+  timer: NodeJS.Timeout | null = null;
+  isTTY: boolean = process.stderr.isTTY;
+
+  constructor(text: string) {
+    this.text = text;
+  }
+
+  start(text?: string) {
+    if (text) this.text = text;
+    if (!this.isTTY) {
+      process.stderr.write(`${this.text}...\n`);
+      return this;
+    }
+    cursor.hide();
+    this.timer = setInterval(() => {
+      this.render();
+      this.frameIndex = (this.frameIndex + 1) % this.frames.length;
+    }, this.interval);
+    this.render();
+    return this;
+  }
+
+  render() {
+    cursor.clearLine();
+    process.stderr.write(`${c.cyan}${this.frames[this.frameIndex]}${c.reset} ${this.text}`);
+  }
+
+  stop(symbol: string, text?: string) {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.isTTY) {
+      cursor.clearLine();
+      process.stderr.write(`${symbol} ${text || this.text}\n`);
+    } else if (text) {
+      process.stderr.write(`${text}\n`);
+    }
+    cursor.show();
+    return this;
+  }
+
+  succeed(text?: string) { return this.stop(`${c.green}✔${c.reset}`, text); }
+  fail(text?: string) { return this.stop(`${c.red}✖${c.reset}`, text); }
+  info(text?: string) { return this.stop(`${c.blue}ℹ${c.reset}`, text); }
+  warn(text?: string) { return this.stop(`${c.yellow}⚠${c.reset}`, text); }
+}
+
+export function spinner(text: string) {
+  return new Spinner(text);
+}
+
 // Format seconds into human-readable ETA
 export function formatETA(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -76,9 +136,25 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-export function renderProgressBar(percent: number, width: number = 30): string {
-  const filled = Math.round((percent / 100) * width);
+// Upgraded rich progress bar
+export function renderProgressBar(percent: number, width: number = 30, options?: { etaSeconds?: number, prefix?: string, suffix?: string }): string {
+  const p = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((p / 100) * width);
   const empty = width - filled;
-  const bar = "█".repeat(filled) + "░".repeat(empty);
-  return bar;
+  
+  // Use block elements for a solid continuous bar
+  const bar = `${c.cyan}${"█".repeat(filled)}${c.dim}${"▒".repeat(empty)}${c.reset}`;
+  
+  let result = bar;
+  if (options?.prefix) result = `${options.prefix} ${result}`;
+  
+  const pctStr = `${c.bold}${p.toFixed(1)}%${c.reset}`;
+  result = `${result} ${pctStr}`;
+  
+  if (options?.etaSeconds !== undefined && options.etaSeconds >= 0) {
+    result += ` ${c.dim}ETA: ${formatETA(options.etaSeconds)}${c.reset}`;
+  }
+  if (options?.suffix) result += ` ${options.suffix}`;
+  
+  return result;
 }
