@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Database as MainDatabase } from "./runtime.js";
 import { openDatabase, loadSqliteVec, type Database } from "./runtime.js";
 import { getCollection, listCollections } from "./catalogs.js";
+import { atomicWriteFile } from "./utils/atomic-write.js";
 
 export type CollectionShardConfig = {
   collection: string;
@@ -194,30 +195,19 @@ export function __setCheckpointWriterForTests(
 }
 
 function writeCheckpoint(path: string, checkpoint: ShardCheckpoint): void {
-  mkdirSync(dirname(path), { recursive: true });
   checkpoint.updatedAt = new Date().toISOString();
-  const tmpPath = `${path}.tmp`;
   const data = JSON.stringify(checkpoint, null, 2);
 
-  // If a test writer is injected, use it directly (preserves fault-injection test seam)
+  // If a test writer is injected, preserve the fault-injection seam.
   if (checkpointWriteFile !== writeFileSync) {
+    const tmpPath = `${path}.tmp`;
     checkpointWriteFile(tmpPath, data, "utf-8");
     renameSync(tmpPath, path);
     return;
   }
 
-  // F-INT-3: Atomic checkpoint write with fsync for crash durability
-  let fd: number | null = null;
-  try {
-    fd = openSync(tmpPath, "w", 0o644);
-    writeSync(fd, data);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== null) {
-      try { closeSync(fd); } catch {}
-    }
-  }
-  renameSync(tmpPath, path);
+  // F-INT-3: Atomic checkpoint write with fsync for crash durability.
+  atomicWriteFile(path, data);
 }
 
 function parseVectorDimensions(mainDb: MainDatabase): number {

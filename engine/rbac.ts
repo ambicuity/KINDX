@@ -19,11 +19,12 @@
  *   collection restrictions.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, renameSync, openSync, writeSync, fsyncSync, closeSync, promises as fsp } from "fs";
+import { existsSync, readFileSync, statSync, promises as fsp } from "node:fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomBytes, createHash } from "crypto";
 import YAML from "yaml";
+import { atomicWriteFile } from "./utils/atomic-write.js";
 
 // =============================================================================
 // Types
@@ -261,40 +262,10 @@ export function loadTenantRegistry(): TenantRegistry {
 }
 
 export function saveTenantRegistry(registry: TenantRegistry): void {
-  const configDir = getConfigDir();
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-  }
-
   const filePath = getTenantsFilePath();
-  const tempPath = `${filePath}.tmp.${Date.now()}`;
   const yaml = YAML.stringify(registry, { indent: 2, lineWidth: 0 });
-  
-  let fd: number | null = null;
-  try {
-    fd = openSync(tempPath, "w", 0o600);
-    writeSync(fd, yaml, null, "utf8");
-    fsyncSync(fd);
-  } finally {
-    if (fd !== null) {
-      try { closeSync(fd); } catch (e) {}
-    }
-  }
-  
-  renameSync(tempPath, filePath);
-
-  // fsync the directory to ensure the rename is durable against power failure
-  let dirFd: number | null = null;
-  try {
-    dirFd = openSync(configDir, "r");
-    fsyncSync(dirFd);
-  } catch (e) {
-    // Ignore errors for OSes that don't support directory fsync
-  } finally {
-    if (dirFd !== null) {
-      try { closeSync(dirFd); } catch (e) {}
-    }
-  }
+  // Tenants file holds bearer-token hashes — owner-only.
+  atomicWriteFile(filePath, yaml, { mode: 0o600 });
   const stat = statSync(filePath);
   _cachedRegistry = registry;
   _lastRegistryMtime = stat.mtimeMs;
