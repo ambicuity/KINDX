@@ -629,8 +629,11 @@ export function enforce(
   operation: RBACOperation,
   collectionName?: string,
 ): void {
-  enforceRateLimit(identity.tenantId, operation);
-
+  // Tier-1: permission check FIRST. Previously rate-limit ran before
+  // permission, so an adversary holding a valid low-privilege token could
+  // burn the tenant's per-second quota on operations they were never
+  // allowed to perform — denying the legitimate user service while masking
+  // the underlying RBAC denial behind a 429.
   if (!isPermitted(identity, operation)) {
     throw new RBACDeniedError(
       `Tenant '${identity.tenantId}' (role=${identity.role}) is not permitted to perform '${operation}'`
@@ -642,6 +645,9 @@ export function enforce(
       `Tenant '${identity.tenantId}' does not have access to collection '${collectionName}'`
     );
   }
+
+  // Only authorized operations consume the rate-limit budget.
+  enforceRateLimit(identity.tenantId, operation);
 }
 
 // =============================================================================

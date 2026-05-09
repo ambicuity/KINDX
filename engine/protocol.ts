@@ -2620,7 +2620,11 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           collections: effectiveCollections.length,
           encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
         }));
-        const sessionKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
+        // Tier-1: when no MCP session ID is present, use a per-request UUID
+        // rather than the socket remoteAddress. Behind a reverse proxy all
+        // anonymous traffic shares one bucket, and request dedupe coalescing
+        // could return one client's results to another.
+        const sessionKey = String(nodeReq.headers["mcp-session-id"] || `anon-${randomUUID()}`);
         const dedupeKey = stableHash({
           searches: subSearches,
           collections: effectiveCollections,
@@ -2762,7 +2766,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           const started = Date.now();
           const profilePolicy = resolveProfilePolicy(routingProfile, params.candidateLimit);
           const effectiveTimeout = resolveTimeoutByProfile(queryTimeoutMs, routingProfile);
-          const scopeKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
+          // Tier-1: per-request UUID instead of socket remoteAddress for
+          // anonymous traffic — same reasoning as the /query dedupe key.
+          const scopeKey = String(nodeReq.headers["mcp-session-id"] || `anon-${randomUUID()}`);
 
           try {
             const rawResults = await withLLMScope(
@@ -2988,11 +2994,25 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         const isToolsList = body?.method === "tools/list";
         const cacheLookup = accountAndWorkspace(headers, activeContext);
+        // Tier-1: include the requesting tenant's role + a stable hash of the
+        // allowedCollections set in the cache key. The previous key omitted
+        // both, so two tenants on the same workspace with different
+        // permissions saw each other's filtered tool list — a cross-role
+        // tool-visibility leak.
+        const allowedCollectionsKey = !requestIdentity
+          ? "anon"
+          : requestIdentity.allowedCollections === "*"
+            ? "*"
+            : createHash("sha256")
+                .update([...requestIdentity.allowedCollections].sort().join("\n"))
+                .digest("hex").slice(0, 16);
         const toolListCacheKey = toolListCache.buildKey({
           accountId: cacheLookup.accountId,
           workspaceId: cacheLookup.workspaceId,
           projectHash: mcpControl.project_hash,
           serverFingerprint: mcpControl.config_hash,
+          role: requestIdentity?.role ?? "anon",
+          allowedCollections: allowedCollectionsKey,
         });
         if (isToolsList) {
           const cached = toolListCache.get(toolListCacheKey);

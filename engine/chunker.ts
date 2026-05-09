@@ -86,16 +86,22 @@ export function scanBreakPoints(text: string): BreakPoint[] {
  */
 export function findCodeFences(text: string): CodeFenceRegion[] {
   const regions: CodeFenceRegion[] = [];
-  const fencePattern = /\n```/g;
+  // Tier-1: match a fence at the start of the document OR after a newline.
+  // Previous regex `/\n```/` missed a fence at offset 0, so chunks could be
+  // split inside code blocks for files that began with ```.
+  const fencePattern = /(^|\n)```/g;
   let inFence = false;
   let fenceStart = 0;
 
   for (const match of text.matchAll(fencePattern)) {
+    // The fence body starts where ``` begins, not where the leading newline is.
+    const fenceOpenAt = (match.index ?? 0) + (match[1] ? match[1].length : 0);
+    const fenceCloseAt = (match.index ?? 0) + match[0].length;
     if (!inFence) {
-      fenceStart = match.index!;
+      fenceStart = fenceOpenAt;
       inFence = true;
     } else {
-      regions.push({ start: fenceStart, end: match.index! + match[0].length });
+      regions.push({ start: fenceStart, end: fenceCloseAt });
       inFence = false;
     }
   }
