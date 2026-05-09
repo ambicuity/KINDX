@@ -94,14 +94,16 @@ export function findCodeFences(text: string): CodeFenceRegion[] {
   let fenceStart = 0;
 
   for (const match of text.matchAll(fencePattern)) {
-    // The fence body starts where ``` begins, not where the leading newline is.
-    const fenceOpenAt = (match.index ?? 0) + (match[1] ? match[1].length : 0);
-    const fenceCloseAt = (match.index ?? 0) + match[0].length;
+    // Preserve the previous semantics for boundary inputs: fence start is at
+    // match.index (which equals 0 for a fence at offset 0, and the position
+    // of the leading newline otherwise). End is one past the close fence.
+    const idx = match.index ?? 0;
+    const closeAt = idx + match[0].length;
     if (!inFence) {
-      fenceStart = fenceOpenAt;
+      fenceStart = idx;
       inFence = true;
     } else {
-      regions.push({ start: fenceStart, end: fenceCloseAt });
+      regions.push({ start: fenceStart, end: closeAt });
       inFence = false;
     }
   }
