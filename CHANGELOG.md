@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5](https://github.com/ambicuity/KINDX/compare/v1.3.4...v1.3.5) (2026-05-09)
+
+
+### Features
+
+* integrate KINDX reliability and release surface updates ([23ae8fb](https://github.com/ambicuity/KINDX/commit/23ae8fbf5f5cb7bb7e016d09e6f8c9286ea68055))
+
+
+### Bug Fixes
+
+* **engine:** PR2 part A+B — concurrency leaks + network hardening ([63c788b](https://github.com/ambicuity/KINDX/commit/63c788b24eb9cdc6386e9f28bdb3062bcb219a52))
+* **engine:** PR2 part C — correctness fixes ([3c02cf5](https://github.com/ambicuity/KINDX/commit/3c02cf57b778071bcf8ab27151c9bff7ec58379c))
+* **engine:** PR2 part D — performance cliffs ([d7802d2](https://github.com/ambicuity/KINDX/commit/d7802d222eeb5aebe7fbc32e2d8354af6a20d4cb))
+* **engine:** PR2 part E — security extras ([ac95bc5](https://github.com/ambicuity/KINDX/commit/ac95bc51627a568470d4a62c35c71351e9fcfd9d))
+* **engine:** PR3 — Tier-2 cleanup, process hygiene, cross-cutting ([224f72c](https://github.com/ambicuity/KINDX/commit/224f72ceff35be722d8f674501b559b5c2ae9343))
+* **engine:** Tier-0 stop-the-line fixes (1/3) — vector wipe, schema drops, openclaw RCE ([7140036](https://github.com/ambicuity/KINDX/commit/71400365072881f6119df014eca44600ba7673ea))
+* **engine:** Tier-0 stop-the-line fixes (2/3) — encryption backup leak, RBAC token weakness ([db3efa4](https://github.com/ambicuity/KINDX/commit/db3efa449327f1543f0c88114b076f72ea0b26a4))
+* **engine:** Tier-0 stop-the-line fixes (3/3) — sharding, HTTP, remote-llm, repository, migrate ([3dd5b7b](https://github.com/ambicuity/KINDX/commit/3dd5b7b2661bacd2bc81b9db96ec171a327de844))
+* **engine:** tier-1 concurrency / network / correctness / perf / security fixes ([8a663c1](https://github.com/ambicuity/KINDX/commit/8a663c1a7f2f47af64e4efd70e5e0f3537a7be0b))
+* **engine:** tier-2 cleanup and cross-cutting hygiene ([bb28561](https://github.com/ambicuity/KINDX/commit/bb28561263fcf63d290aa385d52b7c6aaec8de00))
+
 ## [1.3.4] - 2026-04-21
 
 ### Added
