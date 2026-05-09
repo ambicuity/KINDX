@@ -146,8 +146,14 @@ export async function migrateChroma(
         const contentHash = createHash("sha256").update(docText).digest("hex");
         const now = new Date().toISOString();
 
-        // Use the Chroma collection name as a prefix to avoid collisions if targetCollectionName is generic
-        const normalizedPath = `${row.chroma_collection || 'import'}/${path}`.replace(/[^a-zA-Z0-9/._-]/g, '_');
+        // Tier-2: preserve the original Unicode path. The previous regex
+        // `[^a-zA-Z0-9/._-] -> _` collapsed `a/b` and `a-b` to the same
+        // key, silently colliding non-ASCII filenames into one row. We use
+        // parameterized SQL throughout so non-ASCII path characters are
+        // safe to store verbatim. Drop only path-control chars and the
+        // SQLite-incompatible NUL.
+        const normalizedPath = `${row.chroma_collection || 'import'}/${path}`
+          .replace(/[\x00-\x1F\x7F]/g, "_");
 
         // Tier-0-12: idempotency. If we crashed mid-run last time and the
         // user re-invokes the migration, the previous code threw on the

@@ -426,6 +426,14 @@ export class McpToolListCache {
 
   private enqueueDiskTask(task: () => Promise<void>): void {
     if (this.pendingTasks.length > 1000) {
+      // Tier-2: surface drops as a Prometheus counter, not just a one-shot
+      // warn-cache entry. Operators previously had no way to observe how
+      // often the queue was overflowing; cache writes silently disappeared
+      // and the cache could be perpetually stale with no signal.
+      try {
+        const { incCounter } = require("./utils/metrics.js");
+        incCounter("mcp_control_plane_task_dropped_total", 1);
+      } catch { /* metrics module load failure is itself a problem we don't want to compound */ }
       warnCache("queue_full", "global", "disk task queue limit reached, dropping task");
       return;
     }

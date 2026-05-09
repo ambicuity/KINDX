@@ -200,10 +200,14 @@ export function flushAiUsageQueue() {
   }
 }
 
-// Ensure flush on exit
+// Tier-2: flush usage queue on natural process exit only. The previous
+// implementation also installed SIGINT/SIGTERM handlers that called
+// process.exit(0) — overriding any other shutdown handler the host had
+// registered (CLI cursor cleanup, MCP daemon graceful drain, embedding
+// host's own teardown). Embedded consumers are now in control of the
+// signal lifecycle; only the on('exit') flush survives, which runs on
+// any exit path (including SIGINT/SIGTERM via the host's own handlers).
 process.on('exit', flushAiUsageQueue);
-process.on('SIGINT', () => { flushAiUsageQueue(); process.exit(0); });
-process.on('SIGTERM', () => { flushAiUsageQueue(); process.exit(0); });
 
 export function calculateCostUsd(model: string, inputTokens: number, outputTokens: number, cachedTokens: number = 0): number | null {
   const modelLower = model.toLowerCase();

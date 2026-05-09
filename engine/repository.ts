@@ -1538,9 +1538,13 @@ export function deactivateDocument(db: Database, collectionName: string, path: s
     .run(collectionName, path);
     
   if (res.changes > 0) {
-    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat
+    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat.
+    // Tier-2: replace silent catch with quietWarn so cleanup failures are
+    // visible via /metrics (was a black hole — the cleanup may run after
+    // store.close() and throw on a closed handle).
     setTimeout(() => {
-      try { cleanupOrphanedVectors(db); } catch {}
+      try { cleanupOrphanedVectors(db); }
+      catch (e) { quietWarn("repository.cleanup_orphaned_vectors_failed", { err: errString(e) }); }
     }, 0);
   }
 }

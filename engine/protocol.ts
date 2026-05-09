@@ -2282,7 +2282,17 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           logger.info(`Session ${sid} cleaned up`);
         }
       }
-      void disposeSensitiveContexts().catch(() => {});
+      // Tier-2: surface a sensitive-context cleanup failure as a quietWarn
+      // counter rather than silently dropping it. A failure here means
+      // session-scoped secrets may still be in memory.
+      void disposeSensitiveContexts().catch((err) => {
+        try {
+          const { quietWarn } = require("./utils/quiet-warn.js");
+          quietWarn("session.dispose_sensitive_contexts_failed", {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        } catch { /* metrics module load failure shouldn't crash teardown */ }
+      });
     };
 
     return transport;

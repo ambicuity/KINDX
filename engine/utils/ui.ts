@@ -19,17 +19,23 @@ export const cursor = {
   clearLine() { process.stderr.write('\r\x1b[K'); },
 };
 
-// Ensure cursor is restored on exit
+// Tier-2: cursor cleanup is opt-in via registerCursorCleanup() rather than
+// installed at import time. The previous implementation installed SIGINT /
+// SIGTERM handlers as a side effect of importing this module, AND called
+// process.exit() inside them — which (a) silently overrides any host
+// program's own shutdown handlers when this module is imported, and (b)
+// makes the engine unembeddable. The CLI entrypoint (`bin/kindx`) is the
+// only caller that should opt in.
 let _signalsRegistered = false;
 export function registerCursorCleanup(): void {
   if (typeof process === "undefined" || _signalsRegistered) return;
-  const isCli = process.title === "node" && !process.env.VITEST && !process.env.NODE_ENV?.includes("test");
-  if (!isCli) return;
   _signalsRegistered = true;
+  // Once registered, we own the SIGINT/SIGTERM exit code — that's the
+  // contract callers (the CLI entrypoint) opt into. Library callers
+  // simply never call this function.
   process.on('SIGINT', () => { cursor.show(); process.exit(130); });
   process.on('SIGTERM', () => { cursor.show(); process.exit(143); });
 }
-registerCursorCleanup();
 
 // Terminal progress bar using OSC 9;4 escape sequence (TTY only)
 const isTTY = process.stderr.isTTY;

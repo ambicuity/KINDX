@@ -308,8 +308,10 @@ export class RemoteLLM implements LLM {
 
   async generate(prompt: string, options?: GenerateOptions): Promise<GenerateResult | null> {
     const model = options?.model || this.generateModel;
-    const max_tokens = options?.maxTokens || 150;
-    const temperature = options?.temperature || 0.7;
+    // Tier-2: ?? not || so callers explicitly passing maxTokens=0 / temperature=0
+    // (greedy decoding) aren't silently overridden by the defaults.
+    const max_tokens = options?.maxTokens ?? 150;
+    const temperature = options?.temperature ?? 0.7;
 
     try {
       const res = await fetchWithTimeout(`${getBaseUrl()}/chat/completions`, {
