@@ -335,12 +335,18 @@ export class McpToolListCache {
     workspaceId?: string | null;
     projectHash: string;
     serverFingerprint: string;
+    /** RBAC role of the requesting identity, or "anon" when unauthenticated. */
+    role?: string;
+    /** Stable hash of allowedCollections (or "*" for wildcard, "anon" for unauth). */
+    allowedCollections?: string;
   }): string {
     return stableHash({
       accountId: parts.accountId || null,
       workspaceId: parts.workspaceId || null,
       projectHash: parts.projectHash,
       serverFingerprint: parts.serverFingerprint,
+      role: parts.role || "anon",
+      allowedCollections: parts.allowedCollections || "anon",
     });
   }
 

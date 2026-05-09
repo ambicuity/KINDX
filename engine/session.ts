@@ -15,6 +15,7 @@
 
 import { getDefaultLLM, formatQueryForEmbedding } from "./inference.js";
 import type { EmbeddingResult } from "./inference.js";
+import { BoundedCache } from "./utils/bounded-cache.js";
 
 // =============================================================================
 // Types
@@ -66,10 +67,17 @@ export class KindxSession {
    * Key: `q:<text>` for queries, `d:<text>` for documents.
    * Value: embedding vector (number[]).
    *
-   * This avoids re-embedding identical queries within a session.
-   * Cache is unbounded per-session; the session itself is bounded by connection lifetime.
+   * Bounded LRU — long-lived sessions calling embed on many distinct strings
+   * previously grew this Map without bound (~1.5 KB per entry × thousands ->
+   * heap pressure). Cap is configurable via KINDX_SESSION_EMBED_CACHE_MAX
+   * (default 2000 entries — ~3 MB at 768-dim float).
    */
-  private readonly _embeddingCache = new Map<string, number[]>();
+  private readonly _embeddingCache: BoundedCache<number[]> = new BoundedCache({
+    maxItems: (() => {
+      const raw = parseInt(process.env.KINDX_SESSION_EMBED_CACHE_MAX || "", 10);
+      return Number.isFinite(raw) && raw > 0 ? raw : 2000;
+    })(),
+  });
 
   /**
    * Query log for context enrichment.
@@ -128,7 +136,7 @@ export class KindxSession {
   async cachedEmbed(text: string, isQuery: boolean = true): Promise<number[] | null> {
     const cacheKey = `${isQuery ? "q" : "d"}:${text}`;
     const cached = this._embeddingCache.get(cacheKey);
-    if (cached !== undefined) {
+    if (cached !== undefined && cached !== null) {
       return cached;
     }
 
@@ -156,7 +164,8 @@ export class KindxSession {
    * Useful for checking before making an LLM call.
    */
   getCachedEmbedding(text: string, isQuery: boolean = true): number[] | null {
-    return this._embeddingCache.get(`${isQuery ? "q" : "d"}:${text}`) ?? null;
+    const v = this._embeddingCache.get(`${isQuery ? "q" : "d"}:${text}`);
+    return v ?? null;
   }
 
   /** Number of entries currently in the embedding cache. */

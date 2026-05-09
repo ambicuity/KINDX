@@ -1,6 +1,49 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, isAbsolute } from "node:path";
+
+/**
+ * Validate the path to the Python interpreter before spawning. Defends
+ * against an attacker who can influence KINDX_ARCH_PYTHON_BIN (CI runner,
+ * dotenv file, parent shell) supplying a path to an arbitrary binary.
+ *
+ * Rules:
+ *   - must be an absolute path (no PATH lookup)
+ *   - must exist and be a regular file
+ *   - must not contain shell metacharacters (defense-in-depth even though
+ *     spawn() doesn't shell-interpret unless `shell: true`)
+ *   - when KINDX_ARCH_PYTHON_BIN_ALLOWLIST is set (colon-separated list),
+ *     the resolved path must be in that list
+ */
+function validatePythonBin(rawBin: string): string {
+  if (typeof rawBin !== "string" || rawBin.trim().length === 0) {
+    throw new Error(`arch.python_bin invalid: empty path`);
+  }
+  if (/[;&|`$\n\r><(){}*[\]!#\\"]/.test(rawBin)) {
+    throw new Error(`arch.python_bin contains shell metacharacters: ${JSON.stringify(rawBin)}`);
+  }
+  if (!isAbsolute(rawBin)) {
+    throw new Error(`arch.python_bin must be an absolute path (got ${JSON.stringify(rawBin)})`);
+  }
+  const abs = resolve(rawBin);
+  if (!existsSync(abs)) {
+    throw new Error(`arch.python_bin does not exist: ${abs}`);
+  }
+  const s = statSync(abs);
+  if (!s.isFile()) {
+    throw new Error(`arch.python_bin is not a regular file: ${abs}`);
+  }
+  const allowlistRaw = process.env.KINDX_ARCH_PYTHON_BIN_ALLOWLIST;
+  if (allowlistRaw && allowlistRaw.trim().length > 0) {
+    const allowed = allowlistRaw.split(":").map((p) => resolve(p.trim())).filter(Boolean);
+    if (!allowed.includes(abs)) {
+      throw new Error(
+        `arch.python_bin ${abs} not in KINDX_ARCH_PYTHON_BIN_ALLOWLIST`
+      );
+    }
+  }
+  return abs;
+}
 
 export type ArchBuildOptions = {
   pythonBin: string;
@@ -87,11 +130,19 @@ export async function runArchBuild(options: ArchBuildOptions): Promise<ArchBuild
   const graphJsonPath = resolve(outputDir, "graph.json");
   const reportPath = resolve(outputDir, "GRAPH_REPORT.md");
 
+  // Tier-1: validate the python interpreter path before spawn. Previously
+  // KINDX_ARCH_PYTHON_BIN flowed straight into spawn() — an attacker who
+  // could influence the env (CI runner, dotenv files) could execute an
+  // arbitrary binary. We require: an absolute path, that it exists, that
+  // it is a regular file, and (when KINDX_ARCH_PYTHON_BIN_ALLOWLIST is
+  // set) that it is in the allow-list.
+  const pythonBin = validatePythonBin(options.pythonBin);
+
   const script = buildPythonScript();
   const args = ["-c", script, repoPath, sourceRoot, outputDir];
-  const command = `${options.pythonBin} -c <arch_pipeline> ${repoPath} ${sourceRoot} ${outputDir}`;
+  const command = `${pythonBin} -c <arch_pipeline> ${repoPath} ${sourceRoot} ${outputDir}`;
 
-  const child = spawn(options.pythonBin, args, {
+  const child = spawn(pythonBin, args, {
     cwd: sourceRoot,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],

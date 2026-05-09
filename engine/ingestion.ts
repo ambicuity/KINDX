@@ -141,6 +141,13 @@ function ingestPdf(path: string): IngestionResult {
   };
 }
 
+// Tier-1: cap raw text-file ingestion to defend against accidentally indexing
+// gigabyte log files. Default 25 MiB; override with KINDX_MAX_DOC_BYTES.
+const MAX_DOC_BYTES = (() => {
+  const raw = parseInt(process.env.KINDX_MAX_DOC_BYTES || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 25 * 1024 * 1024;
+})();
+
 export function ingestFile(path: string): IngestionResult {
   const ext = extname(path).toLowerCase();
   const bytes = statSync(path).size;
@@ -149,7 +156,18 @@ export function ingestFile(path: string): IngestionResult {
   if (ext === ".docx") return ingestDocx(path);
 
   if (TEXT_EXTENSIONS.has(ext) || ext === "") {
-    const text = readFileSync(path, "utf-8");
+    if (bytes > MAX_DOC_BYTES) {
+      return {
+        text: "",
+        metadata: { format: ext || "text", extractor: "native_utf8_skipped_oversize", bytes },
+        warnings: [`extractor_doc_too_large:${bytes}>${MAX_DOC_BYTES}`],
+      };
+    }
+    let text = readFileSync(path, "utf-8");
+    // Strip UTF-8 BOM (﻿) so it doesn't end up in the indexed body and
+    // disturb FTS tokenization. node's "utf-8" decoder preserves the BOM as
+    // a literal U+FEFF in the output string.
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     return {
       text,
       metadata: { format: ext || "text", extractor: "native_utf8", bytes },
