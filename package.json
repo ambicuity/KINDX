@@ -14,7 +14,9 @@
     "dist/",
     "capabilities/kindx/",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "README.md",
+    "AGENT.md"
   ],
   "scripts": {
     "prepare": "[ -d .git ] && ./tooling/install-hooks.sh || true",
