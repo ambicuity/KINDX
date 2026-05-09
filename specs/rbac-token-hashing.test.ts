@@ -16,7 +16,7 @@ let rbac: typeof import("../engine/rbac.js");
 let tmpDir: string;
 const origConfigDir = process.env.KINDX_CONFIG_DIR;
 const origSecret = process.env.KINDX_TENANT_SECRET;
-let stderrSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: any;
 
 beforeEach(async () => {
   tmpDir = join(tmpdir(), `kindx-rbac-tok-${randomBytes(4).toString("hex")}`);

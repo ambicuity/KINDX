@@ -8,7 +8,7 @@ import {
 } from "../engine/utils/quiet-warn.js";
 import { renderPrometheusMetrics } from "../engine/utils/metrics.js";
 
-let stderrSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: any;
 
 beforeEach(() => {
   resetQuietWarnForTests();
@@ -47,7 +47,7 @@ describe("quietWarn", () => {
     for (let i = 0; i < 12; i++) quietWarn("test.rate");
     // Should log on the 1st, 5th, 10th occurrences (3 times).
     const logCalls = stderrSpy.mock.calls.filter(
-      ([msg]) => typeof msg === "string" && msg.includes("test.rate")
+      ([msg]: [unknown]) => typeof msg === "string" && msg.includes("test.rate")
     );
     expect(logCalls.length).toBe(3);
     // Counter still tracks every occurrence.
@@ -57,7 +57,7 @@ describe("quietWarn", () => {
   test("ctx is logged as structured metadata, Error replaced with message", () => {
     quietWarn("test.ctx", { err: new Error("boom"), tenant: "acme" });
     const written = stderrSpy.mock.calls
-      .map(([m]) => (typeof m === "string" ? m : ""))
+      .map(([m]: [unknown]) => (typeof m === "string" ? m : ""))
       .join("");
     expect(written).toContain('"err":"boom"');
     expect(written).toContain('"tenant":"acme"');

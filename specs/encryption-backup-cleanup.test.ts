@@ -22,7 +22,7 @@ import {
   cleanupStalePlaintextBackups,
 } from "../engine/encryption.js";
 
-let stderrSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: any;
 
 beforeEach(() => {
   stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);

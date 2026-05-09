@@ -122,5 +122,5 @@ jobs:
           printf "# Cipher Smoke\n\nhello world\n" > /tmp/kindx-corpus/smoke.md
           node dist/kindx.js collection add /tmp/kindx-corpus --name smoke --mask "**/*.md"
           node dist/kindx.js update
-          KINDX_ENCRYPTION_KEY="ci-smoke-key" node dist/kindx.js status
+          KINDX_ENCRYPTION_KEY="ci-smoke-key-16chars-or-more" node dist/kindx.js status
           node -e "const fs=require('fs');const h=fs.readFileSync('/tmp/kindx-cache/index.sqlite').subarray(0,16).toString('ascii'); if(h==='SQLite format 3\\u0000'){throw new Error('index is still plaintext');}"

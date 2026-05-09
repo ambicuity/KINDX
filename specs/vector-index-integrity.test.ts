@@ -28,7 +28,7 @@ function makeMismatchedDb(): Database.Database {
   return db;
 }
 
-let stderrSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: any;
 
 beforeEach(() => {
   resetQuietWarnForTests();
@@ -45,7 +45,7 @@ describe("ensureVectorIndexIntegrity", () => {
   test("returns no-mismatch when vectors_vec table is absent", () => {
     const db = new Database(":memory:");
     try {
-      const r = ensureVectorIndexIntegrity(db);
+      const r = ensureVectorIndexIntegrity(db as any);
       expect(r).toEqual({ mismatch: false, rebuilt: false, contentCount: 0, indexCount: 0 });
     } finally { db.close(); }
   });
@@ -53,7 +53,7 @@ describe("ensureVectorIndexIntegrity", () => {
   test("DEFAULT: refuses to delete on parity mismatch and emits warning", () => {
     const db = makeMismatchedDb();
     try {
-      const r = ensureVectorIndexIntegrity(db);
+      const r = ensureVectorIndexIntegrity(db as any);
       expect(r.mismatch).toBe(true);
       expect(r.rebuilt).toBe(false);
       expect(r.contentCount).toBe(2);
@@ -63,7 +63,7 @@ describe("ensureVectorIndexIntegrity", () => {
       expect(content.c).toBe(2);
       // Warning logged + counter bumped
       expect(getQuietWarnCount("repository.vec_parity_mismatch")).toBe(1);
-      const warnText = stderrSpy.mock.calls.map(c => c[0]).join("");
+      const warnText = stderrSpy.mock.calls.map((c: any[]) => c[0]).join("");
       expect(warnText).toContain("vector index parity mismatch");
       expect(warnText).toContain("KINDX_REPAIR=1");
     } finally { db.close(); }
@@ -73,7 +73,7 @@ describe("ensureVectorIndexIntegrity", () => {
     process.env.KINDX_REPAIR = "1";
     const db = makeMismatchedDb();
     try {
-      const r = ensureVectorIndexIntegrity(db);
+      const r = ensureVectorIndexIntegrity(db as any);
       expect(r.mismatch).toBe(true);
       expect(r.rebuilt).toBe(true);
       const content = db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number };
@@ -84,7 +84,7 @@ describe("ensureVectorIndexIntegrity", () => {
   test("opts.repair: true rebuilds without env var", () => {
     const db = makeMismatchedDb();
     try {
-      const r = ensureVectorIndexIntegrity(db, { repair: true });
+      const r = ensureVectorIndexIntegrity(db as any, { repair: true });
       expect(r.rebuilt).toBe(true);
       const content = db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number };
       expect(content.c).toBe(0);
@@ -97,7 +97,7 @@ describe("ensureVectorIndexIntegrity", () => {
       db.exec(`CREATE TABLE content_vectors (hash TEXT, seq INTEGER, embedding BLOB)`);
       db.exec(`CREATE TABLE vectors_vec (hash_seq TEXT, embedding BLOB)`);
       // Both empty -> no mismatch
-      const r = ensureVectorIndexIntegrity(db);
+      const r = ensureVectorIndexIntegrity(db as any);
       expect(r.mismatch).toBe(false);
       expect(r.rebuilt).toBe(false);
     } finally { db.close(); }

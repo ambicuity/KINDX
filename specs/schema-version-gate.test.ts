@@ -15,7 +15,7 @@ import { initializeCoreSchema } from "../engine/schema.js";
 import { getUserVersion, KINDX_SCHEMA_VERSION } from "../engine/utils/schema-version.js";
 import { resetQuietWarnForTests, getQuietWarnCount } from "../engine/utils/quiet-warn.js";
 
-let stderrSpy: ReturnType<typeof vi.spyOn>;
+let stderrSpy: any;
 
 beforeEach(() => {
   resetQuietWarnForTests();
@@ -55,7 +55,7 @@ describe("initializeCoreSchema schema-version gate", () => {
         .get();
       expect(stillThere).toBeUndefined();
       expect(getQuietWarnCount("schema.dropping_legacy_table_with_rows")).toBe(2);
-      const warnText = stderrSpy.mock.calls.map(c => c[0]).join("");
+      const warnText = stderrSpy.mock.calls.map((c: any[]) => c[0]).join("");
       expect(warnText).toContain("legacy table");
     } finally { db.close(); }
   });
