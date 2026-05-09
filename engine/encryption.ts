@@ -110,11 +110,15 @@ export function ensureEncryptedIndexReady(indexPath: string): void {
     }
   }
 
+  // Sweep stale plaintext backups left by aborted prior runs (older than 24h).
+  cleanupStalePlaintextBackups(path);
+
+  let backupPath: string | null = null;
   try {
-    const backupPath = `${path}.plaintext.backup.${Date.now()}`;
+    backupPath = `${path}.plaintext.backup.${Date.now()}`;
     const tempEncrypted = `${path}.enc.tmp`;
     mkdirSync(dirname(path), { recursive: true });
-    
+
     // Safe backup: VACUUM INTO creates a consistent backup and handles WAL properly.
     const initialDb = openWithoutRuntimeKey(path);
     try {
@@ -143,7 +147,14 @@ export function ensureEncryptedIndexReady(indexPath: string): void {
       copyFileSync(backupPath, path);
     }
 
-    if (isLikelyEncryptedSqlite(path)) return;
+    if (isLikelyEncryptedSqlite(path)) {
+      // Rekey succeeded — the backup is now an unencrypted COPY of the index
+      // sitting next to the encrypted file. Defeats encryption-at-rest if
+      // left in place. Delete it (best-effort).
+      removePlaintextBackup(backupPath);
+      backupPath = null;
+      return;
+    }
 
     // Compatibility fallback for runtimes that require export-based conversion.
     const exportDb = openWithoutRuntimeKey(path);
@@ -198,8 +209,67 @@ export function ensureEncryptedIndexReady(indexPath: string): void {
 
     // F-002: Ensure atomic configuration management via POSIX fsync.
     syncParentDirectoryAfterRename(path);
+
+    // Export-fallback path also succeeds here — drop the plaintext backup.
+    if (backupPath) {
+      removePlaintextBackup(backupPath);
+      backupPath = null;
+    }
   } finally {
     try { if (existsSync(lockPath)) unlinkSync(lockPath); } catch {}
+  }
+}
+
+/**
+ * Removes a plaintext backup created during the rekey flow. Best-effort: a
+ * failure to unlink (e.g. file held open on Windows) is logged via quietWarn
+ * so the operator can find and shred it manually rather than discovering it
+ * months later.
+ */
+function removePlaintextBackup(backupPath: string): void {
+  try {
+    if (existsSync(backupPath)) unlinkSync(backupPath);
+  } catch (err) {
+    process.stderr.write(
+      `KINDX Warning: failed to delete plaintext backup ${backupPath}: ${
+        err instanceof Error ? err.message : String(err)
+      }. Encryption-at-rest is compromised until this file is removed manually.\n`
+    );
+  }
+}
+
+/**
+ * Sweeps `*.plaintext.backup.<ts>` files older than 24h next to `path`.
+ * Defends against operators who upgraded across the fix and still have stale
+ * backups from before the deletion logic existed, or who hit a crash after
+ * the backup was created but before the rekey completed.
+ */
+export const STALE_BACKUP_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+export function cleanupStalePlaintextBackups(indexPath: string): void {
+  const dir = dirname(indexPath);
+  const prefix = `${indexPath}.plaintext.backup.`;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  const baseName = indexPath.split("/").pop() ?? indexPath;
+  const wanted = `${baseName}.plaintext.backup.`;
+  for (const name of entries) {
+    if (!name.startsWith(wanted)) continue;
+    const full = `${dir}/${name}`;
+    void prefix; // (silence unused warning if linter is picky)
+    try {
+      const s = statSync(full);
+      if (now - s.mtimeMs < STALE_BACKUP_THRESHOLD_MS) continue;
+      unlinkSync(full);
+      process.stderr.write(`KINDX Cleanup: removed stale plaintext backup ${full}\n`);
+    } catch {
+      // Ignore; the operator will see it on next sweep.
+    }
   }
 }
 

@@ -24,6 +24,88 @@ import { formatQueryForEmbedding, formatDocForEmbedding, isQwen3EmbeddingModel }
 const _queryExpansionCache = new Map<string, Queryable[]>();
 const MAX_EXPANSION_CACHE_SIZE = 1000;
 
+/**
+ * Parses a query-expansion response across the three shapes that
+ * OpenAI-compatible endpoints return in practice:
+ *
+ *   1. Bare JSON array:  `[ {...}, {...} ]`
+ *   2. JSON object with an array field, common when `response_format:
+ *      json_object` is enforced:
+ *        `{ "queries":   [ {...} ] }`
+ *        `{ "expansions":[ {...} ] }`
+ *        `{ "results":   [ {...} ] }`
+ *      We accept any top-level array property as the candidate list.
+ *   3. Markdown-fenced or prose-wrapped JSON: `\`\`\`json [...] \`\`\``
+ *      or `Here are the queries: [...]`. We attempt a fenced-strip and an
+ *      "extract first balanced JSON" fallback.
+ *
+ * Returns `[]` (not throws) if no parseable shape is found.
+ */
+export function parseExpansionPayload(raw: string): unknown[] {
+  if (!raw || typeof raw !== "string") return [];
+  const text = raw.trim();
+  if (text.length === 0) return [];
+
+  // Shape 1: raw is JSON.
+  try {
+    const direct = JSON.parse(text);
+    if (Array.isArray(direct)) return direct;
+    if (direct && typeof direct === "object") {
+      // Shape 2: pick the first array-valued property.
+      for (const v of Object.values(direct)) {
+        if (Array.isArray(v)) return v;
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Shape 3a: ```json ... ``` fence.
+  const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/i.exec(text);
+  if (fenced && fenced[1]) {
+    try {
+      const inner = JSON.parse(fenced[1]);
+      if (Array.isArray(inner)) return inner;
+      if (inner && typeof inner === "object") {
+        for (const v of Object.values(inner)) {
+          if (Array.isArray(v)) return v;
+        }
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Shape 3b: extract first balanced [...] or {...} substring.
+  const bracketStart = text.indexOf("[");
+  const objStart = text.indexOf("{");
+  const tryParseSlice = (open: number, openCh: string, closeCh: string): unknown[] | null => {
+    if (open < 0) return null;
+    let depth = 0;
+    for (let i = open; i < text.length; i++) {
+      if (text[i] === openCh) depth++;
+      else if (text[i] === closeCh) {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(text.slice(open, i + 1));
+            if (Array.isArray(parsed)) return parsed;
+            if (parsed && typeof parsed === "object") {
+              for (const v of Object.values(parsed)) {
+                if (Array.isArray(v)) return v;
+              }
+            }
+          } catch { /* keep searching */ }
+          return null;
+        }
+      }
+    }
+    return null;
+  };
+  const arr = tryParseSlice(bracketStart, "[", "]");
+  if (arr) return arr;
+  const obj = tryParseSlice(objStart, "{", "}");
+  if (obj) return obj;
+
+  return [];
+}
+
 function getBaseUrl(): string {
   // Default to Ollama's local OpenAI compatibility layer if not provided
   return process.env.KINDX_OPENAI_BASE_URL?.replace(/\/+$/, "") || "http://localhost:11434/v1";
@@ -301,24 +383,27 @@ export class RemoteLLM implements LLM {
 
       const data = await res.json() as any;
       const jsonText = data.choices?.[0]?.message?.content || "[]";
-      
-      let parsed = [];
-      try {
-        // In case the model wrapped it in markdown codeblocks
-        const cleaned = jsonText.replace(/^[\s\S]*?\[\s*/, "[").replace(/\][\s\S]*?$/, "]");
-        parsed = JSON.parse(cleaned);
-      } catch (parseErr) {
-        try {
-           parsed = JSON.parse(jsonText);
-        } catch { /* ignored */ }
-      }
+
+      // Tier-0-9: parse the model's output across the three shapes that
+      // OpenAI-compatible endpoints actually return.
+      //   1. A bare JSON array `[ {...}, {...} ]` (when the model is well-
+      //      behaved and `response_format` is not enforced).
+      //   2. A JSON object `{ "queries": [ ... ] }` or `{ "expansions": [...] }`
+      //      (what `response_format: json_object` typically produces).
+      //   3. JSON wrapped in markdown code fences ```json ... ``` or other
+      //      surrounding prose (legacy "stripping" path).
+      // The previous code had only case (3): a regex that tried to slice down
+      // to the first `[` ... last `]`. Against a `{...}` response that regex
+      // *removed the outer braces*, JSON.parse failed silently, and every
+      // expansion call burned tokens for nothing.
+      const parsed = parseExpansionPayload(jsonText);
 
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const queryables = parsed.filter(item => 
-          item && typeof item === 'object' && 
-          ['lex', 'vec', 'hyde'].includes(item.type) && 
-          typeof item.text === 'string'
-        ) as Queryable[];
+        const queryables = (parsed as unknown[]).filter((item): item is Queryable => {
+          if (!item || typeof item !== 'object') return false;
+          const obj = item as Record<string, unknown>;
+          return ['lex', 'vec', 'hyde'].includes(String(obj.type)) && typeof obj.text === 'string';
+        });
 
         if (queryables.length > 0) {
           const finalResult = includeLexical ? queryables : queryables.filter(q => q.type !== 'lex');

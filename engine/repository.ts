@@ -64,6 +64,8 @@ import {
   searchShardedVectorsWithDiagnostics,
 } from "./sharding.js";
 import { recordDirectUsage } from "./ai-usage.js";
+import { quietWarn, errString } from "./utils/quiet-warn.js";
+import { extractInternalLinks } from "./link-extractor.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -543,9 +545,28 @@ function initializeDatabase(db: Database): void {
   ensureVectorIndexIntegrity(db);
 }
 
-export function ensureVectorIndexIntegrity(db: Database): void {
+/**
+ * Verifies that `vectors_vec` and `content_vectors` agree on row count and
+ * hash_seq coverage.
+ *
+ * Behavior:
+ *   - On mismatch with KINDX_REPAIR=1 (or callers passing `repair: true`):
+ *     truncates both tables so the next embed run rebuilds the vector index.
+ *   - On mismatch otherwise: logs a loud warning, records an `error` counter,
+ *     and returns. Search continues to operate on what is in the tables; the
+ *     operator sees the warning and runs `KINDX_REPAIR=1 kindx ...` (or a
+ *     future `kindx repair` subcommand) to rebuild on demand.
+ *
+ * Auto-truncate was the previous default but the audit found this destroys
+ * hours of GPU embedding work on any transient mismatch (interrupted embed,
+ * schema upgrade, sharded delete) without consent.
+ */
+export function ensureVectorIndexIntegrity(
+  db: Database,
+  opts: { repair?: boolean } = {}
+): { mismatch: boolean; rebuilt: boolean; contentCount: number; indexCount: number } {
   const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableCheck) return;
+  if (!tableCheck) return { mismatch: false, rebuilt: false, contentCount: 0, indexCount: 0 };
 
   const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as any).c;
   const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as any).c;
@@ -555,23 +576,44 @@ export function ensureVectorIndexIntegrity(db: Database): void {
   if (!mismatch && contentCount > 0) {
     try {
       const missingInIndex = db.prepare(`
-        SELECT 1 FROM content_vectors 
+        SELECT 1 FROM content_vectors
         WHERE NOT EXISTS (
-          SELECT 1 FROM vectors_vec 
+          SELECT 1 FROM vectors_vec
           WHERE vectors_vec.hash_seq = content_vectors.hash || '_' || content_vectors.seq
         ) LIMIT 1
       `).get();
       if (missingInIndex) mismatch = true;
     } catch (e) {
-      // Graceful fallback if SQLite version prohibits virtual table outer joins
+      // SQLite versions that prohibit virtual-table outer joins fail this
+      // probe. Surface as a quiet warning so operators can see when the
+      // probe is silently skipped — previously this catch was a black hole.
+      quietWarn("repository.vec_parity_probe_unsupported", { err: errString(e) });
     }
   }
 
-  if (mismatch) {
-    process.stderr.write(`KINDX Recovery: vector index parity mismatch (content: ${contentCount}, index: ${indexCount}). Rebuilding...\n`);
-    db.exec(`DELETE FROM vectors_vec`);
-    db.exec(`DELETE FROM content_vectors`);
+  if (!mismatch) return { mismatch: false, rebuilt: false, contentCount, indexCount };
+
+  const repairRequested = opts.repair === true || process.env.KINDX_REPAIR === "1";
+  if (!repairRequested) {
+    quietWarn("repository.vec_parity_mismatch", {
+      content_rows: contentCount,
+      index_rows: indexCount,
+    });
+    process.stderr.write(
+      `KINDX Warning: vector index parity mismatch (content_vectors=${contentCount}, ` +
+      `vectors_vec=${indexCount}). Vector search may return incomplete results until repaired. ` +
+      `Re-run with KINDX_REPAIR=1 to rebuild.\n`
+    );
+    return { mismatch: true, rebuilt: false, contentCount, indexCount };
   }
+
+  process.stderr.write(
+    `KINDX Repair: vector index parity mismatch (content_vectors=${contentCount}, ` +
+    `vectors_vec=${indexCount}). KINDX_REPAIR=1 set — rebuilding...\n`
+  );
+  db.exec(`DELETE FROM vectors_vec`);
+  db.exec(`DELETE FROM content_vectors`);
+  return { mismatch: true, rebuilt: true, contentCount, indexCount };
 }
 
 export function isSqliteVecAvailable(): boolean {
@@ -4785,6 +4827,16 @@ async function indexSingleFile(
     const now = new Date().toISOString();
     const modifiedAt = stat.mtime.toISOString();
 
+    // Tier-0-11: Pre-compute everything BEFORE opening the write txn.
+    // The previous code did `db.exec("BEGIN")` then `await import(
+    // "./link-extractor.js")` and the link extraction inside the open txn.
+    // Yielding the event loop with a write txn open meant other watcher
+    // callbacks for parallel files hit SQLITE_BUSY and starved (or worse,
+    // the busy_timeout raced with WAL recovery). The import is now static
+    // and link extraction runs synchronously before BEGIN, so the txn
+    // body holds the write lock for microseconds, not milliseconds.
+    const links = extractInternalLinks(content, relativePath);
+
     db.exec("BEGIN TRANSACTION");
     try {
       insertContent(db, hash, content, now);
@@ -4802,13 +4854,10 @@ async function indexSingleFile(
         contentHash: hash,
         extractedAt: now,
       });
-
-      const { extractInternalLinks } = await import("./link-extractor.js");
-      const links = extractInternalLinks(content, relativePath);
       upsertDocumentLinks(db, collectionName, path, links);
 
       db.exec("COMMIT");
-      return "embedded"; // Properly enqueued for BM25 and embedding 
+      return "embedded"; // Properly enqueued for BM25 and embedding
     } catch (e) {
       db.exec("ROLLBACK");
       throw e;

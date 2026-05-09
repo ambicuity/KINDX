@@ -2,11 +2,20 @@ import type { Database } from "./runtime.js";
 import { initializeMemorySchema } from "./memory.js";
 import { initializeAuditSchema } from "./audit.js";
 import { initializeAiUsageSchema } from "./ai-usage.js";
+import { KINDX_SCHEMA_VERSION, getUserVersion, setUserVersion } from "./utils/schema-version.js";
+import { quietWarn } from "./utils/quiet-warn.js";
 
 export function initializeCoreSchema(db: Database): void {
-  // Drop legacy tables that are now managed in YAML
-  db.exec(`DROP TABLE IF EXISTS path_contexts`);
-  db.exec(`DROP TABLE IF EXISTS collections`);
+  const currentVersion = getUserVersion(db);
+  // Schema version 0 = legacy / fresh DB. Version 1 = post-YAML-migration.
+  // The legacy `path_contexts` and `collections` tables were superseded by
+  // ~/.config/kindx/index.yml in v1.0. Drop them ONCE during the v0 -> v1
+  // transition, after warning if they hold any rows. Previously this DROP
+  // ran on every initialization, silently destroying any user data that
+  // happened to exist in those tables.
+  if (currentVersion < 1) {
+    dropLegacyV0Tables(db);
+  }
 
   // Content-addressable storage - the source of truth for document content
   db.exec(`
@@ -83,12 +92,21 @@ export function initializeCoreSchema(db: Database): void {
     )
   `);
 
-  // Content vectors
+  // Content vectors. Earlier schema lacked the `seq` column. The destructive
+  // DROP path below loses every persisted embedding so it is gated on the
+  // version-zero migration window only — operators who hit this on a populated
+  // index see a counter-tracked warning and the existing tables are kept,
+  // letting them recover with `KINDX_REPAIR=1` rather than silently losing
+  // hours of GPU work on every startup.
   const cvInfo = db.prepare(`PRAGMA table_info(content_vectors)`).all() as { name: string }[];
   const hasSeqColumn = cvInfo.some(col => col.name === 'seq');
   if (cvInfo.length > 0 && !hasSeqColumn) {
-    db.exec(`DROP TABLE IF EXISTS content_vectors`);
-    db.exec(`DROP TABLE IF EXISTS vectors_vec`);
+    if (currentVersion < 1) {
+      db.exec(`DROP TABLE IF EXISTS content_vectors`);
+      db.exec(`DROP TABLE IF EXISTS vectors_vec`);
+    } else {
+      quietWarn("schema.legacy_content_vectors_seq_missing", { current_version: currentVersion });
+    }
   }
   db.exec(`
     CREATE TABLE IF NOT EXISTS content_vectors (
@@ -164,4 +182,43 @@ export function initializeCoreSchema(db: Database): void {
   setCapability.run("ann", "centroid-v1", now);
   setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
   setCapability.run("extractors", "native-text+pdf-docx-adapter-v1", now);
+
+  // Stamp schema version so future startups skip the v0 migration window.
+  if (currentVersion < KINDX_SCHEMA_VERSION) {
+    setUserVersion(db, KINDX_SCHEMA_VERSION);
+  }
+}
+
+/**
+ * v0 -> v1 migration: drop the legacy `path_contexts` and `collections`
+ * tables that were superseded by ~/.config/kindx/index.yml. Pre-emptively
+ * warns if either table holds any rows so an operator notices before data
+ * is gone.
+ */
+function dropLegacyV0Tables(db: Database): void {
+  for (const table of ["path_contexts", "collections"] as const) {
+    try {
+      const exists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`)
+        .get(table);
+      if (!exists) continue;
+      const row = db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number };
+      if (row.c > 0) {
+        quietWarn("schema.dropping_legacy_table_with_rows", {
+          table,
+          row_count: row.c,
+        });
+        process.stderr.write(
+          `KINDX Migration: dropping legacy table "${table}" (had ${row.c} rows). ` +
+          `Collections / contexts now live in ~/.config/kindx/index.yml.\n`
+        );
+      }
+      db.exec(`DROP TABLE IF EXISTS ${table}`);
+    } catch (e) {
+      quietWarn("schema.legacy_table_drop_failed", {
+        table,
+        err: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
 }

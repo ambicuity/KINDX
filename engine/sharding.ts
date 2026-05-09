@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Database as MainDatabase } from "./runtime.js";
 import { openDatabase, loadSqliteVec, type Database } from "./runtime.js";
 import { getCollection, listCollections } from "./catalogs.js";
+import { atomicWriteFile } from "./utils/atomic-write.js";
 
 export type CollectionShardConfig = {
   collection: string;
@@ -194,30 +195,19 @@ export function __setCheckpointWriterForTests(
 }
 
 function writeCheckpoint(path: string, checkpoint: ShardCheckpoint): void {
-  mkdirSync(dirname(path), { recursive: true });
   checkpoint.updatedAt = new Date().toISOString();
-  const tmpPath = `${path}.tmp`;
   const data = JSON.stringify(checkpoint, null, 2);
 
-  // If a test writer is injected, use it directly (preserves fault-injection test seam)
+  // If a test writer is injected, preserve the fault-injection seam.
   if (checkpointWriteFile !== writeFileSync) {
+    const tmpPath = `${path}.tmp`;
     checkpointWriteFile(tmpPath, data, "utf-8");
     renameSync(tmpPath, path);
     return;
   }
 
-  // F-INT-3: Atomic checkpoint write with fsync for crash durability
-  let fd: number | null = null;
-  try {
-    fd = openSync(tmpPath, "w", 0o644);
-    writeSync(fd, data);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== null) {
-      try { closeSync(fd); } catch {}
-    }
-  }
-  renameSync(tmpPath, path);
+  // F-INT-3: Atomic checkpoint write with fsync for crash durability.
+  atomicWriteFile(path, data);
 }
 
 function parseVectorDimensions(mainDb: MainDatabase): number {
@@ -816,16 +806,34 @@ export async function syncCollectionShardsFromMainDb(
           state.lastHashSeq = hashSeq;
           state.processed = processed;
           if (processed > 0 && processed % batchSize === 0) {
-            // F-001: Push COMMIT securely into checkpoint synchronization loop
+            // F-001 + Tier-0-6: cross-shard COMMIT must be atomic from the
+            // checkpoint's point of view. If any shard fails to commit, we
+            // roll back every remaining shard, record the failure, and DO
+            // NOT advance the checkpoint past the failed batch — previously
+            // the checkpoint advanced even when shard N's COMMIT threw,
+            // pointing past unwritten rows.
+            const commitErrors: string[] = [];
             for (const shard of handles) {
-              shard.exec("COMMIT");
+              try {
+                shard.exec("COMMIT");
+              } catch (cErr) {
+                commitErrors.push(cErr instanceof Error ? cErr.message : String(cErr));
+                try { shard.exec("ROLLBACK"); } catch { /* may already be ended */ }
+              }
+            }
+            if (commitErrors.length > 0) {
+              const reason = `cross_shard_commit_failed:${cfg.collection}:${commitErrors.join("|")}`;
+              collectionWarnings.push(reason);
+              syncWarnings.push(reason);
+              batchSuccess = false;
+              break;
             }
             checkpoint.collections[cfg.collection] = state;
             writeCheckpoint(checkpointPath, checkpoint);
-            
+
             // Unblock event loop
             await new Promise((resolve) => setTimeout(resolve, 0));
-            
+
             for (const shard of handles) {
               shard.exec("BEGIN");
             }
@@ -851,8 +859,14 @@ export async function syncCollectionShardsFromMainDb(
 
       } catch (err) {
         batchSuccess = false;
+        const reason = `shard_iteration_failed:${cfg.collection}:${err instanceof Error ? err.message : String(err)}`;
+        collectionWarnings.push(reason);
+        syncWarnings.push(reason);
       } finally {
-        // Execute database commits first.
+        // Tier-0-6: Tear down ALL shard transactions even if one throws.
+        // Previously, a ROLLBACK error on shard N (other than "no transaction
+        // is active") propagated immediately, leaking the open transactions
+        // on shards N+1..M and holding WAL locks until process exit.
         for (const shard of handles) {
           try {
             if (batchSuccess) {
@@ -864,12 +878,20 @@ export async function syncCollectionShardsFromMainDb(
             const message = txErr instanceof Error ? txErr.message : String(txErr);
             const noActiveTx = /no transaction is active/i.test(message);
             if (!noActiveTx) {
-              throw txErr;
+              const reason = `shard_txn_teardown_failed:${cfg.collection}:${message}`;
+              collectionWarnings.push(reason);
+              syncWarnings.push(reason);
+              // Try a best-effort ROLLBACK to release the lock; if even that
+              // throws, swallow — the next iteration / process restart will
+              // inherit a clean state via WAL recovery.
+              try { shard.exec("ROLLBACK"); } catch { /* noop */ }
             }
           }
         }
 
-        // F-001: Align sync checkpoint with the trailing batch commit.
+        // F-001 + Tier-0-6: Only advance the checkpoint if the trailing
+        // batch genuinely committed. A failed teardown leaves the cursor
+        // on the previous successful batch so a re-run resumes safely.
         if (batchSuccess && !capped && processed > 0) {
           checkpoint.collections[cfg.collection] = state;
           writeCheckpoint(checkpointPath, checkpoint);

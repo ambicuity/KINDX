@@ -4057,34 +4057,18 @@ if (isMain) {
         closeDb();
       } else if (target === "openclaw") {
         try {
-          const { execSync } = await import("child_process");
-          const isMac = process.platform === "darwin";
-          const sedOpts = isMac ? "-i ''" : "-i";
-          
+          const { migrateOpenClawRepository, OpenClawMigrationError } = await import("./migrate-openclaw.js");
           console.log(`🦞 Migrating OpenCLAW integration from QMD to KINDX in ${dbPath}...`);
-          
-          // Rename files and directories matching "qmd"
-          execSync(`find . -depth -name '*qmd*' -execdir bash -c 'mv "$1" "\${1//qmd/kindx}"' _ {} \\;`, { cwd: dbPath, stdio: "inherit" });
-          
-          console.log("Updating internal references, configuration schemas, and executable commands...");
-          // Replace references within matched files
-          const replacements = [
-            `find src test -type f -exec sed ${sedOpts} 's/qmd/kindx/g' {} +`,
-            `find src test -type f -exec sed ${sedOpts} 's/Qmd/Kindx/g' {} +`,
-            `find src test -type f -exec sed ${sedOpts} 's/QMD/KINDX/g' {} +`
-          ];
-          
-          const env = { ...process.env, LC_ALL: "C" };
-          for (const cmd of replacements) {
-            try {
-              execSync(cmd, { cwd: dbPath, env, stdio: "ignore" });
-            } catch (err) {
-              // Ignore errors if find fails to match any files on certain passes or if sed complains
-            }
-          }
+          const report = migrateOpenClawRepository(dbPath);
+          console.log(
+            `Renamed ${report.renamed.length} entries; rewrote ${report.rewrittenFiles.length} source files.`
+          );
+          for (const w of report.warnings) console.warn(`  warn: ${w}`);
           console.log("✅ Migration complete. Please run 'npm run build' inside OpenCLAW to verify.");
+          // Reference the named error so the import is preserved if migration becomes optional.
+          void OpenClawMigrationError;
         } catch (err) {
-          console.error("Migration failed:", err);
+          console.error("Migration failed:", err instanceof Error ? err.message : err);
           process.exit(1);
         }
       } else {
