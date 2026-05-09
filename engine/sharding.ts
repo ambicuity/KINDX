@@ -210,6 +210,20 @@ function writeCheckpoint(path: string, checkpoint: ShardCheckpoint): void {
   atomicWriteFile(path, data);
 }
 
+/**
+ * Copy a SQLite-owned Buffer holding little-endian float32s into a freshly-
+ * allocated Float32Array. Required because better-sqlite3 reuses row Buffers
+ * between iterations — a typed-array view that aliases the row Buffer can be
+ * silently corrupted across an event-loop yield.
+ */
+function copyFloat32(src: Buffer): Float32Array {
+  const out = new Float32Array(src.byteLength / 4);
+  // Copy via a fresh ArrayBuffer so out's underlying buffer is independent.
+  const view = new Float32Array(src.buffer, src.byteOffset, out.length);
+  out.set(view);
+  return out;
+}
+
 function parseVectorDimensions(mainDb: MainDatabase): number {
   const row = mainDb.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql?: string } | undefined;
   const sql = row?.sql || "";
@@ -275,7 +289,11 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
     ORDER BY hash_seq
   `).all() as Array<{ hash_seq: string; embedding: Buffer }>).map((v) => ({
     hash_seq: v.hash_seq,
-    embedding: new Float32Array(v.embedding.buffer, v.embedding.byteOffset, v.embedding.byteLength / 4)
+    // Tier-1: copy the bytes into a fresh ArrayBuffer instead of aliasing the
+    // SQLite-owned Buffer. better-sqlite3 reuses row Buffers between calls;
+    // a typed-array view onto the original buffer can be silently corrupted
+    // when the row buffer is recycled before the view is consumed.
+    embedding: copyFloat32(v.embedding),
   }));
   const vectorCount = vectors.length;
   if (vectorCount === 0) {
@@ -781,7 +799,9 @@ export async function syncCollectionShardsFromMainDb(
             break;
           }
           try {
-            const typedArray = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+            // Tier-1: copy out of the SQLite-owned Buffer before the next
+            // iteration recycles it (see copyFloat32 below).
+            const typedArray = copyFloat32(row.embedding);
             shard.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`).run(hashSeq, typedArray);
             shard.prepare(`
             INSERT OR REPLACE INTO shard_vectors

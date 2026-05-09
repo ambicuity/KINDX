@@ -20,6 +20,20 @@ import type {
   ModelUsage
 } from "./inference.js";
 import { formatQueryForEmbedding, formatDocForEmbedding, isQwen3EmbeddingModel } from "./inference.js";
+import { fetchWithTimeout } from "./utils/fetch-with-timeout.js";
+
+/**
+ * Hard-cap on every remote LLM HTTP call.
+ *
+ * Tier-1: every fetch in this module previously had no AbortSignal/timeout
+ * — a hung remote (Ollama deadlocked, network blackhole) pinned LLM pool
+ * leases forever, eventually starving the pool and wedging the daemon.
+ * Configurable via KINDX_REMOTE_LLM_TIMEOUT_MS (default 30s).
+ */
+const REMOTE_LLM_TIMEOUT_MS = (() => {
+  const raw = parseInt(process.env.KINDX_REMOTE_LLM_TIMEOUT_MS || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+})();
 
 const _queryExpansionCache = new Map<string, Queryable[]>();
 const MAX_EXPANSION_CACHE_SIZE = 1000;
@@ -145,9 +159,10 @@ export class RemoteLLM implements LLM {
     }
 
     try {
-      const res = await fetch(`${getBaseUrl()}/embeddings`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/embeddings`, {
         method: "POST",
         headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
         body: JSON.stringify({
           model,
           input: formattedText,
@@ -192,9 +207,10 @@ export class RemoteLLM implements LLM {
     try {
       // Send as a single batch if the endpoint supports array inputs
       // (OpenAI and Ollama both support string[] arrays for batch embedding)
-      const res = await fetch(`${getBaseUrl()}/embeddings`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/embeddings`, {
         method: "POST",
         headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
         body: JSON.stringify({
           model,
           input: texts,
@@ -242,12 +258,26 @@ export class RemoteLLM implements LLM {
 
       return results;
     } catch (err) {
-      console.warn("Remote batch embedding failed, attempting sequential fallback:", err);
-      // Sequential fallback
-      for (const t of texts) {
-        results.push(await this.embed(t, { model }));
-      }
-      return results;
+      console.warn("Remote batch embedding failed, attempting concurrent fallback:", err);
+      // Tier-1: bounded concurrency rather than a sequential `for await` loop.
+      // The sequential version blocked the entire batch on a slow endpoint —
+      // a 1000-item batch with one slow item could pin the request for the
+      // sum of all per-item latencies. Each individual call already has its
+      // own timeoutMs via fetchWithTimeout, so a single slow item is bounded.
+      const concurrency = Math.max(1, Math.min(4,
+        parseInt(process.env.KINDX_REMOTE_EMBED_FALLBACK_CONCURRENCY || "", 10) || 4
+      ));
+      const out: (EmbeddingResult | null)[] = new Array(texts.length).fill(null);
+      let cursor = 0;
+      const workers = Array.from({ length: concurrency }, async () => {
+        while (true) {
+          const i = cursor++;
+          if (i >= texts.length) return;
+          out[i] = await this.embed(texts[i] as string, { model });
+        }
+      });
+      await Promise.all(workers);
+      return out;
     }
   }
 
@@ -257,9 +287,10 @@ export class RemoteLLM implements LLM {
     const temperature = options?.temperature || 0.7;
 
     try {
-      const res = await fetch(`${getBaseUrl()}/chat/completions`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/chat/completions`, {
         method: "POST",
         headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
         body: JSON.stringify({
           model,
           messages: [{ role: "user", content: prompt }],
@@ -299,9 +330,10 @@ export class RemoteLLM implements LLM {
 
   async modelExists(model: string): Promise<ModelInfo> {
     try {
-      const res = await fetch(`${getBaseUrl()}/models`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/models`, {
         method: "GET",
-        headers: getHeaders()
+        headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
       });
 
       if (!res.ok) {
@@ -362,9 +394,10 @@ export class RemoteLLM implements LLM {
     ].join('\n');
 
     try {
-      const res = await fetch(`${getBaseUrl()}/chat/completions`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/chat/completions`, {
         method: "POST",
         headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
         body: JSON.stringify({
           model: this.generateModel,
           messages: [
@@ -441,9 +474,10 @@ export class RemoteLLM implements LLM {
     try {
       // Use the standard Cohere/Jina /v1/rerank interface:
       // { model: string, query: string, documents: string[]|object[] }
-      const res = await fetch(`${getBaseUrl()}/rerank`, {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/rerank`, {
         method: "POST",
         headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
         body: JSON.stringify({
           model,
           query,

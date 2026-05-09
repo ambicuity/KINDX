@@ -156,9 +156,20 @@ export class WatchDaemon {
    */
   public async stop(): Promise<void> {
     console.log("Stopping watchers...");
-    await Promise.all(this.watchers.map(w => w.close()));
+    // Tier-1: removeAllListeners BEFORE close. chokidar buffers events under
+    // awaitWriteFinish; closing without detaching listeners leaves callbacks
+    // pending against the disposed FSWatcher and the underlying handle is
+    // not collected until the next GC cycle. Repeated start/stop cycles in
+    // long-running daemons leak FDs.
+    for (const w of this.watchers) {
+      try { w.removeAllListeners(); } catch { /* noop */ }
+    }
+    await Promise.all(this.watchers.map(w => w.close().catch(() => { /* tolerate already-closed */ })));
     this.watchers = [];
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    // Drop any queued events that were buffered between stop() request and
+    // the listener detach so processQueue never fires on the dead FSWatcher.
+    this.eventQueue.length = 0;
 
     try {
       const { resolve } = await import("path");

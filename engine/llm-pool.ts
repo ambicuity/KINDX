@@ -55,6 +55,11 @@ export class LLMPool {
     resolve: (lease: PooledLease) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout> | null;
+    /** Set to true after resolve OR reject fires; gates against late abort racing. */
+    settled: boolean;
+    /** Removes the abort listener from the caller's signal, if any. Called from
+     *  cleanup() and from settle() so neither path leaks a listener. */
+    detachAbort: (() => void) | null;
   }> = [];
 
   constructor(size?: number) {
@@ -93,10 +98,26 @@ export class LLMPool {
     }
 
     return new Promise<PooledLease>((resolve, reject) => {
+      // Settle gate + uniform abort-listener teardown for ALL exit paths
+      // (resolve, reject via timeout, reject via abort). Previously only the
+      // resolve path removed the abort listener — timeout exits leaked one
+      // listener per acquire onto long-lived AbortSignals.
       const entry: typeof this.waitQueue[number] = {
-        resolve,
-        reject,
+        resolve: (lease) => {
+          if (entry.settled) return;
+          entry.settled = true;
+          entry.detachAbort?.();
+          resolve(lease);
+        },
+        reject: (err) => {
+          if (entry.settled) return;
+          entry.settled = true;
+          entry.detachAbort?.();
+          reject(err);
+        },
         timer: null,
+        settled: false,
+        detachAbort: null,
       };
 
       const cleanup = () => {
@@ -110,21 +131,16 @@ export class LLMPool {
       if (signal) {
         const onAbort = () => {
           cleanup();
-          reject(new Error(`LLMPool acquire aborted: ${signal.reason}`));
+          entry.reject(new Error(`LLMPool acquire aborted: ${signal.reason}`));
         };
         signal.addEventListener("abort", onAbort, { once: true });
-        
-        const origResolve = entry.resolve;
-        entry.resolve = (lease) => {
-          signal.removeEventListener("abort", onAbort);
-          origResolve(lease);
-        };
+        entry.detachAbort = () => signal.removeEventListener("abort", onAbort);
       }
 
       entry.timer = setTimeout(() => {
         cleanup();
         this.totalTimedOut++;
-        reject(
+        entry.reject(
           new LLMPoolTimeoutError(
             `LLM pool acquire timed out after ${timeoutMs}ms ` +
             `(pool=${this.size}, active=${this.size - this.available}, waiting=${this.waitQueue.length})`
@@ -176,15 +192,20 @@ export class LLMPool {
   }
 
   private release(): void {
-    // Serve the next waiter in FIFO order
-    if (this.waitQueue.length > 0) {
+    // Serve the next non-settled waiter in FIFO order. Drain settled entries
+    // first — defensive: in steady-state pure JS they shouldn't be in the
+    // queue (cleanup splices them out before settling), but if any future
+    // path settles via reject without splicing, we must not "hand" the slot
+    // to a dead promise and lose the slot forever.
+    while (this.waitQueue.length > 0) {
       const next = this.waitQueue.shift()!;
+      if (next.settled) continue;
       if (next.timer) clearTimeout(next.timer);
       this.totalAcquired++;
       next.resolve(this.createLease());
-    } else {
-      this.available++;
+      return;
     }
+    this.available++;
   }
 }
 

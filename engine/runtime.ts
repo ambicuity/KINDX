@@ -41,10 +41,22 @@ function withSuppressedSqliteStdoutNoise<T>(fn: () => T): T {
   }
 }
 
-function installSqliteStdoutNoiseFilter(): void {
-  if (_sqliteStdoutNoiseFilterInstalled) return;
+/**
+ * Install (idempotent) the stdout filter that swallows the harmless SQLite
+ * "extension already loaded" line printed by sqlite-vec.
+ *
+ * Returns an `uninstall()` callback that restores `process.stdout.write` to
+ * its original implementation. Required for tests + embeddable contexts —
+ * the previous implementation permanently monkey-patched stdout for the
+ * lifetime of the process and provided no way to remove the filter.
+ */
+let _uninstallSqliteStdoutNoiseFilter: (() => void) | null = null;
+export function installSqliteStdoutNoiseFilter(): () => void {
+  if (_sqliteStdoutNoiseFilterInstalled) {
+    return _uninstallSqliteStdoutNoiseFilter ?? (() => { /* noop */ });
+  }
   const stream = process.stdout as NodeJS.WriteStream & { write: (...args: any[]) => any };
-  if (!stream || typeof stream.write !== "function") return;
+  if (!stream || typeof stream.write !== "function") return () => { /* noop */ };
   const originalWrite = stream.write.bind(stream);
   const filteredWrite = ((chunk: any, encoding?: any, cb?: any) => {
     const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString(encoding || "utf8") : null;
@@ -63,6 +75,14 @@ function installSqliteStdoutNoiseFilter(): void {
   }) as typeof stream.write;
   stream.write = filteredWrite;
   _sqliteStdoutNoiseFilterInstalled = true;
+  _uninstallSqliteStdoutNoiseFilter = () => {
+    if (stream.write === filteredWrite) {
+      stream.write = originalWrite;
+    }
+    _sqliteStdoutNoiseFilterInstalled = false;
+    _uninstallSqliteStdoutNoiseFilter = null;
+  };
+  return _uninstallSqliteStdoutNoiseFilter;
 }
 
 if (isBun) {
@@ -116,6 +136,18 @@ export function openDatabase(path: string): Database {
   db.exec("PRAGMA busy_timeout = 15000;");
   const key = process.env.KINDX_ENCRYPTION_KEY?.trim();
   if (key) {
+    // Tier-1: validate the key shape before SQL interpolation. The key is
+    // injected into a raw `PRAGMA key = '<key>'` statement (no parameter
+    // binding for PRAGMAs). Single quotes are doubled, but a key containing
+    // a NUL byte, backslash, or control character can desync the SQLite
+    // parser or produce a confusing error far from the root cause.
+    // Restrict to printable ASCII (0x21-0x7E), 16..256 bytes long.
+    if (!/^[\x21-\x7E]{16,256}$/.test(key)) {
+      throw new Error(
+        "KINDX_ENCRYPTION_KEY must be 16..256 printable ASCII characters " +
+        "(no NUL, control chars, whitespace, or quotes). Use a hex/base64 string."
+      );
+    }
     const escaped = key.replace(/'/g, "''");
     try {
       if (!supportsSqlCipherPragma(db)) {
