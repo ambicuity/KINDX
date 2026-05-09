@@ -19,12 +19,15 @@
 export type RelevanceJudgments = Record<string, number>;
 
 /**
- * Normalize a document key (file path or name) for comparison.
- * Strips directory components and lowercases for fuzzy matching.
+ * Normalize a document key (file path) for relevance comparison.
+ *
+ * Tier-2: keep the full virtual path, not just the basename. Stripping to
+ * basename caused two unrelated `README.md` files in different directories
+ * to be treated as the same relevant document, inflating recall/precision
+ * scores in repos with repeated filenames.
  */
 function normalizeKey(name: string): string {
-  const basename = name.split("/").pop() ?? name;
-  return basename.toLowerCase().replace(/_/g, "-");
+  return name.toLowerCase().replace(/_/g, "-");
 }
 
 /**

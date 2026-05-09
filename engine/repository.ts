@@ -64,6 +64,8 @@ import {
   searchShardedVectorsWithDiagnostics,
 } from "./sharding.js";
 import { recordDirectUsage } from "./ai-usage.js";
+import { quietWarn, errString } from "./utils/quiet-warn.js";
+import { extractInternalLinks } from "./link-extractor.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -448,6 +450,11 @@ export function isVirtualPath(path: string): boolean {
 
 /**
  * Resolve a virtual path to absolute filesystem path.
+ *
+ * Tier-1: refuse paths that escape the collection root via `..` segments.
+ * Without this guard, a virtual path like `kindx://docs/../../../etc/passwd`
+ * resolved to `/etc/passwd` and downstream code (multi-get, get) read
+ * arbitrary files outside the indexed collection.
  */
 export function resolveVirtualPath(db: Database, virtualPath: string): string | null {
   const parsed = parseVirtualPath(virtualPath);
@@ -456,7 +463,16 @@ export function resolveVirtualPath(db: Database, virtualPath: string): string | 
   const coll = getCollectionByName(db, parsed.collectionName);
   if (!coll) return null;
 
-  return resolve(coll.pwd, parsed.path);
+  const absolute = pathResolve(coll.pwd, parsed.path);
+  // assertUnderRoot semantics inline (kept inline to avoid a new import in
+  // the hot retrieval path): return null on traversal so callers fall
+  // through their existing not-found handling.
+  const rel = relative(coll.pwd, absolute);
+  if (rel.startsWith("..") || rel === "" || /^([A-Za-z]:)?[\\/]/.test(rel)) {
+    if (absolute === coll.pwd) return absolute;
+    return null;
+  }
+  return absolute;
 }
 
 /**
@@ -534,7 +550,14 @@ function initializeDatabase(db: Database): void {
     _sqliteVecAvailable = false;
   }
   db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA synchronous = FULL"); // Enforce atomic multi-statement flushes to OS to prevent index data loss
+  // Tier-1 perf: WAL mode's recommended pairing is synchronous=NORMAL, not
+  // FULL. FULL forces an extra fsync per commit (~2-3x write slowdown) for
+  // a durability guarantee WAL doesn't actually need — a crash with
+  // synchronous=NORMAL+WAL will roll back the most recent uncommitted
+  // transaction but never corrupt the database. Operators who specifically
+  // need group-commit durability can opt back in via KINDX_SYNCHRONOUS=FULL.
+  const syncMode = (process.env.KINDX_SYNCHRONOUS || "NORMAL").toUpperCase();
+  db.exec(`PRAGMA synchronous = ${syncMode === "FULL" ? "FULL" : "NORMAL"}`);
   db.exec("PRAGMA busy_timeout = 30000"); // Allow concurrent processes to wait for lock
   db.exec("PRAGMA foreign_keys = ON");
 
@@ -543,9 +566,28 @@ function initializeDatabase(db: Database): void {
   ensureVectorIndexIntegrity(db);
 }
 
-export function ensureVectorIndexIntegrity(db: Database): void {
+/**
+ * Verifies that `vectors_vec` and `content_vectors` agree on row count and
+ * hash_seq coverage.
+ *
+ * Behavior:
+ *   - On mismatch with KINDX_REPAIR=1 (or callers passing `repair: true`):
+ *     truncates both tables so the next embed run rebuilds the vector index.
+ *   - On mismatch otherwise: logs a loud warning, records an `error` counter,
+ *     and returns. Search continues to operate on what is in the tables; the
+ *     operator sees the warning and runs `KINDX_REPAIR=1 kindx ...` (or a
+ *     future `kindx repair` subcommand) to rebuild on demand.
+ *
+ * Auto-truncate was the previous default but the audit found this destroys
+ * hours of GPU embedding work on any transient mismatch (interrupted embed,
+ * schema upgrade, sharded delete) without consent.
+ */
+export function ensureVectorIndexIntegrity(
+  db: Database,
+  opts: { repair?: boolean } = {}
+): { mismatch: boolean; rebuilt: boolean; contentCount: number; indexCount: number } {
   const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableCheck) return;
+  if (!tableCheck) return { mismatch: false, rebuilt: false, contentCount: 0, indexCount: 0 };
 
   const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as any).c;
   const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as any).c;
@@ -555,23 +597,44 @@ export function ensureVectorIndexIntegrity(db: Database): void {
   if (!mismatch && contentCount > 0) {
     try {
       const missingInIndex = db.prepare(`
-        SELECT 1 FROM content_vectors 
+        SELECT 1 FROM content_vectors
         WHERE NOT EXISTS (
-          SELECT 1 FROM vectors_vec 
+          SELECT 1 FROM vectors_vec
           WHERE vectors_vec.hash_seq = content_vectors.hash || '_' || content_vectors.seq
         ) LIMIT 1
       `).get();
       if (missingInIndex) mismatch = true;
     } catch (e) {
-      // Graceful fallback if SQLite version prohibits virtual table outer joins
+      // SQLite versions that prohibit virtual-table outer joins fail this
+      // probe. Surface as a quiet warning so operators can see when the
+      // probe is silently skipped — previously this catch was a black hole.
+      quietWarn("repository.vec_parity_probe_unsupported", { err: errString(e) });
     }
   }
 
-  if (mismatch) {
-    process.stderr.write(`KINDX Recovery: vector index parity mismatch (content: ${contentCount}, index: ${indexCount}). Rebuilding...\n`);
-    db.exec(`DELETE FROM vectors_vec`);
-    db.exec(`DELETE FROM content_vectors`);
+  if (!mismatch) return { mismatch: false, rebuilt: false, contentCount, indexCount };
+
+  const repairRequested = opts.repair === true || process.env.KINDX_REPAIR === "1";
+  if (!repairRequested) {
+    quietWarn("repository.vec_parity_mismatch", {
+      content_rows: contentCount,
+      index_rows: indexCount,
+    });
+    process.stderr.write(
+      `KINDX Warning: vector index parity mismatch (content_vectors=${contentCount}, ` +
+      `vectors_vec=${indexCount}). Vector search may return incomplete results until repaired. ` +
+      `Re-run with KINDX_REPAIR=1 to rebuild.\n`
+    );
+    return { mismatch: true, rebuilt: false, contentCount, indexCount };
   }
+
+  process.stderr.write(
+    `KINDX Repair: vector index parity mismatch (content_vectors=${contentCount}, ` +
+    `vectors_vec=${indexCount}). KINDX_REPAIR=1 set — rebuilding...\n`
+  );
+  db.exec(`DELETE FROM vectors_vec`);
+  db.exec(`DELETE FROM content_vectors`);
+  return { mismatch: true, rebuilt: true, contentCount, indexCount };
 }
 
 export function isSqliteVecAvailable(): boolean {
@@ -1066,8 +1129,15 @@ export function getCachedResult(db: Database, cacheKey: string): string | null {
 export function setCachedResult(db: Database, cacheKey: string, result: string): void {
   const now = new Date().toISOString();
   db.prepare(`INSERT OR REPLACE INTO llm_cache (hash, result, created_at) VALUES (?, ?, ?)`).run(cacheKey, result, now);
+  // Tier-1 perf: high-water-mark eviction. Only run the O(n log n) DELETE
+  // when the table has actually grown past the high-water threshold; avoids
+  // the random-sampling spike where the same DELETE could fire 100 times in
+  // quick succession by coincidence on a hot path.
   if (Math.random() < 0.01) {
-    db.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM llm_cache`).get() as { c: number };
+    if (row.c > 1500) {
+      db.exec(`DELETE FROM llm_cache WHERE hash NOT IN (SELECT hash FROM llm_cache ORDER BY created_at DESC LIMIT 1000)`);
+    }
   }
 }
 
@@ -1331,30 +1401,64 @@ export function getBacklinkedDocuments(db: Database, collectionName: string, tar
 }
 
 export function getGraphConnectedCandidates(db: Database, virtualPaths: string[]): any[] {
-  const result: any[] = [];
-  const stmt = db.prepare(`
-    SELECT DISTINCT d.collection, d.path, d.title, content.doc as body
-    FROM documents d
-    JOIN content ON content.hash = d.hash
-    WHERE d.collection = ? AND d.active = 1 AND (
-      d.path IN (SELECT target_path FROM document_links WHERE collection = ? AND source_path = ?)
-      OR
-      d.path IN (SELECT source_path FROM document_links WHERE collection = ? AND target_path = ?)
-    )
-  `);
+  // Tier-1 perf: collapse the per-path N+1 into a single grouped query per
+  // collection. The previous loop ran the full 4-subquery prepared statement
+  // ONCE PER input path (50 inputs = 50 round trips). We now bucket the
+  // input paths by collection and execute one IN-clause query per bucket,
+  // chunked at 500 to stay well below SQLITE_MAX_VARIABLE_NUMBER.
 
+  // Bucket the inputs: collection -> Set<path>.
+  const byCollection = new Map<string, Set<string>>();
   for (const vp of virtualPaths) {
     const p = parseVirtualPath(vp);
     if (!p) continue;
-    const rows = stmt.all(p.collectionName, p.collectionName, p.path, p.collectionName, p.path) as any[];
-    for (const r of rows) {
-      result.push({
-        file: `kindx://${r.collection}/${r.path}`,
-        displayPath: `${r.collection}/${r.path}`,
-        title: r.title,
-        body: r.body,
-        score: 0.1, // Base expansion score
-      });
+    let bucket = byCollection.get(p.collectionName);
+    if (!bucket) {
+      bucket = new Set();
+      byCollection.set(p.collectionName, bucket);
+    }
+    bucket.add(p.path);
+  }
+
+  const result: any[] = [];
+  // Dedupe: a connected candidate may be reachable from multiple seeds.
+  const seen = new Set<string>();
+
+  const CHUNK = 500;
+  for (const [collection, pathSet] of byCollection) {
+    const paths = [...pathSet];
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      const chunk = paths.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const stmt = db.prepare(`
+        SELECT DISTINCT d.collection, d.path, d.title, content.doc as body
+        FROM documents d
+        JOIN content ON content.hash = d.hash
+        WHERE d.collection = ? AND d.active = 1 AND (
+          d.path IN (
+            SELECT target_path FROM document_links
+            WHERE collection = ? AND source_path IN (${placeholders})
+          )
+          OR
+          d.path IN (
+            SELECT source_path FROM document_links
+            WHERE collection = ? AND target_path IN (${placeholders})
+          )
+        )
+      `);
+      const rows = stmt.all(collection, collection, ...chunk, collection, ...chunk) as any[];
+      for (const r of rows) {
+        const key = `${r.collection}/${r.path}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({
+          file: `kindx://${r.collection}/${r.path}`,
+          displayPath: key,
+          title: r.title,
+          body: r.body,
+          score: 0.1, // Base expansion score
+        });
+      }
     }
   }
   return result;
@@ -1434,9 +1538,13 @@ export function deactivateDocument(db: Database, collectionName: string, path: s
     .run(collectionName, path);
     
   if (res.changes > 0) {
-    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat
+    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat.
+    // Tier-2: replace silent catch with quietWarn so cleanup failures are
+    // visible via /metrics (was a black hole — the cleanup may run after
+    // store.close() and throw on a closed handle).
     setTimeout(() => {
-      try { cleanupOrphanedVectors(db); } catch {}
+      try { cleanupOrphanedVectors(db); }
+      catch (e) { quietWarn("repository.cleanup_orphaned_vectors_failed", { err: errString(e) }); }
     }, 0);
   }
 }
@@ -2470,12 +2578,22 @@ export async function searchVec(
   // "optimize" this by combining into a single query with JOINs - it will break.
   // See: https://github.com/ambicuity/KINDX/pull/23
 
+  // Tier-1 perf: clamp k to KINDX_MAX_VEC_K (default 2000) so a caller
+  // passing limit=10000 doesn't ask vec0 to scan 30000 nearest neighbors —
+  // sqlite-vec is known to slow down quadratically with k and can OOM at
+  // very large k.
+  const MAX_VEC_K = (() => {
+    const raw = parseInt(process.env.KINDX_MAX_VEC_K || "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 2000;
+  })();
+  const k = Math.min(limit * 3, MAX_VEC_K);
+
   // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
   const vecResults = db.prepare(`
     SELECT hash_seq, distance
     FROM vectors_vec
     WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  `).all(new Float32Array(embedding), k) as { hash_seq: string; distance: number }[];
   return mapVectorMatchesToDocuments(db, vecResults, limit, collectionName);
 }
 
@@ -2972,14 +3090,29 @@ export function findDocument(db: Database, filename: string, options: { includeB
 
   // Try fuzzy match by virtual path
   if (!doc) {
+    // Tier-1 perf: try the index-friendly equivalence on `path` first so the
+    // common case (user typed an exact relative path like `notes/foo.md`)
+    // hits idx_documents_path instead of doing a full-table scan via the
+    // leading-wildcard LIKE. Only fall back to the LIKE for partial inputs.
     doc = db.prepare(`
       SELECT ${selectCols}
       FROM documents d
       JOIN content ON content.hash = d.hash
       ${ingestJoin}
-      WHERE 'kindx://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
+      WHERE d.path = ? AND d.active = 1
       LIMIT 1
-    `).get(`%${filepath}`) as DbDocRow | null;
+    `).get(filepath) as DbDocRow | null;
+
+    if (!doc) {
+      doc = db.prepare(`
+        SELECT ${selectCols}
+        FROM documents d
+        JOIN content ON content.hash = d.hash
+        ${ingestJoin}
+        WHERE 'kindx://' || d.collection || '/' || d.path LIKE ? AND d.active = 1
+        LIMIT 1
+      `).get(`%${filepath}`) as DbDocRow | null;
+    }
   }
 
   // Try to match by absolute path or relative to CWD
@@ -4785,6 +4918,16 @@ async function indexSingleFile(
     const now = new Date().toISOString();
     const modifiedAt = stat.mtime.toISOString();
 
+    // Tier-0-11: Pre-compute everything BEFORE opening the write txn.
+    // The previous code did `db.exec("BEGIN")` then `await import(
+    // "./link-extractor.js")` and the link extraction inside the open txn.
+    // Yielding the event loop with a write txn open meant other watcher
+    // callbacks for parallel files hit SQLITE_BUSY and starved (or worse,
+    // the busy_timeout raced with WAL recovery). The import is now static
+    // and link extraction runs synchronously before BEGIN, so the txn
+    // body holds the write lock for microseconds, not milliseconds.
+    const links = extractInternalLinks(content, relativePath);
+
     db.exec("BEGIN TRANSACTION");
     try {
       insertContent(db, hash, content, now);
@@ -4802,13 +4945,10 @@ async function indexSingleFile(
         contentHash: hash,
         extractedAt: now,
       });
-
-      const { extractInternalLinks } = await import("./link-extractor.js");
-      const links = extractInternalLinks(content, relativePath);
       upsertDocumentLinks(db, collectionName, path, links);
 
       db.exec("COMMIT");
-      return "embedded"; // Properly enqueued for BM25 and embedding 
+      return "embedded"; // Properly enqueued for BM25 and embedding
     } catch (e) {
       db.exec("ROLLBACK");
       throw e;

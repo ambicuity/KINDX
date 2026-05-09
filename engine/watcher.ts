@@ -38,6 +38,14 @@ export class WatchDaemon {
   public lastUpdateTs = Date.now();
   public eventCount = 0;
 
+  /**
+   * Cutoff for the post-ready reconciliation walk: any file with mtime >= this
+   * is treated as "added since the watcher started" and re-enqueued so we
+   * don't silently miss files added between collection registration and the
+   * chokidar `ready` event.
+   */
+  private readonly startedAtMs = Date.now();
+
   constructor(store: Store) {
     this.store = store;
   }
@@ -136,7 +144,12 @@ export class WatchDaemon {
         let settled = false;
         watcher.once("ready", () => {
           settled = true;
-          resolve();
+          // Tier-1: scan-then-watch reconciliation. With ignoreInitial=true,
+          // any file added between collection registration and the chokidar
+          // ready event would be silently missed forever (until the next
+          // edit). After ready fires, walk the directory tree and synthesize
+          // 'add' events for files newer than the daemon start time.
+          void this.reconcileInitialFiles(coll.name, coll.path, isMatch).finally(() => resolve());
         });
         watcher.once("error", () => {
           if (!settled) resolve();
@@ -147,8 +160,57 @@ export class WatchDaemon {
     }
 
     await Promise.all(readyPromises);
-    
+
     console.log("Daemon active. Waiting for file system changes...");
+  }
+
+  /**
+   * Walk the collection tree once after the watcher's `ready` event and
+   * synthesize `add` events for files modified since the daemon booted.
+   * Bounded depth + skip-dirs to defend against pathological filesystems.
+   */
+  private async reconcileInitialFiles(
+    collectionName: string,
+    root: string,
+    isMatch: (rel: string) => boolean
+  ): Promise<void> {
+    const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", "build"]);
+    const sinceMs = this.startedAtMs;
+    const fs = await import("node:fs");
+    const visited = new Set<string>();
+    const stack: string[] = [root];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      if (!dir) continue;
+      try {
+        const real = fs.realpathSync(dir);
+        if (visited.has(real)) continue;
+        visited.add(real);
+      } catch { continue; }
+      let entries: import("node:fs").Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+      catch { continue; }
+      for (const e of entries) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
+        const full = `${dir}/${e.name}`.replace(/\/+/g, "/");
+        if (e.isDirectory() && !e.isSymbolicLink()) {
+          stack.push(full);
+          continue;
+        }
+        if (!e.isFile()) continue;
+        const relativePath = full.startsWith(root) ? full.slice(root.length).replace(/^\//, "") : full;
+        if (!isMatch(relativePath)) continue;
+        try {
+          const s = fs.statSync(full);
+          if (s.mtimeMs >= sinceMs) {
+            // Re-add as if chokidar had emitted; ingestion is idempotent
+            // (content-addressed by hash) so re-adds for unchanged files are
+            // a no-op via the hash check in indexSingleFile.
+            this.enqueue("add", collectionName, relativePath, full);
+          }
+        } catch { /* gone between readdir and stat — ignore */ }
+      }
+    }
   }
 
   /**
@@ -156,9 +218,20 @@ export class WatchDaemon {
    */
   public async stop(): Promise<void> {
     console.log("Stopping watchers...");
-    await Promise.all(this.watchers.map(w => w.close()));
+    // Tier-1: removeAllListeners BEFORE close. chokidar buffers events under
+    // awaitWriteFinish; closing without detaching listeners leaves callbacks
+    // pending against the disposed FSWatcher and the underlying handle is
+    // not collected until the next GC cycle. Repeated start/stop cycles in
+    // long-running daemons leak FDs.
+    for (const w of this.watchers) {
+      try { w.removeAllListeners(); } catch { /* noop */ }
+    }
+    await Promise.all(this.watchers.map(w => w.close().catch(() => { /* tolerate already-closed */ })));
     this.watchers = [];
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    // Drop any queued events that were buffered between stop() request and
+    // the listener detach so processQueue never fires on the dead FSWatcher.
+    this.eventQueue.length = 0;
 
     try {
       const { resolve } = await import("path");

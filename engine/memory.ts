@@ -306,20 +306,27 @@ function cosineSimilarityNormalized(a: Float32Array, b: Float32Array): number {
 }
 
 function getSemanticCandidates(db: Database, scope: string, prefix: string): { id: number; key: string; embedding: Float32Array }[] {
+  // Tier-1: push keyPrefix filtering into SQL. Previously this loaded EVERY
+  // embedding for the scope into JS memory and filtered in-process — at 10k+
+  // memories with 768-dim float32 embeddings (~3 KB each) that's 30+ MB
+  // pulled across the SQLite/JS boundary on every upsert + full O(n) scan.
+  // The keyPrefix function returns everything before the first colon (or the
+  // whole key if no colon), so the equivalent SQL predicate is
+  // `key = prefix OR key LIKE prefix || ':%'`.
   const rows = db.prepare(`
     SELECT m.id, m.key, e.embedding
     FROM memories m
     JOIN memory_embeddings e ON e.memory_id = m.id
-    WHERE m.scope = ? AND m.superseded_by IS NULL
-  `).all(scope) as { id: number; key: string; embedding: Buffer }[];
+    WHERE m.scope = ?
+      AND m.superseded_by IS NULL
+      AND (m.key = ? OR m.key LIKE ? || ':%')
+  `).all(scope, prefix, prefix) as { id: number; key: string; embedding: Buffer }[];
 
-  return rows
-    .filter((row) => keyPrefix(String(row.key)) === prefix)
-    .map((row) => ({
-      id: Number(row.id),
-      key: String(row.key),
-      embedding: deserializeVector(row.embedding),
-    }));
+  return rows.map((row) => ({
+    id: Number(row.id),
+    key: String(row.key),
+    embedding: deserializeVector(row.embedding),
+  }));
 }
 
 function incrementCounters(db: Database, ids: number[]): void {
@@ -689,7 +696,7 @@ export function textSearchMemory(db: Database, scopeInput: string, queryInput: s
       m.search_text
     FROM memories m
     WHERE m.scope = ? AND m.superseded_by IS NULL
-      AND (m.expires_at IS NULL OR m.expires_at > datetime('now'))
+      AND (m.expires_at IS NULL OR m.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       AND ${where}
     ORDER BY hit_rate DESC, m.accessed_count DESC
     LIMIT ?
@@ -759,7 +766,7 @@ export function semanticSearchMemoryWithVector(
     WHERE m.id IN (${placeholders}) 
       AND m.scope = ? 
       AND m.superseded_by IS NULL
-      AND (m.expires_at IS NULL OR m.expires_at > datetime('now'))
+      AND (m.expires_at IS NULL OR m.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   `).all(...memoryIds, scope) as {
     id: number;
     scope: string;
@@ -922,7 +929,7 @@ export function purgeExpiredMemories(db: Database, scopeInput?: string): number 
 export function getMemoryStats(db: Database, scopeInput: string): MemoryStats {
   const scope = normalizeScope(scopeInput);
 
-  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`).get(scope) as { cnt: number };
+  const total = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`).get(scope) as { cnt: number };
   const superseded = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = ? AND superseded_by IS NOT NULL`).get(scope) as { cnt: number };
   const links = db.prepare(`
     SELECT COUNT(*) AS cnt
@@ -1062,7 +1069,7 @@ export async function processBulkMemories(
         await upsertMemory(db, op.input);
       } else if (op.action === "delete") {
         const deleted = deleteMemory(db, normalizeScope(defaultScope), op.id);
-        if (!deleted) throw new Error(`Memory \${op.id} not found or unauthorized for scope \${defaultScope}`);
+        if (!deleted) throw new Error(`Memory ${op.id} not found or unauthorized for scope ${defaultScope}`);
       } else {
         throw new Error("Unknown bulk operation");
       }
@@ -1127,22 +1134,32 @@ export function consolidateMemories(
        }
     }
     
-    for (const [oldId, newId] of toDeprecate.entries()) {
-      withTransaction(db, () => {
-        const now = new Date().toISOString();
-        db.prepare(`
-          UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE id = ?
-        `).run(newId, now, oldId);
-        db.prepare(`
-          UPDATE memories 
-          SET appeared_count = appeared_count + (SELECT appeared_count FROM memories WHERE id = ?),
-              accessed_count = accessed_count + (SELECT accessed_count FROM memories WHERE id = ?)
-          WHERE id = ?
-        `).run(oldId, oldId, newId);
-      });
-      deprecated++;
-      merged++;
-    }
+    if (toDeprecate.size === 0) continue;
+
+    // Tier-1: collapse the per-pair transactions into a single transaction
+    // for the entire prefix. Previously each pair opened its own IMMEDIATE
+    // transaction; a crash mid-loop left the surviving record with inflated
+    // counters and the prior pair already deprecated, putting the pair set
+    // in a half-merged state. With one txn per prefix, either every merge
+    // for the prefix lands or none do.
+    withTransaction(db, () => {
+      const now = new Date().toISOString();
+      const supStmt = db.prepare(`
+        UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE id = ?
+      `);
+      const incStmt = db.prepare(`
+        UPDATE memories
+        SET appeared_count = appeared_count + (SELECT appeared_count FROM memories WHERE id = ?),
+            accessed_count = accessed_count + (SELECT accessed_count FROM memories WHERE id = ?)
+        WHERE id = ?
+      `);
+      for (const [oldId, newId] of toDeprecate.entries()) {
+        supStmt.run(newId, now, oldId);
+        incStmt.run(oldId, oldId, newId);
+      }
+    });
+    deprecated += toDeprecate.size;
+    merged += toDeprecate.size;
   }
 
   return { merged, deprecated };

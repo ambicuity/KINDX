@@ -183,9 +183,13 @@ export function registerKindxTool<TInput, TOutput extends Record<string, unknown
       const typedInput = input as TInput;
       const ctx = getContext();
 
-      // Log query if it looks like a search operation
+      // Log query if it looks like a search operation. Tier-2: cap the
+      // logged query to 1024 chars so a 10 MiB user-supplied query string
+      // doesn't sit in the in-memory session log forever.
       if (ctx.session && typeof (input as any).query === "string") {
-        ctx.session.logQuery((input as any).query as string);
+        const raw = (input as any).query as string;
+        const capped = raw.length > 1024 ? raw.slice(0, 1024) + "…" : raw;
+        ctx.session.logQuery(capped);
       }
 
       try {

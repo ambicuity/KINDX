@@ -45,8 +45,15 @@ describe("RBAC", () => {
       expect(tenant.allowedCollections).toEqual(["docs"]);
       expect(tenant.active).toBe(true);
       expect(plaintextToken).toHaveLength(64); // 32 bytes hex
-      // Token hash should be SHA-256 of the plaintext
-      expect(tenant.tokenHash).toBe(createHash("sha256").update(plaintextToken).digest("hex"));
+      // Token hash uses HMAC-SHA-256 keyed by per-deployment server secret;
+      // stored in the new "hmac:<hex>" format. The exact hex varies with the
+      // secret, so assert structure rather than a precomputed value.
+      expect(tenant.tokenHash).toMatch(/^hmac:[0-9a-f]{64}$/);
+      // The hash must NOT be a recoverable bare SHA-256 of the token (the
+      // previous behaviour, which was rainbow-table-able if tenants.yml leaked).
+      expect(tenant.tokenHash).not.toBe(
+        createHash("sha256").update(plaintextToken).digest("hex")
+      );
     });
 
     it("rejects duplicate tenant IDs", () => {

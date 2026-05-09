@@ -2,8 +2,8 @@ import Database from "better-sqlite3";
 import type { Database as SQLiteDatabase } from "better-sqlite3";
 import { type Store } from "./repository.js";
 
-import { resolve } from "path";
-import { createHash } from "crypto";
+import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 const c = {
   reset: "\x1b[0m",
@@ -15,21 +15,39 @@ const c = {
   cyan: "\x1b[36m",
 };
 
+export class ChromaMigrationError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ChromaMigrationError";
+    this.code = code;
+  }
+}
+
+export type ChromaMigrationReport = {
+  scanned: number;
+  migrated: number;
+  skipped: number;
+  errors: number;
+  elapsedMs: number;
+};
+
 export async function migrateChroma(
   chromaDbPath: string,
   targetCollectionName: string,
   store: Store
-): Promise<void> {
+): Promise<ChromaMigrationReport> {
   const startMs = Date.now();
   console.log(`\n${c.bold}Migrating from ChromaDB: ${chromaDbPath}${c.reset}`);
   console.log(`Target KINDX Collection: ${c.cyan}${targetCollectionName}${c.reset}`);
 
+  // Tier-0-12: throw rather than process.exit so library consumers (MCP,
+  // tests, other CLIs) can catch and report instead of being killed.
   let chromaDb: SQLiteDatabase;
   try {
     chromaDb = new Database(resolve(process.cwd(), chromaDbPath), { readonly: true });
   } catch (err: any) {
-    console.error(`${c.red}Failed to open Chroma database: ${err.message}${c.reset}`);
-    process.exit(1);
+    throw new ChromaMigrationError("open_failed", `Failed to open Chroma database: ${err.message}`);
   }
 
   // Check if it's actually a Chroma database
@@ -37,8 +55,10 @@ export async function migrateChroma(
     chromaDb.prepare(`SELECT 1 FROM collections LIMIT 1`).get();
     chromaDb.prepare(`SELECT 1 FROM embeddings LIMIT 1`).get();
   } catch {
-    console.error(`${c.red}Invalid Chroma database schema. Missing required tables ('collections' or 'embeddings').${c.reset}`);
-    process.exit(1);
+    throw new ChromaMigrationError(
+      "invalid_schema",
+      "Invalid Chroma database schema. Missing required tables ('collections' or 'embeddings')."
+    );
   }
 
   // Chroma schema uses `string_value` in `embedding_fulltext` for the raw document text
@@ -70,11 +90,11 @@ export async function migrateChroma(
 
   if (!rows || rows.length === 0) {
     console.log(`No documents found in ChromaDB.`);
-    return;
+    return { scanned: 0, migrated: 0, skipped: 0, errors: 0, elapsedMs: Date.now() - startMs };
   }
 
   console.log(`Found ${c.bold}${rows.length}${c.reset} vectors in Chroma.`);
-  
+
   let migratedCount = 0;
   let skippedCount = 0;
   let errorCount = 0;
@@ -125,14 +145,39 @@ export async function migrateChroma(
         
         const contentHash = createHash("sha256").update(docText).digest("hex");
         const now = new Date().toISOString();
-        
-        // Insert content
+
+        // Tier-2: preserve the original Unicode path. The previous regex
+        // `[^a-zA-Z0-9/._-] -> _` collapsed `a/b` and `a-b` to the same
+        // key, silently colliding non-ASCII filenames into one row. We use
+        // parameterized SQL throughout so non-ASCII path characters are
+        // safe to store verbatim. Drop only path-control chars and the
+        // SQLite-incompatible NUL.
+        const normalizedPath = `${row.chroma_collection || 'import'}/${path}`
+          .replace(/[\x00-\x1F\x7F]/g, "_");
+
+        // Tier-0-12: idempotency. If we crashed mid-run last time and the
+        // user re-invokes the migration, the previous code threw on the
+        // UNIQUE(collection, path) constraint and counted every already-
+        // migrated row as an error, leaving the run unable to complete.
+        // Skip rows whose target document already exists with the same hash.
+        const existing = store.findActiveDocument(targetCollectionName, normalizedPath);
+        if (existing && existing.hash === contentHash) {
+          skippedCount++;
+          continue;
+        }
+
+        // Insert content (content-addressed by hash; safe to re-run).
         store.insertContent(contentHash, docText, now);
-        
-        // Insert document mapping
-        // Use the Chroma collection name as a prefix to avoid collisions if targetCollectionName is generic
-        const normalizedPath = `${row.chroma_collection || 'import'}/${path}`.replace(/[^a-zA-Z0-9/._-]/g, '_');
-        
+
+        if (existing) {
+          // Same path, different content -> previous import is stale.
+          // Without an updateDocument exposed on the Store interface here,
+          // skip rather than orphaning the prior row. Operator can rerun
+          // after `kindx collection rm` for a clean re-import.
+          skippedCount++;
+          continue;
+        }
+
         store.insertDocument(
           targetCollectionName,
           normalizedPath,
@@ -141,7 +186,7 @@ export async function migrateChroma(
           now,
           now
         );
-        
+
         migratedCount++;
       } catch (err) {
         errorCount++;
@@ -152,12 +197,21 @@ export async function migrateChroma(
     console.error(`Migration failed: ${error}`);
   }
 
-  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+  const elapsedMs = Date.now() - startMs;
+  const elapsed = (elapsedMs / 1000).toFixed(1);
   console.log(`\n${c.bold}Migration Summary${c.reset}`);
   console.log(`  ${c.green}Migrated: ${migratedCount} documents${c.reset}`);
   if (skippedCount > 0) console.log(`  ${c.yellow}Skipped:  ${skippedCount} existing hashes${c.reset}`);
   if (errorCount > 0) console.log(`  ${c.red}Errors:   ${errorCount} failed${c.reset}`);
   console.log(`  Time:     ${elapsed}s`);
-  
+
   console.log(`\nRun ${c.bold}kindx embed${c.reset} to generate local vectors for the migrated data.`);
+
+  return {
+    scanned: rows.length,
+    migrated: migratedCount,
+    skipped: skippedCount,
+    errors: errorCount,
+    elapsedMs,
+  };
 }

@@ -9,7 +9,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { atomicWriteFile } from "./utils/atomic-write.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -2054,13 +2055,13 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   // Empty/whitespace token files are treated as missing and regenerated.
   if (!mcpToken) {
     try {
-      if (!existsSync(configDir)) {
-        mkdirSync(configDir, { recursive: true });
-      }
       mcpToken = randomBytes(32).toString("hex");
-      writeFileSync(tokenFile, mcpToken, { encoding: "utf8", mode: 0o600 });
-      // Ensure strict permissions if writeFileSync mode isn't fully honored (e.g. umask)
-      chmodSync(tokenFile, 0o600);
+      // Tier-0-10: atomicWriteFile gives us tmp-write -> fsync -> rename ->
+      // dir-fsync, AND opens the temp with mode 0o600 from the start so
+      // there is no TOCTOU window where the bearer token sits at 0o644
+      // between writeFileSync and chmodSync. Concurrent server starts also
+      // race-cleanly via the random temp suffix.
+      atomicWriteFile(tokenFile, mcpToken, { mode: 0o600 });
       if (!quiet) {
         logger.info(`KINDX: Generated new MCP authorization token at ${tokenFile}`);
       }
@@ -2281,7 +2282,17 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           logger.info(`Session ${sid} cleaned up`);
         }
       }
-      void disposeSensitiveContexts().catch(() => {});
+      // Tier-2: surface a sensitive-context cleanup failure as a quietWarn
+      // counter rather than silently dropping it. A failure here means
+      // session-scoped secrets may still be in memory.
+      void disposeSensitiveContexts().catch((err) => {
+        try {
+          const { quietWarn } = require("./utils/quiet-warn.js");
+          quietWarn("session.dispose_sensitive_contexts_failed", {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        } catch { /* metrics module load failure shouldn't crash teardown */ }
+      });
     };
 
     return transport;
@@ -2315,10 +2326,46 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     logger.info(JSON.stringify(event));
   }
 
-  // Helper to collect request body
+  // Helper to collect request body. Tier-0-7: enforce a hard byte cap so a
+  // single multi-GB POST cannot OOM the daemon. Default 16 MiB; override via
+  // KINDX_HTTP_MAX_BODY_BYTES. Throws BodyTooLargeError, which the request
+  // handler maps to a 413 response.
+  const HTTP_MAX_BODY_BYTES = (() => {
+    const raw = parseInt(process.env.KINDX_HTTP_MAX_BODY_BYTES || "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 16 * 1024 * 1024;
+  })();
+
+  class BodyTooLargeError extends Error {
+    readonly limitBytes: number;
+    constructor(limitBytes: number) {
+      super(`request body exceeds ${limitBytes} bytes`);
+      this.name = "BodyTooLargeError";
+      this.limitBytes = limitBytes;
+    }
+  }
+
+  function parseTimeout(raw: string | undefined, fallbackMs: number): number {
+    const v = parseInt(raw || "", 10);
+    return Number.isFinite(v) && v >= 0 ? v : fallbackMs;
+  }
+
   async function collectBody(req: IncomingMessage): Promise<string> {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
+    let total = 0;
+    for await (const chunk of req) {
+      const buf = chunk as Buffer;
+      total += buf.length;
+      if (total > HTTP_MAX_BODY_BYTES) {
+        // Stop reading further chunks but do NOT destroy the socket here —
+        // the outer catch needs to write a 413 response. Pause the stream so
+        // the rest of the body is back-pressured rather than buffered. The
+        // catch handler will write the 413 + Connection: close header and
+        // end the response, after which the kernel closes the socket.
+        try { req.pause(); } catch { /* noop */ }
+        throw new BodyTooLargeError(HTTP_MAX_BODY_BYTES);
+      }
+      chunks.push(buf);
+    }
     return Buffer.concat(chunks).toString();
   }
 
@@ -2583,7 +2630,11 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           collections: effectiveCollections.length,
           encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
         }));
-        const sessionKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
+        // Tier-1: when no MCP session ID is present, use a per-request UUID
+        // rather than the socket remoteAddress. Behind a reverse proxy all
+        // anonymous traffic shares one bucket, and request dedupe coalescing
+        // could return one client's results to another.
+        const sessionKey = String(nodeReq.headers["mcp-session-id"] || `anon-${randomUUID()}`);
         const dedupeKey = stableHash({
           searches: subSearches,
           collections: effectiveCollections,
@@ -2725,7 +2776,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           const started = Date.now();
           const profilePolicy = resolveProfilePolicy(routingProfile, params.candidateLimit);
           const effectiveTimeout = resolveTimeoutByProfile(queryTimeoutMs, routingProfile);
-          const scopeKey = String(nodeReq.headers["mcp-session-id"] || nodeReq.socket.remoteAddress || "anon");
+          // Tier-1: per-request UUID instead of socket remoteAddress for
+          // anonymous traffic — same reasoning as the /query dedupe key.
+          const scopeKey = String(nodeReq.headers["mcp-session-id"] || `anon-${randomUUID()}`);
 
           try {
             const rawResults = await withLLMScope(
@@ -2951,11 +3004,25 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         const isToolsList = body?.method === "tools/list";
         const cacheLookup = accountAndWorkspace(headers, activeContext);
+        // Tier-1: include the requesting tenant's role + a stable hash of the
+        // allowedCollections set in the cache key. The previous key omitted
+        // both, so two tenants on the same workspace with different
+        // permissions saw each other's filtered tool list — a cross-role
+        // tool-visibility leak.
+        const allowedCollectionsKey = !requestIdentity
+          ? "anon"
+          : requestIdentity.allowedCollections === "*"
+            ? "*"
+            : createHash("sha256")
+                .update([...requestIdentity.allowedCollections].sort().join("\n"))
+                .digest("hex").slice(0, 16);
         const toolListCacheKey = toolListCache.buildKey({
           accountId: cacheLookup.accountId,
           workspaceId: cacheLookup.workspaceId,
           projectHash: mcpControl.project_hash,
           serverFingerprint: mcpControl.config_hash,
+          role: requestIdentity?.role ?? "anon",
+          allowedCollections: allowedCollectionsKey,
         });
         if (isToolsList) {
           const cached = toolListCache.get(toolListCacheKey);
@@ -3123,6 +3190,20 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         recordHttpMetrics(429);
         return;
       }
+      if (err instanceof BodyTooLargeError) {
+        // Tier-0-7: cap on request size — return 413 then drop the connection
+        // so the (possibly multi-GB) remaining body is not drained.
+        try {
+          nodeRes.writeHead(413, {
+            "Content-Type": "application/json",
+            "Connection": "close",
+          });
+          nodeRes.end(JSON.stringify({ error: err.message, code: "payload_too_large" }));
+        } catch { /* socket may already be destroyed */ }
+        try { nodeReq.destroy(); } catch { /* noop */ }
+        recordHttpMetrics(413);
+        return;
+      }
       logger.error("HTTP handler error:", { error: err?.message || String(err) });
       const code = (err as any)?.code as string | undefined;
       const message = err instanceof Error ? err.message : "Internal Server Error";
@@ -3135,6 +3216,14 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       recordHttpMetrics(status);
     }
   });
+
+  // Tier-0-8: server-level timeouts. Without these, a slowloris-style client
+  // (slow header trickling) holds connections open indefinitely and SSE
+  // sessions never time out idle, exhausting socket / FD limits.
+  // Defaults match Node 18+ defaults but are made explicit + tunable.
+  httpServer.requestTimeout = parseTimeout(process.env.KINDX_HTTP_REQUEST_TIMEOUT_MS, 30_000);
+  httpServer.headersTimeout = parseTimeout(process.env.KINDX_HTTP_HEADERS_TIMEOUT_MS, 10_000);
+  httpServer.keepAliveTimeout = parseTimeout(process.env.KINDX_HTTP_KEEPALIVE_TIMEOUT_MS, 65_000);
 
   emitStartupEvent("mcp_startup_update", { phase: "binding", port });
   const exposedTools = applyToolPolicy(mcpControl, [...KINDX_MCP_TOOL_NAMES]);
