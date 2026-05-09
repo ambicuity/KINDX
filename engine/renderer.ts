@@ -155,9 +155,36 @@ export function searchResultsToCsv(
  */
 export function searchResultsToFiles(results: SearchResult[]): string {
   return results.map(row => {
-    const ctx = row.context ? `,"${row.context.replace(/"/g, '""')}"` : "";
-    return `#${row.docid},${row.score.toFixed(2)},${row.displayPath}${ctx}`;
+    const ctx = row.context ? `,${csvField(row.context)}` : "";
+    // Tier-2: csvField on displayPath as well — POSIX paths can contain
+    // commas, double-quotes, and (rarely) newlines. Without escaping, a
+    // path with a comma broke the column layout for every downstream parser.
+    return `#${row.docid},${row.score.toFixed(2)},${csvField(row.displayPath)}${ctx}`;
   }).join("\n");
+}
+
+/**
+ * RFC 4180 CSV-field encoding: quote when the field contains a comma,
+ * double-quote, CR, or LF; double internal quotes.
+ */
+function csvField(raw: string): string {
+  const needsQuote = /[",\r\n]/.test(raw);
+  if (!needsQuote) return raw;
+  return `"${raw.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Pick a markdown code fence longer than the longest run of consecutive
+ * backticks in `body`, so the body cannot terminate its wrapper. CommonMark
+ * requires the closing fence be at least as long as the opening fence.
+ */
+function makeMarkdownFence(body: string): string {
+  let longest = 2; // we always need at least ``` (3) so start at 2
+  const matches = body.match(/`+/g);
+  if (matches) {
+    for (const m of matches) longest = Math.max(longest, m.length);
+  }
+  return "`".repeat(longest + 1);
 }
 
 /**
@@ -258,9 +285,9 @@ export function documentsToCsv(results: MultiGetFile[]): string {
  */
 export function documentsToFiles(results: MultiGetFile[]): string {
   return results.map(r => {
-    const ctx = r.context ? `,"${r.context.replace(/"/g, '""')}"` : "";
+    const ctx = r.context ? `,${csvField(r.context)}` : "";
     const status = r.skipped ? ",[SKIPPED]" : "";
-    return `${r.displayPath}${ctx}${status}`;
+    return `${csvField(r.displayPath)}${ctx}${status}`;
   }).join("\n");
 }
 
@@ -275,7 +302,12 @@ export function documentsToMarkdown(results: MultiGetFile[]): string {
     if (r.skipped) {
       md += `> ${r.skipReason}\n`;
     } else {
-      md += "```\n" + r.body + "\n```\n";
+      // Tier-2: count consecutive backticks in the body and use a longer
+      // fence so the body cannot escape its code block. A document
+      // containing ``` would otherwise terminate the wrapper early and
+      // bleed raw markdown into the output, breaking downstream rendering.
+      const fence = makeMarkdownFence(r.body || "");
+      md += `${fence}\n${r.body}\n${fence}\n`;
     }
     return md;
   }).join("\n");

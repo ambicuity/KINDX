@@ -23,9 +23,33 @@ function key(name: string, labels?: Record<string, string | number | boolean>): 
   return `${name}${makeLabels(labels)}`;
 }
 
+// Tier-2: cap the number of distinct (name+labels) tuples we will track.
+// Without this, a counter labelled by a high-cardinality dimension (file
+// path, query string, IP) could grow without bound across long-lived
+// daemons. Overflow is folded into a `__overflow__` label so the data is
+// not lost — just bucketed.
+const COUNTER_LABEL_CARDINALITY_CAP = (() => {
+  const raw = parseInt(process.env.KINDX_METRICS_LABEL_CAP || "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+})();
+
+function overflowKey(name: string): string {
+  return `${name}{__overflow__="1"}`;
+}
+
 export function incCounter(name: string, value = 1, labels?: Record<string, string | number | boolean>): void {
   const k = key(name, labels);
-  counters.set(k, (counters.get(k) || 0) + value);
+  if (counters.has(k)) {
+    counters.set(k, (counters.get(k) || 0) + value);
+    return;
+  }
+  // New tuple — guard against cardinality explosion.
+  if (counters.size >= COUNTER_LABEL_CARDINALITY_CAP) {
+    const ok = overflowKey(name);
+    counters.set(ok, (counters.get(ok) || 0) + value);
+    return;
+  }
+  counters.set(k, value);
 }
 
 export function observeHistogram(

@@ -204,7 +204,8 @@ import {
   formatBytes,
   renderProgressBar,
   spinner,
-  Spinner
+  Spinner,
+  registerCursorCleanup,
 } from "./utils/ui.js";
 
 const isTTY = process.stderr.isTTY;
@@ -3441,6 +3442,12 @@ const isMain = argv1 === __filename
   || argv1?.endsWith("/kindx.js")
   || (argv1 != null && realpathSync(argv1) === __filename);
 if (isMain) {
+  // Tier-2: opt into the cursor-cleanup signal handlers ONLY when this file
+  // is invoked as the CLI entrypoint. Library/embedded callers (importing
+  // engine modules from another process) are no longer hijacked at module
+  // load time.
+  registerCursorCleanup();
+
   // Global error handlers — catch unhandled errors with user-friendly messages
   process.on('uncaughtException', (err: any) => {
     const code = err?.code;
