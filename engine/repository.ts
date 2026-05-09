@@ -65,6 +65,7 @@ import {
 } from "./sharding.js";
 import { recordDirectUsage } from "./ai-usage.js";
 import { quietWarn, errString } from "./utils/quiet-warn.js";
+import { extractInternalLinks } from "./link-extractor.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -4826,6 +4827,16 @@ async function indexSingleFile(
     const now = new Date().toISOString();
     const modifiedAt = stat.mtime.toISOString();
 
+    // Tier-0-11: Pre-compute everything BEFORE opening the write txn.
+    // The previous code did `db.exec("BEGIN")` then `await import(
+    // "./link-extractor.js")` and the link extraction inside the open txn.
+    // Yielding the event loop with a write txn open meant other watcher
+    // callbacks for parallel files hit SQLITE_BUSY and starved (or worse,
+    // the busy_timeout raced with WAL recovery). The import is now static
+    // and link extraction runs synchronously before BEGIN, so the txn
+    // body holds the write lock for microseconds, not milliseconds.
+    const links = extractInternalLinks(content, relativePath);
+
     db.exec("BEGIN TRANSACTION");
     try {
       insertContent(db, hash, content, now);
@@ -4843,13 +4854,10 @@ async function indexSingleFile(
         contentHash: hash,
         extractedAt: now,
       });
-
-      const { extractInternalLinks } = await import("./link-extractor.js");
-      const links = extractInternalLinks(content, relativePath);
       upsertDocumentLinks(db, collectionName, path, links);
 
       db.exec("COMMIT");
-      return "embedded"; // Properly enqueued for BM25 and embedding 
+      return "embedded"; // Properly enqueued for BM25 and embedding
     } catch (e) {
       db.exec("ROLLBACK");
       throw e;
