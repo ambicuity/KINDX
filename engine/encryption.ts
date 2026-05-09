@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync, writeSync, renameSync, statSync, unlinkSync, readdirSync, openSync, closeSync, fsyncSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, readSync, writeSync, renameSync, statSync, unlinkSync, readdirSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { openDatabase, supportsSqlCipherPragma } from "./runtime.js";
@@ -22,9 +22,20 @@ function sqliteLiteral(value: string): string {
 
 export function isLikelyEncryptedSqlite(path: string): boolean {
   if (!existsSync(path)) return false;
-  const header = readFileSync(path, { encoding: null }).subarray(0, 16);
-  const ascii = header.toString("ascii");
-  return ascii !== "SQLite format 3\u0000";
+  // Tier-1: read only the first 16 bytes via open+read so we don't slurp
+  // multi-GB shard DBs into memory just to inspect the header. The previous
+  // readFileSync allocated a Buffer the size of the whole file, then threw
+  // 99.999% of it away. ensureEncryptedShardIndexesReady calls this in a
+  // walk over every shard — at scale this OOMed the process.
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(16);
+    const bytesRead = readSync(fd, buf, 0, 16, 0);
+    if (bytesRead < 16) return true; // too small to be a valid plaintext sqlite db
+    return buf.toString("ascii") !== "SQLite format 3\u0000";
+  } finally {
+    try { closeSync(fd); } catch { /* noop */ }
+  }
 }
 
 export function isRuntimeEncryptionEnabled(): boolean {

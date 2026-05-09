@@ -450,6 +450,11 @@ export function isVirtualPath(path: string): boolean {
 
 /**
  * Resolve a virtual path to absolute filesystem path.
+ *
+ * Tier-1: refuse paths that escape the collection root via `..` segments.
+ * Without this guard, a virtual path like `kindx://docs/../../../etc/passwd`
+ * resolved to `/etc/passwd` and downstream code (multi-get, get) read
+ * arbitrary files outside the indexed collection.
  */
 export function resolveVirtualPath(db: Database, virtualPath: string): string | null {
   const parsed = parseVirtualPath(virtualPath);
@@ -458,7 +463,16 @@ export function resolveVirtualPath(db: Database, virtualPath: string): string | 
   const coll = getCollectionByName(db, parsed.collectionName);
   if (!coll) return null;
 
-  return resolve(coll.pwd, parsed.path);
+  const absolute = pathResolve(coll.pwd, parsed.path);
+  // assertUnderRoot semantics inline (kept inline to avoid a new import in
+  // the hot retrieval path): return null on traversal so callers fall
+  // through their existing not-found handling.
+  const rel = relative(coll.pwd, absolute);
+  if (rel.startsWith("..") || rel === "" || /^([A-Za-z]:)?[\\/]/.test(rel)) {
+    if (absolute === coll.pwd) return absolute;
+    return null;
+  }
+  return absolute;
 }
 
 /**

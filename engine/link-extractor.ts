@@ -35,10 +35,20 @@ export function extractInternalLinks(content: string, sourcePath: string): strin
       const sourceDir = posix.dirname(sourcePath);
       resolved = sourceDir === "." ? t : posix.join(sourceDir, t);
     }
-    
+
+    // Tier-1: normalize then guard against `..` escaping the collection
+    // root. Without this, `[click](../../../etc/passwd)` was recorded as
+    // a literal target — link-graph poisoning, plus a path-traversal
+    // signal that downstream graph queries may surface as "related".
+    const normalized = posix.normalize(resolved);
+    if (normalized.startsWith("..") || posix.isAbsolute(normalized)) {
+      // Out-of-collection target: drop it silently.
+      return;
+    }
+
     try {
       // Must handelize the path so it matches our document paths format
-      targets.add(handelize(resolved));
+      targets.add(handelize(normalized));
     } catch {
       // Ignored if handelize fails
     }

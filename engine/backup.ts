@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 import { openDatabase } from "./runtime.js";
 import { checkDatabaseIntegrity } from "./diagnostics.js";
-import { describeEncryptionState, isLikelyEncryptedSqlite, isRuntimeEncryptionEnabled } from "./encryption.js";
+import { describeEncryptionState, isLikelyEncryptedSqlite, isRuntimeEncryptionEnabled, syncParentDirectoryAfterRename } from "./encryption.js";
 
 export type BackupCreateResult = {
   backupPath: string;
@@ -35,12 +36,21 @@ export function createBackup(indexPath: string, outputPath: string): BackupCreat
     }
 
     mkdirSync(dirname(target), { recursive: true });
-    if (existsSync(target)) {
-      unlinkSync(target); // VACUUM INTO requires the target to not exist
+    // Tier-1: write to a temp path then atomic-rename. Previously we
+    // unlinked the destination then VACUUM-INTO'd directly to it: a crash
+    // mid-VACUUM left the operator with NO backup at all. Now the previous
+    // good backup survives until the new one is durable.
+    const tmp = `${target}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+    if (existsSync(tmp)) unlinkSync(tmp);
+    const safeTmpPath = tmp.replace(/'/g, "''");
+    try {
+      db.exec(`VACUUM INTO '${safeTmpPath}'`);
+      renameSync(tmp, target);
+      syncParentDirectoryAfterRename(target);
+    } catch (err) {
+      try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* noop */ }
+      throw err;
     }
-    // Safe atomic snapshot:
-    const safeTargetPath = target.replace(/'/g, "''");
-    db.exec(`VACUUM INTO '${safeTargetPath}'`);
   } finally {
     db.close();
   }
@@ -117,16 +127,24 @@ export function restoreBackup(backupPath: string, indexPath: string, force: bool
   }
 
   mkdirSync(dirname(target), { recursive: true });
-  if (existsSync(target)) {
-    unlinkSync(target);
-  }
 
   const wal = `${target}-wal`;
   const shm = `${target}-shm`;
   if (existsSync(wal)) unlinkSync(wal);
   if (existsSync(shm)) unlinkSync(shm);
 
-  copyFileSync(source, target);
+  // Tier-1: copy to temp then rename. A crash during a direct copyFileSync
+  // would leave the production target truncated and unopenable.
+  const tmp = `${target}.restore.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try {
+    copyFileSync(source, tmp);
+    if (existsSync(target)) unlinkSync(target);
+    renameSync(tmp, target);
+    syncParentDirectoryAfterRename(target);
+  } catch (err) {
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* noop */ }
+    throw err;
+  }
   const enc = describeEncryptionState(target);
   if (enc.encrypted && !enc.keyConfigured) {
     throw new Error("Restored encrypted backup but no KINDX_ENCRYPTION_KEY is configured.");
