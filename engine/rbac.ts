@@ -20,11 +20,13 @@
  */
 
 import { existsSync, readFileSync, statSync, promises as fsp } from "node:fs";
-import { join } from "path";
-import { homedir } from "os";
-import { randomBytes, createHash } from "crypto";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { randomBytes, createHash, createHmac } from "node:crypto";
 import YAML from "yaml";
 import { atomicWriteFile } from "./utils/atomic-write.js";
+import { timingSafeStringEqual } from "./utils/timing-safe.js";
+import { quietWarn } from "./utils/quiet-warn.js";
 
 // =============================================================================
 // Types
@@ -128,9 +130,112 @@ const ROLE_PERMISSIONS: Record<TenantRole, Set<RBACOperation>> = {
 // =============================================================================
 // Token hashing
 // =============================================================================
+//
+// New format: `hmac:<64-hex>` — HMAC-SHA-256 keyed by the per-deployment
+// server secret loaded from KINDX_TENANT_SECRET (env, base64-encoded) or
+// auto-provisioned at ${configDir}/tenant_secret with 0o600 perms.
+//
+// Legacy format: a bare 64-char hex string (no prefix). Stored by previous
+// versions as `createHash("sha256").update(token).digest("hex")`. Accepted
+// here so a deployment that upgrades doesn't lose all existing logins; on
+// the first admin write that touches the tenant (createTenant, rotate,
+// updateTenant) we re-hash to the new HMAC format.
+//
+// Comparison is constant-time via timingSafeStringEqual to prevent the
+// previous timing-oracle on tenant existence and active state.
 
+const HMAC_PREFIX = "hmac:";
+let _serverSecretCache: Buffer | null = null;
+
+function getServerSecretPath(): string {
+  return join(getConfigDir(), "tenant_secret");
+}
+
+/**
+ * Load (or auto-provision) the per-deployment HMAC secret used to hash
+ * bearer tokens. Cached after first load.
+ */
+function loadServerSecret(): Buffer {
+  if (_serverSecretCache) return _serverSecretCache;
+  const fromEnv = process.env.KINDX_TENANT_SECRET?.trim();
+  if (fromEnv && fromEnv.length > 0) {
+    let buf: Buffer;
+    try { buf = Buffer.from(fromEnv, "base64"); }
+    catch { buf = Buffer.from(fromEnv, "utf8"); }
+    if (buf.length < 16) {
+      quietWarn("rbac.tenant_secret_too_short", { bytes: buf.length });
+    }
+    _serverSecretCache = buf;
+    return buf;
+  }
+  const secretPath = getServerSecretPath();
+  if (existsSync(secretPath)) {
+    try {
+      const raw = readFileSync(secretPath, "utf8").trim();
+      const buf = Buffer.from(raw, "base64");
+      if (buf.length >= 16) {
+        _serverSecretCache = buf;
+        return buf;
+      }
+      quietWarn("rbac.tenant_secret_file_too_short", { bytes: buf.length });
+    } catch (e) {
+      quietWarn("rbac.tenant_secret_read_failed", {
+        err: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  // Provision a new secret atomically with owner-only perms.
+  const fresh = randomBytes(32);
+  try {
+    atomicWriteFile(secretPath, fresh.toString("base64"), { mode: 0o600 });
+  } catch (e) {
+    quietWarn("rbac.tenant_secret_write_failed", {
+      err: e instanceof Error ? e.message : String(e),
+    });
+  }
+  _serverSecretCache = fresh;
+  return fresh;
+}
+
+/**
+ * Hash a bearer token to the new HMAC-prefixed format.
+ */
 function hashToken(token: string): string {
+  const secret = loadServerSecret();
+  return HMAC_PREFIX + createHmac("sha256", secret).update(token, "utf8").digest("hex");
+}
+
+/**
+ * Hash via legacy bare SHA-256 (no prefix). Used only to recognize tokens
+ * stored by pre-upgrade versions; new writes always use `hashToken`.
+ */
+function legacyHashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Constant-time match of a presented token against a stored hash, accepting
+ * both the new HMAC format and legacy bare SHA-256.
+ *
+ * Returns whether the token matched and whether the stored hash is legacy
+ * (so the caller can record a re-hash hint).
+ */
+function tokenMatches(presented: string, storedHash: string): { ok: boolean; legacy: boolean } {
+  if (storedHash.startsWith(HMAC_PREFIX)) {
+    const candidate = hashToken(presented);
+    return { ok: timingSafeStringEqual(candidate, storedHash), legacy: false };
+  }
+  // Legacy unsalted-SHA-256 path. Still compared in constant time.
+  const legacyCandidate = legacyHashToken(presented);
+  return { ok: timingSafeStringEqual(legacyCandidate, storedHash), legacy: true };
+}
+
+/**
+ * For tests: clear the cached server secret so the next loadServerSecret
+ * re-reads from KINDX_TENANT_SECRET / disk.
+ */
+export function __resetServerSecretCacheForTests(): void {
+  _serverSecretCache = null;
 }
 
 // =============================================================================
@@ -444,29 +549,44 @@ export function revokeCollections(id: string, collections: string[]): boolean {
  * Resolve a bearer token to a tenant identity.
  * Returns null if the token doesn't match any active tenant.
  *
- * Time-complexity: O(n) over registered tenants. For typical deployments
- * (<100 tenants), this is negligible. If needed, a reverse-index
- * (tokenHash → tenantId) can be built at load time.
+ * Constant-time properties:
+ *   - Per-tenant comparison uses crypto.timingSafeEqual (via timing-safe.ts)
+ *   - Loop runs to completion regardless of early match or active state, so
+ *     the response time does not leak which tenant matched, whether the
+ *     match was an inactive tenant, or whether any match occurred at all.
+ *   - Legacy bare-SHA-256 hashes are accepted for backward compatibility;
+ *     a quietWarn fires when they're hit so operators can rotate.
  */
 export function resolveTokenToIdentity(token: string): ResolvedIdentity | null {
   const registry = loadTenantRegistry();
-  const tokenH = hashToken(token);
+  let matched: Tenant | null = null;
+  let matchedLegacy = false;
+  let matchedActive = false;
 
   for (const tenant of Object.values(registry.tenants)) {
-    if (tenant.tokenHash === tokenH) {
-      if (!tenant.active) return null; // Disabled tenant
-
-      return {
-        tenantId: tenant.id,
-        role: tenant.role,
-        allowedCollections: tenant.allowedCollections.includes("*")
-          ? "*"
-          : tenant.allowedCollections,
-      };
+    const result = tokenMatches(token, tenant.tokenHash);
+    // Do not early-return: assigning unconditionally on `result.ok` keeps
+    // execution shape uniform across iterations.
+    if (result.ok) {
+      matched = tenant;
+      matchedLegacy = result.legacy;
+      matchedActive = tenant.active;
     }
   }
 
-  return null;
+  if (!matched || !matchedActive) return null;
+
+  if (matchedLegacy) {
+    quietWarn("rbac.legacy_token_hash_in_use", { tenant: matched.id });
+  }
+
+  return {
+    tenantId: matched.id,
+    role: matched.role,
+    allowedCollections: matched.allowedCollections.includes("*")
+      ? "*"
+      : matched.allowedCollections,
+  };
 }
 
 // =============================================================================
