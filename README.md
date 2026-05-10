@@ -612,3 +612,4 @@ Security issues should be reported according to `SECURITY.md`.
 ## License
 
 MIT. See `LICENSE`.
+
