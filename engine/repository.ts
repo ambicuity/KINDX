@@ -157,6 +157,7 @@ export type ExpandedQuery = {
 // Imported back here for internal use:
 import { resolve, homedir, getPwd, getRealPath, getDefaultDbPath } from "./repository/paths.js";
 import { getCacheKey, getCachedResult, setCachedResult, clearCache, deleteLLMCache } from "./repository/llm-cache.js";
+import { isDocid, findDocumentByDocid, findSimilarFiles } from "./repository/docid.js";
 
 // =============================================================================
 // Virtual Path Utilities (kindx://)
@@ -1480,112 +1481,7 @@ export async function chunkDocumentByTokens(
 // Fuzzy matching
 // =============================================================================
 
-function levenshtein(a: string, b: string, maxDistance: number = Number.POSITIVE_INFINITY): number {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-
-  // Fast-fail: edit distance must be at least the length delta.
-  if (Number.isFinite(maxDistance) && Math.abs(m - n) > maxDistance) {
-    return maxDistance + 1;
-  }
-
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i]![0] = i;
-  for (let j = 0; j <= n; j++) dp[0]![j] = j;
-  for (let i = 1; i <= m; i++) {
-    let rowMin = Number.POSITIVE_INFINITY;
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i]![j] = Math.min(
-        dp[i - 1]![j]! + 1,
-        dp[i]![j - 1]! + 1,
-        dp[i - 1]![j - 1]! + cost
-      );
-      if (dp[i]![j]! < rowMin) {
-        rowMin = dp[i]![j]!;
-      }
-    }
-
-    // Bounded-distance early exit: if the best value in this row already
-    // exceeds the caller's threshold, no future row can recover below it.
-    if (Number.isFinite(maxDistance) && rowMin > maxDistance) {
-      return maxDistance + 1;
-    }
-  }
-  return dp[m]![n]!;
-}
-
-/**
- * Normalize a docid input by stripping surrounding quotes and leading #.
- * Handles: "#abc123", 'abc123', "abc123", #abc123, abc123
- * Returns the bare hex string.
- */
-export function normalizeDocid(docid: string): string {
-  let normalized = docid.trim();
-
-  // Strip surrounding quotes (single or double)
-  if ((normalized.startsWith('"') && normalized.endsWith('"')) ||
-    (normalized.startsWith("'") && normalized.endsWith("'"))) {
-    normalized = normalized.slice(1, -1);
-  }
-
-  // Strip leading # if present
-  if (normalized.startsWith('#')) {
-    normalized = normalized.slice(1);
-  }
-
-  return normalized;
-}
-
-/**
- * Check if a string looks like a docid reference.
- * Accepts: #abc123, abc123, "#abc123", "abc123", '#abc123', 'abc123'
- * Returns true if the normalized form is a valid hex string of 6+ chars.
- */
-export function isDocid(input: string): boolean {
-  const normalized = normalizeDocid(input);
-  // Must be at least 6 hex characters
-  return normalized.length >= 6 && /^[a-f0-9]+$/i.test(normalized);
-}
-
-/**
- * Find a document by its short docid (first 6 characters of hash).
- * Returns the document's virtual path if found, null otherwise.
- * If multiple documents match the same short hash (collision), returns the first one.
- *
- * Accepts lenient input: #abc123, abc123, "#abc123", "abc123"
- */
-export function findDocumentByDocid(db: Database, docid: string): { filepath: string; hash: string } | null {
-  const shortHash = normalizeDocid(docid);
-
-  if (shortHash.length < 1) return null;
-
-  // Look up documents where hash starts with the short hash
-  const doc = db.prepare(`
-    SELECT 'kindx://' || d.collection || '/' || d.path as filepath, d.hash
-    FROM documents d
-    WHERE d.hash LIKE ? AND d.active = 1
-    LIMIT 1
-  `).get(`${shortHash}%`) as { filepath: string; hash: string } | null;
-
-  return doc;
-}
-
-export function findSimilarFiles(db: Database, query: string, maxDistance: number = 3, limit: number = 5): string[] {
-  const allFiles = db.prepare(`
-    SELECT d.path
-    FROM documents d
-    WHERE d.active = 1
-  `).all() as { path: string }[];
-  const queryLower = query.toLowerCase();
-  const scored = allFiles
-    .map(f => ({ path: f.path, dist: levenshtein(f.path.toLowerCase(), queryLower, maxDistance) }))
-    .filter(f => f.dist <= maxDistance)
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, limit);
-  return scored.map(f => f.path);
-}
+// Docid utilities moved to engine/repository/docid.ts (W1 C7).
 
 export function matchFilesByGlob(db: Database, pattern: string): { filepath: string; displayPath: string; bodyLength: number }[] {
   const allFiles = db.prepare(`
