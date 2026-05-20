@@ -33,6 +33,7 @@ type ThresholdSpec = {
     maxRerankTimeoutRate?: number;
     maxQueueSaturationRate?: number;
     maxDegradedModeRate?: number;
+    maxRequestErrorRate?: number;
   };
   scenarios?: Array<{
     sessions: number;
@@ -40,6 +41,7 @@ type ThresholdSpec = {
     maxRerankTimeoutRate?: number;
     maxQueueSaturationRate?: number;
     maxDegradedModeRate?: number;
+    maxRequestErrorRate?: number;
   }>;
 };
 
@@ -88,7 +90,11 @@ function parseArgs(argv: string[]): Args {
     docEquivalent: parseList(get("doc-equivalent"), [10000, 50000, 100000]),
     requestsPerSession: Math.max(1, Number(get("requests-per-session") || 6)),
     routingProfile,
-    thresholdsPath: get("thresholds"),
+    // Default to the repo-shipped thresholds so the bench applies its
+    // checks even when invoked without --thresholds. Previously this
+    // defaulted to undefined, which made evaluateThresholds() return
+    // early and silently pass even with err=1 on every row.
+    thresholdsPath: get("thresholds") || "tooling/perf-thresholds.json",
     outputPath: get("output") || "tooling/artifacts/warm-daemon-benchmark.json",
     summaryPath: get("summary"),
     enforce: has("enforce"),
@@ -199,6 +205,10 @@ function evaluateThresholds(metrics: ScenarioMetrics[], thresholds: ThresholdSpe
     const maxTimeoutRate = scenario?.maxRerankTimeoutRate ?? defaults.maxRerankTimeoutRate;
     const maxSaturationRate = scenario?.maxQueueSaturationRate ?? defaults.maxQueueSaturationRate;
     const maxDegradedRate = scenario?.maxDegradedModeRate ?? defaults.maxDegradedModeRate;
+    // `maxRequestErrorRate` defaults to 0.5 so a fully-broken daemon
+    // (every request errored — typically "no daemon listening on :8788")
+    // is reported as a violation rather than silently passing.
+    const maxErrorRate = scenario?.maxRequestErrorRate ?? defaults.maxRequestErrorRate ?? 0.5;
 
     if (typeof maxP95 === "number" && item.p95LatencyMs > maxP95) {
       violations.push(`sessions=${item.sessions} doceq=${item.docEquivalent}: p95 ${item.p95LatencyMs} > ${maxP95}`);
@@ -211,6 +221,9 @@ function evaluateThresholds(metrics: ScenarioMetrics[], thresholds: ThresholdSpe
     }
     if (typeof maxDegradedRate === "number" && item.degradedModeRate > maxDegradedRate) {
       violations.push(`sessions=${item.sessions} doceq=${item.docEquivalent}: degraded_mode_rate ${item.degradedModeRate} > ${maxDegradedRate}`);
+    }
+    if (typeof maxErrorRate === "number" && item.requestErrorRate > maxErrorRate) {
+      violations.push(`sessions=${item.sessions} doceq=${item.docEquivalent}: request_error_rate ${item.requestErrorRate} > ${maxErrorRate}`);
     }
   }
   return violations;
