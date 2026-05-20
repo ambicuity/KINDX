@@ -50,7 +50,7 @@ export type { BreakPoint, CodeFenceRegion };
 // Configuration
 // =============================================================================
 
-const HOME = process.env.HOME || "/tmp";
+// HOME constant moved to engine/repository/paths.ts (W1 C2).
 export const DEFAULT_EMBED_MODEL = "embeddinggemma";
 export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-Q8_0";
 export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
