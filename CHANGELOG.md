@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Relocated Arch sidecar integration from `engine/integrations/arch/` to `experiments/arch/`. Removed `KINDX_ARCH_*` environment variables, the `arch` CLI subcommand, the `arch_query` and `arch_status` MCP tools, and the `arch:status` / `arch:refresh` npm scripts. The code remains in the tree under `experiments/` and may be revived if adoption data appears.
+
 ## [1.3.5] - 2026-05-09
 
 See full changelog at https://github.com/ambicuity/KINDX/compare/v1.3.4...v1.3.5

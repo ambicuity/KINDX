@@ -303,8 +303,6 @@ npm run kindx -- multi-get "docs/**/*.md"
 | `npm run qa:customer-pov:p2` | Writes P2 customer point-of-view results to `tooling/artifacts/customer-pov-p2.json`. |
 | `npm run qa:customer-pov:p3` | Writes P3 customer point-of-view results to `tooling/artifacts/customer-pov-p3.json`. |
 | `npm run qa:customer-pov:all` | Writes all-phase customer point-of-view results to `tooling/artifacts/customer-pov-all.json`. |
-| `npm run arch:status` | Runs `kindx arch status`. |
-| `npm run arch:refresh` | Runs `kindx arch refresh`. |
 | `npm run inspector` | Starts the MCP inspector against `tsx engine/kindx.ts mcp`. |
 | `npm run release` | Runs `tooling/release.sh`. |
 
@@ -338,7 +336,6 @@ Common commands:
 | `kindx scheduler status` | Show shard sync checkpoint and queue status. |
 | `kindx verify-wipe` | Scan for residual local index artifacts. |
 | `kindx memory <subcommand>` | Manage scoped agent memories. |
-| `kindx arch <status\|build\|import\|refresh>` | Run optional Arch sidecar integration commands. |
 | `kindx migrate chroma <path>` | Migrate a ChromaDB SQLite file. |
 | `kindx migrate openclaw <path>` | Migrate an OpenClaw repository to use KINDX. |
 
@@ -378,7 +375,7 @@ Index data is stored in SQLite. By default, the database path is under `~/.cache
 | `INDEX_PATH` | No | Overrides the SQLite database path. |
 | `KINDX_CONFIG_DIR` | No | Overrides the KINDX config directory. |
 | `XDG_CONFIG_HOME` | No | Base directory used for config when `KINDX_CONFIG_DIR` is unset. |
-| `XDG_CACHE_HOME` | No | Base directory used for cache, index, PID, model, and Arch artifact paths. |
+| `XDG_CACHE_HOME` | No | Base directory used for cache, index, PID, and model paths. |
 | `HOME` | No | Used to resolve default config/cache paths and `~/` collection paths. |
 | `KINDX_MCP_TOKEN` | No | Bearer token for HTTP MCP/query authentication in single-tenant mode. |
 | `KINDX_HTTP_CONCURRENCY` | No | Maximum concurrent HTTP requests. Default: `150`. |
@@ -419,19 +416,10 @@ Index data is stored in SQLite. By default, the database path is under `~/.cache
 | `KINDX_EXTRACTOR_FALLBACK_POLICY` | No | PDF fallback behavior: `fallback` or `strict`. |
 | `CHOKIDAR_USEPOLLING` | No | Set to `1` or `true` to make the watch daemon use polling. |
 | `CHOKIDAR_INTERVAL` | No | Polling interval for `chokidar`. Default: `100`. |
-| `KINDX_ARCH_ENABLED` | No | Enables Arch sidecar build/import/refresh commands. |
-| `KINDX_ARCH_AUGMENT_ENABLED` | No | Enables Arch hints in query results. |
-| `KINDX_ARCH_AUTO_REFRESH_ON_UPDATE` | No | Rebuilds/imports Arch artifacts after `kindx update`. |
-| `KINDX_ARCH_REPO_PATH` | No | Path to the external Arch repository. Default: `./tmp/arch`. |
-| `KINDX_ARCH_PYTHON_BIN` | No | Python executable for Arch commands. Default: `python3`. |
-| `KINDX_ARCH_COLLECTION` | No | Collection name for imported Arch artifacts. Default: `__arch`. |
-| `KINDX_ARCH_ARTIFACT_DIR` | No | Distilled Arch artifact directory. |
-| `KINDX_ARCH_MIN_CONFIDENCE` | No | Minimum Arch confidence: `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`. |
-| `KINDX_ARCH_MAX_HINTS` | No | Maximum Arch hints per query. Default: `3`. |
 | `KINDX_LOG_LEVEL` | No | Logging verbosity: `DEBUG`, `INFO`, `WARN`, or `ERROR`. |
 | `KINDX_LOG_JSON` | No | Set to `1` or `true` for JSON logs. |
 | `NO_COLOR` | No | Disables colored CLI output. |
-| `KINDX_ENABLE_MAINTENANCE_TOOLS` | No | Exposes maintenance MCP tools such as `status`, `arch_status`, `memory_stats`, `memory_history`, `memory_mark_accessed`, `memory_delete`, and `memory_bulk`. |
+| `KINDX_ENABLE_MAINTENANCE_TOOLS` | No | Exposes maintenance MCP tools such as `status`, `memory_stats`, `memory_history`, `memory_mark_accessed`, `memory_delete`, and `memory_bulk`. |
 | `KINDX_TRUST_UPDATE_CMDS` | No | Trusts configured collection update commands when set to `1` or `true`. |
 | `KINDX_MCP_SERVERS_JSON` | No | Inline MCP control-plane server configuration. |
 | `KINDX_TRUST_PROJECT` | No | Marks a project-scoped MCP control-plane config as trusted. |
@@ -495,9 +483,8 @@ The server registers these core tools:
 | `multi_get` | Retrieve multiple documents by glob or list. |
 | `memory_put` | Store or update a scoped memory. |
 | `memory_search` | Search scoped memories by semantic or text mode. |
-| `arch_query` | Retrieve optional Arch integration hints. |
 
-Additional maintenance tools are registered only when `KINDX_ENABLE_MAINTENANCE_TOOLS` is set: `status`, `arch_status`, `memory_history`, `memory_stats`, `memory_mark_accessed`, `memory_delete`, and `memory_bulk`.
+Additional maintenance tools are registered only when `KINDX_ENABLE_MAINTENANCE_TOOLS` is set: `status`, `memory_history`, `memory_stats`, `memory_mark_accessed`, `memory_delete`, and `memory_bulk`.
 
 The TypeScript client exposes helpers for `/query`, `get`, `multi_get`, `status`, `memory_put`, `memory_search`, `memory_history`, and `memory_mark_accessed`.
 

@@ -50,8 +50,6 @@
     "qa:customer-pov:p2": "tsx tooling/customer_pov_launch_gate.ts --phase P2 --output tooling/artifacts/customer-pov-p2.json",
     "qa:customer-pov:p3": "tsx tooling/customer_pov_launch_gate.ts --phase P3 --output tooling/artifacts/customer-pov-p3.json",
     "qa:customer-pov:all": "tsx tooling/customer_pov_launch_gate.ts --phase all --output tooling/artifacts/customer-pov-all.json",
-    "arch:status": "tsx engine/kindx.ts arch status",
-    "arch:refresh": "tsx engine/kindx.ts arch refresh",
     "inspector": "npx @modelcontextprotocol/inspector tsx engine/kindx.ts mcp",
     "release": "./tooling/release.sh"
   },

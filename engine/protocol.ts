@@ -144,7 +144,6 @@ const KINDX_MCP_TOOL_NAMES = [
   "query",
   "get",
   "multi_get",
-  "arch_query",
   "memory_put",
   "memory_search",
 ] as const;
@@ -721,8 +720,6 @@ function createMcpServer(
     // Dynamic Tool Scoping: Prune maintenance tools to save token overhead unless explicitly requested.
     const maintenanceTools = [
       "status",
-      "arch_status",
-      "arch_query",
       "memory_stats",
       "memory_bulk",
       "memory_delete",
@@ -1424,120 +1421,6 @@ Intent-aware lex (C++ performance, not sports):
         structuredContent: fullStatus,
       };
     }
-  );
-
-  maybeRegisterTool(
-    "arch_status",
-    {
-      title: "Arch Status",
-      description: "Show Arch integration status, artifact paths, and latest distilled manifest summary.",
-      annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: {
-        sourceRoot: z.string().optional().describe("Source root path used to resolve Arch workspace (default: current process cwd)."),
-      },
-    },
-    async ({ sourceRoot }: any) => {
-      try {
-        const root = typeof sourceRoot === "string" && sourceRoot.trim().length > 0
-          ? sourceRoot
-          : process.cwd();
-        const { getArchConfig, getArchStatus } = await import("./integrations/arch/adapter.js");
-        const config = getArchConfig();
-        const status = getArchStatus(config, root);
-        return {
-          content: [{
-            type: "text",
-            text: [
-              `enabled=${status.enabled}`,
-              `augment=${status.augmentEnabled}`,
-              `repo=${config.repoPath}`,
-              `source_root=${root}`,
-              `distilled_docs=${status.paths.docsDir}`,
-              `manifest=${status.paths.manifestPath}`,
-              `manifest_present=${status.manifest ? "yes" : "no"}`,
-            ].join("\n"),
-          }],
-          structuredContent: {
-            enabled: status.enabled,
-            augmentEnabled: status.augmentEnabled,
-            repoCheck: status.repoCheck,
-            paths: status.paths,
-            manifest: status.manifest,
-            config: {
-              collectionName: config.collectionName,
-              minConfidence: config.minConfidence,
-              maxHints: config.maxHints,
-            },
-          },
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `arch_status_failed: ${error}` }],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  maybeRegisterTool(
-    "arch_query",
-    {
-      title: "Arch Query",
-      description: "Retrieve architecture-aware hints from distilled Arch artifacts without altering KINDX primary retrieval.",
-      annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: {
-        query: z.string().describe("Architecture-focused query text."),
-        sourceRoot: z.string().optional().describe("Source root path used to resolve Arch workspace (default: current process cwd)."),
-        limit: z.number().optional().default(3).describe("Maximum number of hints to return."),
-      },
-    },
-    async ({ query, sourceRoot, limit }: any) => {
-      try {
-        if (!query || typeof query !== "string" || query.trim().length === 0) {
-          return {
-            content: [{ type: "text", text: "query is required" }],
-            isError: true,
-          };
-        }
-        const root = typeof sourceRoot === "string" && sourceRoot.trim().length > 0
-          ? sourceRoot
-          : process.cwd();
-        const { getArchConfig } = await import("./integrations/arch/adapter.js");
-        const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
-        const { selectArchHints } = await import("./integrations/arch/augment.js");
-        const config = getArchConfig();
-        if (!config.enabled) {
-          return {
-            content: [{ type: "text", text: "Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable." }],
-            isError: true,
-          };
-        }
-        const paths = resolveArchPaths(config.artifactDir, root);
-        const manifest = readDistilledManifest(paths.manifestPath);
-        if (!manifest) {
-          return {
-            content: [{ type: "text", text: `no_arch_manifest: ${paths.manifestPath}` }],
-            isError: true,
-          };
-        }
-        const maxHints = Number.isFinite(limit) ? Math.max(1, Number(limit)) : config.maxHints;
-        const hints = selectArchHints(query, manifest.hintsPath, maxHints);
-        return {
-          content: [{ type: "text", text: `returned ${hints.length} arch hint(s)` }],
-          structuredContent: {
-            query,
-            sourceRoot: root,
-            manifestPath: paths.manifestPath,
-            hints,
-          },
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: `arch_query_failed: ${error}` }],
-          isError: true,
-        };
-      }
-    },
   );
 
   // ---------------------------------------------------------------------------
@@ -2947,8 +2830,6 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               get: "get",
               multi_get: "multi_get",
               status: "status",
-              arch_status: "arch_status",
-              arch_query: "arch_query",
               memory_put: "memory_put",
               memory_search: "memory_search",
               memory_history: "memory_history",
