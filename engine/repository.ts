@@ -165,6 +165,7 @@ import {
   deactivateDocument,
   getActiveDocumentPaths,
 } from "./repository/content.js";
+import { indexSingleFile, unlinkSingleFile } from "./repository/indexing.js";
 
 // =============================================================================
 // Virtual Path Utilities (kindx://)
@@ -3553,86 +3554,4 @@ export async function structuredSearchWithDiagnostics(
 // Watcher Integrations
 // =============================================================================
 
-async function indexSingleFile(
-  db: Database,
-  collectionName: string,
-  relativePath: string,
-  absolutePath: string
-): Promise<"embedded" | "unchanged" | "failed"> {
-  try {
-    const stat = statSync(absolutePath);
-    const path = handelize(relativePath);
-    const ingested = ingestFile(absolutePath);
-    const content = ingested.text;
-
-    // Match full-index behavior: skip empty or unsupported payloads.
-    if (!content.trim()) {
-      return "unchanged";
-    }
-
-    const hash = createHash("sha256").update(content).digest("hex");
-    const title = extractTitle(content, relativePath);
-
-    // Check if unchanged
-    const activeDoc = findActiveDocument(db, collectionName, path);
-    if (activeDoc && activeDoc.hash === hash) {
-      return "unchanged";
-    }
-
-    const now = new Date().toISOString();
-    const modifiedAt = stat.mtime.toISOString();
-
-    // Tier-0-11: Pre-compute everything BEFORE opening the write txn.
-    // The previous code did `db.exec("BEGIN")` then `await import(
-    // "./link-extractor.js")` and the link extraction inside the open txn.
-    // Yielding the event loop with a write txn open meant other watcher
-    // callbacks for parallel files hit SQLITE_BUSY and starved (or worse,
-    // the busy_timeout raced with WAL recovery). The import is now static
-    // and link extraction runs synchronously before BEGIN, so the txn
-    // body holds the write lock for microseconds, not milliseconds.
-    const links = extractInternalLinks(content, relativePath);
-
-    db.exec("BEGIN TRANSACTION");
-    try {
-      insertContent(db, hash, content, now);
-      if (activeDoc) {
-        // Delete old vectors if hash changed
-        db.prepare(`DELETE FROM content_vectors WHERE hash = ?`).run(activeDoc.hash);
-        updateDocument(db, activeDoc.id, title, hash, modifiedAt);
-      } else {
-        insertDocument(db, collectionName, path, title, hash, now, modifiedAt);
-      }
-      upsertDocumentIngestion(db, collectionName, path, {
-        format: ingested.metadata.format,
-        extractor: ingested.metadata.extractor,
-        warnings: ingested.warnings,
-        contentHash: hash,
-        extractedAt: now,
-      });
-      upsertDocumentLinks(db, collectionName, path, links);
-
-      db.exec("COMMIT");
-      return "embedded"; // Properly enqueued for BM25 and embedding
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
-  } catch (err) {
-    console.error(`Failed to index ${relativePath}:`, err);
-    return "failed";
-  }
-}
-
-async function unlinkSingleFile(
-  db: Database,
-  collectionName: string,
-  relativePath: string
-): Promise<boolean> {
-  try {
-    const path = handelize(relativePath);
-    deactivateDocument(db, collectionName, path);
-    return true;
-  } catch (err) {
-    return false;
-  }
-}
+// indexSingleFile and unlinkSingleFile moved to engine/repository/indexing.ts (W1 C15).
