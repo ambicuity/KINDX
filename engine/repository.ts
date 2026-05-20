@@ -138,6 +138,13 @@ import {
 } from "./repository/rerank-queue.js";
 import { chunkDocument, chunkDocumentByTokens } from "./repository/chunking.js";
 import { sanitizeFTS5Term, buildFTS5Query, validateLexQuery, validateSemanticQuery } from "./repository/fts.js";
+import {
+  getCollectionByName,
+  listCollections,
+  removeCollection,
+  renameCollection,
+  getAllCollections,
+} from "./repository/collections.js";
 
 // =============================================================================
 // Virtual Path Utilities (kindx://)
@@ -1498,87 +1505,7 @@ export function getContextForFile(db: Database, filepath: string): string | null
   return contexts.length > 0 ? contexts.join('\n\n') : null;
 }
 
-/**
- * Get collection by name from YAML config.
- * Returns collection metadata from ~/.config/kindx/index.yml
- */
-export function getCollectionByName(db: Database, name: string): { name: string; pwd: string; glob_pattern: string } | null {
-  const collection = getCollection(name);
-  if (!collection) return null;
-
-  return {
-    name: collection.name,
-    pwd: collection.path,
-    glob_pattern: collection.pattern,
-  };
-}
-
-/**
- * List all collections with document counts from database.
- * Merges YAML config with database statistics.
- */
-export function listCollections(db: Database): { name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[] {
-  const collections = collectionsListCollections();
-
-  // Get document counts from database for each collection
-  const result = collections.map(coll => {
-    const stats = db.prepare(`
-      SELECT
-        COUNT(d.id) as doc_count,
-        SUM(CASE WHEN d.active = 1 THEN 1 ELSE 0 END) as active_count,
-        MAX(d.modified_at) as last_modified
-      FROM documents d
-      WHERE d.collection = ?
-    `).get(coll.name) as { doc_count: number; active_count: number; last_modified: string | null } | null;
-
-    return {
-      name: coll.name,
-      pwd: coll.path,
-      glob_pattern: coll.pattern,
-      doc_count: stats?.doc_count || 0,
-      active_count: stats?.active_count || 0,
-      last_modified: stats?.last_modified || null,
-    };
-  });
-
-  return result;
-}
-
-/**
- * Remove a collection and clean up its documents.
- * Uses catalogs.ts to remove from YAML config and cleans up database.
- */
-export function removeCollection(db: Database, collectionName: string): { deletedDocs: number; cleanedHashes: number } {
-  // Delete documents from database
-  const docResult = db.prepare(`DELETE FROM documents WHERE collection = ?`).run(collectionName);
-
-  // Clean up orphaned content hashes
-  const cleanupResult = db.prepare(`
-    DELETE FROM content
-    WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
-  `).run();
-
-  // Remove from YAML config (returns true if found and removed)
-  collectionsRemoveCollection(collectionName);
-
-  return {
-    deletedDocs: docResult.changes,
-    cleanedHashes: cleanupResult.changes
-  };
-}
-
-/**
- * Rename a collection.
- * Updates both YAML config and database documents table.
- */
-export function renameCollection(db: Database, oldName: string, newName: string): void {
-  // Update all documents with the new collection name in database
-  db.prepare(`UPDATE documents SET collection = ? WHERE collection = ?`)
-    .run(newName, oldName);
-
-  // Rename in YAML config
-  collectionsRenameCollection(oldName, newName);
-}
+// Collection helpers moved to engine/repository/collections.ts (W1 C9).
 
 // =============================================================================
 // Context Management Operations
@@ -1657,13 +1584,7 @@ export function listPathContexts(db: Database): { collection_name: string; path_
   });
 }
 
-/**
- * Get all collections (name only - from YAML config).
- */
-export function getAllCollections(db: Database): { name: string }[] {
-  const collections = collectionsListCollections();
-  return collections.map(c => ({ name: c.name }));
-}
+// getAllCollections moved to engine/repository/collections.ts (W1 C9).
 
 /**
  * Check which collections don't have any context defined.
