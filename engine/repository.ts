@@ -137,7 +137,7 @@ import {
   runWithConcurrencyLimit,
 } from "./repository/rerank-queue.js";
 import { chunkDocument, chunkDocumentByTokens } from "./repository/chunking.js";
-import { sanitizeFTS5Term, buildFTS5Query } from "./repository/fts.js";
+import { sanitizeFTS5Term, buildFTS5Query, validateLexQuery, validateSemanticQuery } from "./repository/fts.js";
 
 // =============================================================================
 // Virtual Path Utilities (kindx://)
