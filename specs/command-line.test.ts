@@ -327,17 +327,6 @@ describe("CLI Help", () => {
     expect(stdout).toContain("Usage:");
     expect(stdout).toContain("kindx collection add");
     expect(stdout).toContain("kindx search");
-    expect(stdout).toContain("kindx arch <subcommand>");
-    expect(stdout).toContain("Arch commands:");
-    expect(stdout).toContain("kindx arch status [path]");
-    expect(stdout).toContain("kindx arch refresh [path]");
-    expect(stdout).toContain("Usage: kindx arch <status|build|import|refresh>");
-    expect(stdout).toContain("KINDX_ARCH_ENABLED=1");
-    expect(stdout).toContain("KINDX_ARCH_REPO_PATH");
-    expect(stdout).toContain("KINDX_ARCH_ARTIFACT_DIR");
-    expect(stdout).toContain("KINDX_ARCH_COLLECTION");
-    expect(stdout).toContain("--arch-hints");
-    expect(stdout).toContain("--arch-refresh");
     expect(stdout).toContain("--mask");
     expect(stdout).toContain("--from");
     expect(stdout).toContain("--line-numbers");

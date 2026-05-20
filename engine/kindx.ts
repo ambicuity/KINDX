@@ -849,99 +849,6 @@ async function updateCollections(
   }
 }
 
-function resolveInputPath(pathArg?: string): string {
-  if (!pathArg || pathArg === ".") {
-    return getPwd();
-  }
-  if (pathArg.startsWith("~/")) {
-    return resolve(homedir(), pathArg.slice(2));
-  }
-  if (pathArg.startsWith("/")) {
-    return getRealPath(pathArg);
-  }
-  return getRealPath(resolve(getPwd(), pathArg));
-}
-
-async function ensureArchCollectionIndexed(docsDir: string, collectionName: string): Promise<void> {
-  const { addCollection, updateCollectionSettings } = await import("./catalogs.js");
-  const existing = getCollectionFromYaml(collectionName);
-  if (!existing) {
-    addCollection(collectionName, docsDir, "**/*.md");
-    updateCollectionSettings(collectionName, { includeByDefault: false });
-  } else if (existing.path !== docsDir) {
-    throw new Error(
-      `Arch collection '${collectionName}' points to ${existing.path}, expected ${docsDir}. ` +
-      `Either remove/rename the existing collection or set KINDX_ARCH_COLLECTION.`
-    );
-  }
-  await indexFiles(docsDir, "**/*.md", collectionName, true);
-}
-
-async function runArchBuildOrRefresh(pathArg: string | undefined, importArtifacts: boolean): Promise<void> {
-  const sourceRoot = resolveInputPath(pathArg);
-  const { getArchConfig, buildAndDistillArch } = await import("./integrations/arch/adapter.js");
-  const config = getArchConfig();
-  if (!config.enabled) {
-    throw new Error("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
-  }
-
-  const result = await buildAndDistillArch(sourceRoot, config);
-  console.log(`${c.green}✓${c.reset} Arch sidecar build complete`);
-  console.log(`  Source: ${sourceRoot}`);
-  console.log(`  Nodes: ${result.artifact.nodeCount}, edges: ${result.artifact.edgeCount}, communities: ${result.artifact.communityCount}`);
-  console.log(`  Distilled docs: ${result.paths.docsDir}`);
-  console.log(`  Manifest: ${result.paths.manifestPath}`);
-
-  if (importArtifacts) {
-    await ensureArchCollectionIndexed(result.paths.docsDir, config.collectionName);
-    console.log(`${c.green}✓${c.reset} Imported Arch artifacts into collection '${config.collectionName}'`);
-  }
-}
-
-async function runArchImport(pathArg?: string): Promise<void> {
-  const sourceRoot = resolveInputPath(pathArg);
-  const { getArchConfig } = await import("./integrations/arch/adapter.js");
-  const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
-  const config = getArchConfig();
-  if (!config.enabled) {
-    throw new Error("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
-  }
-  const paths = resolveArchPaths(config.artifactDir, sourceRoot);
-  const manifest = readDistilledManifest(paths.manifestPath);
-  if (!manifest) {
-    throw new Error(`No distilled Arch manifest found at ${paths.manifestPath}. Run 'kindx arch build' first.`);
-  }
-  await ensureArchCollectionIndexed(paths.docsDir, config.collectionName);
-  console.log(`${c.green}✓${c.reset} Imported existing Arch artifacts into collection '${config.collectionName}'`);
-}
-
-async function showArchStatus(pathArg?: string): Promise<void> {
-  const sourceRoot = resolveInputPath(pathArg);
-  const { getArchConfig, getArchStatus } = await import("./integrations/arch/adapter.js");
-  const config = getArchConfig();
-  const status = getArchStatus(config, sourceRoot);
-  console.log(`${c.bold}Arch Integration${c.reset}`);
-  console.log(`  Enabled: ${status.enabled ? "yes" : "no"}`);
-  console.log(`  Augment: ${status.augmentEnabled ? "yes" : "no"}`);
-  console.log(`  Repo: ${config.repoPath}`);
-  if (!status.repoCheck.ok) {
-    console.log(`  Repo check: ${c.yellow}${status.repoCheck.reason}${c.reset}`);
-  } else {
-    console.log(`  Repo check: ${c.green}ok${c.reset}`);
-  }
-  console.log(`  Source root: ${sourceRoot}`);
-  console.log(`  Sidecar output: ${status.paths.sidecarOutputDir}`);
-  console.log(`  Distilled docs: ${status.paths.docsDir}`);
-  console.log(`  Collection: ${config.collectionName}`);
-  if (status.manifest) {
-    console.log(`  Manifest: ${status.paths.manifestPath}`);
-    console.log(`  Generated: ${status.manifest.generatedAt}`);
-    console.log(`  Nodes/Edges/Communities: ${status.manifest.nodeCount}/${status.manifest.edgeCount}/${status.manifest.communityCount}`);
-  } else {
-    console.log(`  Manifest: ${c.dim}not found${c.reset}`);
-  }
-}
-
 /**
  * Detect which collection (if any) contains the given filesystem path.
  * Returns { collectionId, collectionName, relativePath } or null if not in any collection.
@@ -2271,8 +2178,6 @@ type OutputOptions = {
   rerankConcurrency?: number; // Parallel rerank workers
   rerankDropPolicy?: "timeout_fallback" | "wait"; // Queue backpressure policy
   vectorFanoutWorkers?: number; // Vector fanout worker cap
-  archHints?: boolean;  // Enable Arch hint augmentation
-  archRefresh?: boolean; // Run Arch refresh during update
 };
 
 // Highlight query terms in text (skip short words < 3 chars)
@@ -2347,13 +2252,6 @@ type OutputRow = {
   hash?: string;
   docid?: string;
   explain?: HybridQueryExplain;
-  graphHints?: {
-    title: string;
-    kind: string;
-    body: string;
-    sourceFiles: string[];
-    confidence?: string;
-  }[];
 };
 
 function outputResults(results: OutputRow[], query: string, opts: OutputOptions): void {
@@ -2386,7 +2284,6 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         ...(body && { body }),
         ...(snippet && { snippet }),
         ...(opts.explain && row.explain && { explain: row.explain }),
-        ...(row.graphHints && row.graphHints.length > 0 && { graph_hints: row.graphHints }),
       };
     });
     console.log(JSON.stringify(output, null, 2));
@@ -2446,13 +2343,6 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
         console.log(`${c.dim}  Blend: ${Math.round(explain.rrf.weight * 100)}%*${formatExplainNumber(explain.rrf.positionScore)} + ${Math.round((1 - explain.rrf.weight) * 100)}%*${formatExplainNumber(explain.rerankScore)} = ${formatExplainNumber(explain.blendedScore)}${c.reset}`);
         if (contribSummary.length > 0) {
           console.log(`${c.dim}  Top RRF contributions: ${contribSummary}${c.reset}`);
-        }
-      }
-      if (row.graphHints && row.graphHints.length > 0) {
-        console.log(`${c.dim}Arch hints:${c.reset}`);
-        for (const hint of row.graphHints.slice(0, 3)) {
-          const source = hint.sourceFiles.length > 0 ? ` [${hint.sourceFiles[0]}]` : "";
-          console.log(`${c.dim}  - (${hint.kind}) ${hint.title}${source}${c.reset}`);
         }
       }
       console.log();
@@ -2844,36 +2734,6 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       ? (structuredQueries.find(s => s.type === 'lex')?.query || structuredQueries.find(s => s.type === 'vec')?.query || query)
       : query;
 
-    let graphHints: {
-      title: string;
-      kind: string;
-      body: string;
-      sourceFiles: string[];
-      confidence?: string;
-    }[] | undefined;
-
-    try {
-      const { getArchConfig } = await import("./integrations/arch/adapter.js");
-      const { resolveArchPaths, readDistilledManifest } = await import("./integrations/arch/importer.js");
-      const { selectArchHints } = await import("./integrations/arch/augment.js");
-
-      const archConfig = getArchConfig();
-      const shouldUseGraphHints = archConfig.enabled
-        && (opts.archHints ?? archConfig.augmentEnabled);
-      if (shouldUseGraphHints) {
-        const paths = resolveArchPaths(archConfig.artifactDir, getPwd());
-        const manifest = readDistilledManifest(paths.manifestPath);
-        if (manifest) {
-          const selected = selectArchHints(displayQuery, manifest.hintsPath, archConfig.maxHints);
-          if (selected.length > 0) {
-            graphHints = selected;
-          }
-        }
-      }
-    } catch {
-      // Arch augmentation is best-effort and must never break core query flow.
-    }
-
     closeDb();
 
     if (results.length === 0) {
@@ -2892,7 +2752,6 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
       context: r.context,
       docid: r.docid,
       explain: r.explain,
-      graphHints,
     })), displayQuery, { ...opts, limit: results.length });
 
     if (structuredDiagnostics?.degradedMode) {
@@ -2966,9 +2825,6 @@ function parseCLI() {
       "rerank-concurrency": { type: "string" },
       "rerank-drop-policy": { type: "string" },
       "vector-fanout-workers": { type: "string" },
-      "arch-hints": { type: "boolean" },
-      "arch-root": { type: "string" },
-      "arch-refresh": { type: "boolean" },
       // Memory options
       scope: { type: "string" },
       key: { type: "string" },
@@ -3039,8 +2895,6 @@ function parseCLI() {
     rerankDropPolicy: values["rerank-drop-policy"] === "wait" ? "wait" : values["rerank-drop-policy"] === "timeout_fallback" ? "timeout_fallback" : undefined,
     vectorFanoutWorkers: values["vector-fanout-workers"] ? parseInt(String(values["vector-fanout-workers"]), 10) : undefined,
     explain: !!values.explain,
-    archHints: values["arch-hints"] === undefined ? undefined : Boolean(values["arch-hints"]),
-    archRefresh: values["arch-refresh"] === undefined ? undefined : Boolean(values["arch-refresh"]),
   };
 
   return {
@@ -3110,7 +2964,6 @@ function showHelp(): void {
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
   console.log("  kindx memory <subcommand>       - Store and retrieve scoped agent memories");
-  console.log("  kindx arch <subcommand>         - Build/import Arch sidecar artifacts");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
   console.log("  kindx skill install             - Copy the KINDX skill to ~/.claude/commands/ for one-command setup");
   console.log("");
@@ -3131,7 +2984,6 @@ function showHelp(): void {
   console.log("  kindx migrate chroma <path>     - Migrate a ChromaDB sqlite file to KINDX");
   console.log("  kindx migrate openclaw <path>   - Migrate an OpenCLAW repository to use KINDX");
   console.log("  kindx update [--pull]           - Re-index collections (optionally git pull first)");
-  console.log("                             --arch-refresh to rebuild/import Arch artifacts after update");
   console.log("  kindx embed [-f]                - Generate/refresh vector embeddings");
   console.log("                             --resume to continue shard sync from checkpoint");
   console.log("  kindx cleanup                   - Clear caches, vacuum DB");
@@ -3202,8 +3054,6 @@ function showHelp(): void {
   console.log("  --resume                   - Resume shard sync checkpoint during embed");
   console.log("  --line-numbers             - Include line numbers in output");
   console.log("  --explain                  - Include retrieval score traces (query --json/CLI)");
-  console.log("  --arch-hints               - Add optional Arch architecture hints (requires Arch integration)");
-  console.log("  --arch-refresh             - Run Arch refresh after 'kindx update'");
   console.log("  --files | --json | --csv | --md | --xml  - Output format");
   console.log("  -c, --collection <name>    - Filter by one or more collections");
   console.log("");
@@ -3220,27 +3070,6 @@ function showHelp(): void {
   console.log("  kindx memory mark-accessed --scope <scope> --id <id>");
   console.log("  kindx memory embed --scope <scope> [--force]");
   console.log("  Scope resolution: explicit --scope > session scope > workspace scope > default");
-  console.log("");
-  console.log("Arch commands:");
-  console.log("  kindx arch status [path]             - Inspect feature flag, repo/artifact paths, and manifest stats");
-  console.log("  kindx arch build [path]              - Run Arch sidecar + distill artifacts only (no KINDX import)");
-  console.log("  kindx arch import [path]             - Import existing distilled artifacts into KINDX collection");
-  console.log("  kindx arch refresh [path]            - Build + distill + import in one step");
-  console.log("  Usage: kindx arch <status|build|import|refresh> [path] [--arch-root <path>]");
-  console.log("  Options:");
-  console.log("    --arch-root <path>                 - Override source root (codebase to analyze) for this command");
-  console.log("  Related query/update flags:");
-  console.log("    --arch-hints                       - Include Arch graph hints in query/query --json output");
-  console.log("    --arch-refresh                     - Rebuild/import Arch artifacts after 'kindx update'");
-  console.log("  Environment:");
-  console.log("    KINDX_ARCH_ENABLED=1               - Required to run arch build/import/refresh (default: off)");
-  console.log("    KINDX_ARCH_AUGMENT_ENABLED=1       - Enable Arch hints in query results");
-  console.log("    KINDX_ARCH_REPO_PATH               - Path to Arch repository (default: ./tmp/arch)");
-  console.log("    KINDX_ARCH_ARTIFACT_DIR            - Distilled artifact root directory (default: <cache>/arch)");
-  console.log("    KINDX_ARCH_COLLECTION              - Collection name for imported artifacts (default: __arch)");
-  console.log("    KINDX_ARCH_MIN_CONFIDENCE          - Min confidence: EXTRACTED|INFERRED|AMBIGUOUS (default: INFERRED)");
-  console.log("    KINDX_ARCH_MAX_HINTS               - Max graph hints per query (default: 3)");
-  console.log("    KINDX_ARCH_AUTO_REFRESH_ON_UPDATE  - Auto-rebuild on 'kindx update' (default: off)");
   console.log("");
   console.log("Architecture:");
   console.log("");
@@ -3322,7 +3151,7 @@ function showHelp(): void {
   console.log("");
   console.log("  MCP Protocol:");
   console.log("    Transports:  stdio (default, for AI agents) or HTTP/SSE (--http, multi-client)");
-  console.log("    Tools:       query, get, multi_get, status, arch_status, arch_query,");
+  console.log("    Tools:       query, get, multi_get, status,");
   console.log("                 memory_put, memory_search, memory_history, memory_stats,");
   console.log("                 memory_mark_accessed");
   console.log("    Resources:   kindx://{collection}/{path} — document access by virtual path");
@@ -3339,14 +3168,6 @@ function showHelp(): void {
   console.log("    Supersession chains preserve full history (memory_history command).");
   console.log("    Vector embeddings enable semantic search across stored memories.");
   console.log("    Memory prefetch: top-3 accessed memories surfaced in MCP initialize response.");
-  console.log("");
-  console.log("  Arch Integration (Sidecar):");
-  console.log("    Optional architecture analysis via external Python-based Arch tool.");
-  console.log("    Pipeline: source scan → graph.json → distill → hints + manifest.");
-  console.log("    Artifacts: community clusters, god-node detection, surprising edges, reports.");
-  console.log("    Augmentation: graph hints injected into query results (--arch-hints).");
-  console.log("    Confidence: EXTRACTED (code-level) > INFERRED (heuristic) > AMBIGUOUS.");
-  console.log("    Import: distilled artifacts indexed as a KINDX collection (__arch).");
   console.log("");
   console.log("  Collection System:");
   console.log("    YAML-backed registry at ~/.config/kindx/index.yml.");
@@ -3938,66 +3759,6 @@ if (isMain) {
       break;
     }
 
-    case "arch": {
-      const subcommand = cli.args[0];
-      const archRoot = (cli.values["arch-root"] as string | undefined) || cli.args[1];
-      switch (subcommand) {
-        case "status": {
-          await showArchStatus(archRoot);
-          break;
-        }
-        case "build": {
-          await runArchBuildOrRefresh(archRoot, false);
-          break;
-        }
-        case "import": {
-          await runArchImport(archRoot);
-          break;
-        }
-        case "refresh": {
-          await runArchBuildOrRefresh(archRoot, true);
-          break;
-        }
-        case "help":
-        case undefined: {
-          console.log("Usage: kindx arch <status|build|import|refresh> [path] [--arch-root <path>]");
-          console.log("");
-          console.log("Subcommands:");
-          console.log("  status   Inspect feature flag, repo/artifact paths, and distilled manifest stats");
-          console.log("  build    Run Arch sidecar + distill artifacts only (no KINDX import)");
-          console.log("  import   Import existing distilled artifacts into the Arch collection");
-          console.log("  refresh  Build + distill + import in one step");
-          console.log("");
-          console.log("Options:");
-          console.log("  --arch-root <path>   Override source root (codebase to analyze) for this command");
-          console.log("");
-          console.log("Related query/update flags:");
-          console.log("  --arch-hints         Include Arch graph hints in query output (when enabled)");
-          console.log("  --arch-refresh       Rebuild/import Arch artifacts after 'kindx update'");
-          console.log("");
-          console.log("Environment:");
-          console.log("  KINDX_ARCH_ENABLED=1              Required to run arch build/import/refresh (default: off)");
-          console.log("  KINDX_ARCH_AUGMENT_ENABLED=1      Enable Arch hints in query results");
-          console.log("  KINDX_ARCH_REPO_PATH              Path to Arch repository (default: ./tmp/arch)");
-          console.log("  KINDX_ARCH_ARTIFACT_DIR           Distilled artifact root directory (default: <cache>/arch)");
-          console.log("  KINDX_ARCH_COLLECTION             Collection name for imported artifacts (default: __arch)");
-          console.log("  KINDX_ARCH_MIN_CONFIDENCE         Min confidence: EXTRACTED|INFERRED|AMBIGUOUS");
-          console.log("  KINDX_ARCH_MAX_HINTS              Max graph hints per query (default: 3)");
-          console.log("  KINDX_ARCH_AUTO_REFRESH_ON_UPDATE Auto-rebuild on 'kindx update' (default: off)");
-          console.log("");
-          console.log("Notes:");
-          console.log("  - If --arch-root is omitted, KINDX uses the current working directory as the source root.");
-          console.log("  - 'kindx arch import' requires an existing distilled manifest from a prior build.");
-          process.exit(0);
-        }
-        default:
-          console.error(`Unknown arch subcommand: ${subcommand}`);
-          console.error("Run 'kindx arch help' for usage");
-          process.exit(1);
-      }
-      break;
-    }
-
     case "status":
       await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir });
       break;
@@ -4148,17 +3909,6 @@ if (isMain) {
       if (cli.values.embed === true || cli.values.embed === 'true') {
         console.log(`\n${c.magenta}=== Embedding ===${c.reset}`);
         await vectorIndex(DEFAULT_EMBED_MODEL, false, !!cli.values.resume);
-      }
-      
-      try {
-        const { getArchConfig } = await import("./integrations/arch/adapter.js");
-        const archConfig = getArchConfig();
-        const shouldRefresh = cli.opts.archRefresh ?? archConfig.autoRefreshOnUpdate;
-        if (shouldRefresh) {
-          await runArchBuildOrRefresh(cli.values["arch-root"] as string | undefined, true);
-        }
-      } catch (error) {
-        console.error(`${c.yellow}Arch refresh skipped:${c.reset} ${error}`);
       }
       break;
     }
