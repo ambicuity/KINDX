@@ -1,0 +1,20 @@
+# KINDX Warm-Daemon Benchmark (Informational)
+
+- base_url: `http://127.0.0.1:8788/query`
+- routing_profile: `fast`
+- requests_per_session: 6
+
+| doc-equivalent | sessions | requests | p95 latency ms | rerank timeout rate | queue saturation rate | degraded mode rate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10000 | 10 | 60 | 10 | 0 | 0 | 1 (err=1) |
+| 10000 | 25 | 150 | 6 | 0 | 0 | 1 (err=1) |
+| 10000 | 50 | 300 | 10 | 0 | 0 | 1 (err=1) |
+| 50000 | 10 | 60 | 4 | 0 | 0 | 1 (err=1) |
+| 50000 | 25 | 150 | 3 | 0 | 0 | 1 (err=1) |
+| 50000 | 50 | 300 | 9 | 0 | 0 | 1 (err=1) |
+| 100000 | 10 | 60 | 5 | 0 | 0 | 1 (err=1) |
+| 100000 | 25 | 150 | 3 | 0 | 0 | 1 (err=1) |
+| 100000 | 50 | 300 | 9 | 0 | 0 | 1 (err=1) |
+
+No threshold violations.
+
