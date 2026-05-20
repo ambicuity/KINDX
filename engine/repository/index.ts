@@ -6,5 +6,4 @@
 //
 // Spec: docs/superpowers/specs/2026-05-20-kindx-strategic-refactor-program-design.md §5
 
-// Empty barrel; cluster PRs append below.
-export {};
+export * from "./paths.js";
