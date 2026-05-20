@@ -13,3 +13,4 @@ export * from "./rerank-queue.js";
 export * from "./chunking.js";
 export * from "./fts.js";
 export * from "./collections.js";
+export * from "./context-annotations.js";
