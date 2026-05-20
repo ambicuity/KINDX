@@ -25,4 +25,7 @@ export * from "./retrieval/expansion.js";
 export * from "./retrieval/rerank.js";
 export * from "./retrieval/rrf.js";
 export * from "./retrieval/document-lookup.js";
+export * from "./retrieval/hybrid.js";
+export * from "./retrieval/vector-query.js";
+export * from "./retrieval/structured.js";
 export type * from "./types.js";
