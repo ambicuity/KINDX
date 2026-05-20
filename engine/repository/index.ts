@@ -21,4 +21,8 @@ export * from "./embeddings.js";
 export * from "./store-init.js";
 export * from "./store-maintenance.js";
 export * from "./handelize.js";
+export * from "./retrieval/expansion.js";
+export * from "./retrieval/rerank.js";
+export * from "./retrieval/rrf.js";
+export * from "./retrieval/document-lookup.js";
 export type * from "./types.js";
