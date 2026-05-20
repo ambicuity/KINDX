@@ -1,0 +1,30 @@
+{
+  "generatedAt": "2026-05-20T20:59:47.883Z",
+  "embeddingInsert": {
+    "uncached": {
+      "name": "insert_prepare_per_call",
+      "ms": 1439
+    },
+    "cached": {
+      "name": "insert_cached_statements",
+      "ms": 1247
+    },
+    "transactional": {
+      "name": "insert_transactional_bulk",
+      "ms": 7
+    },
+    "improvementCachedVsUncached": 13.34,
+    "improvementTransactionalVsUncached": 99.51
+  },
+  "structuredFanout": {
+    "sequential": {
+      "name": "fanout_sequential",
+      "ms": 109
+    },
+    "parallel": {
+      "name": "fanout_parallel",
+      "ms": 9
+    },
+    "improvementPercent": 91.74
+  }
+}
