@@ -10,3 +10,4 @@ export * from "./paths.js";
 export * from "./llm-cache.js";
 export * from "./docid.js";
 export * from "./rerank-queue.js";
+export * from "./chunking.js";
