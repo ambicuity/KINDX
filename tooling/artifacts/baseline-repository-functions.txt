@@ -1,154 +1,121 @@
-70:export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
-71:export type { BreakPoint, CodeFenceRegion };
-78:export const DEFAULT_EMBED_MODEL = "embeddinggemma";
-79:export const DEFAULT_RERANK_MODEL = "ExpedientFalcon/qwen3-reranker:0.6b-Q8_0";
-80:export const DEFAULT_QUERY_MODEL = "Qwen/Qwen3-1.7B";
-81:export const DEFAULT_GLOB = "**/*.md";
-82:export const DEFAULT_MULTI_GET_MAX_BYTES = 10 * 1024; // 10KB
-84:function getCollectionShardCount(collectionName?: string): number {
-91:function getCollectionRerankSettings(collectionName?: string): {
-129:export const STRONG_SIGNAL_MIN_SCORE = 0.85;
-130:export const STRONG_SIGNAL_MIN_GAP = 0.15;
-133:export const RERANK_CANDIDATE_LIMIT = 40;
-143:export type ExpandedQuery = {
-152:export function homedir(): string {
-166:export function isAbsolutePath(path: string): boolean {
-195:export function normalizePathSeparators(path: string): string {
-204:export function getRelativePathFromPrefix(path: string, prefix: string): string | null {
-231:export function resolve(...paths: string[]): string {
-326:export function enableProductionMode(): void {
-330:export function getDefaultDbPath(indexName: string = "index"): string {
-350:export function getPwd(): string {
-354:export function getRealPath(path: string): string {
-366:export type VirtualPath = {
-382:export function normalizeVirtualPath(input: string): string {
-409:export function parseVirtualPath(virtualPath: string): VirtualPath | null {
-426:export function buildVirtualPath(collectionName: string, path: string): string {
-439:export function isVirtualPath(path: string): boolean {
-459:export function resolveVirtualPath(db: Database, virtualPath: string): string | null {
-482:export function toVirtualPath(db: Database, absolutePath: string): string | null {
-516:function createSqliteVecUnavailableError(reason: string): Error {
-525:function getErrorMessage(err: unknown): string {
-529:export function verifySqliteVecLoaded(db: Database): void {
-543:function initializeDatabase(db: Database): void {
-585:export function ensureVectorIndexIntegrity(
-640:export function isSqliteVecAvailable(): boolean {
-644:function ensureVecTableInternal(db: Database, dimensions: number): void {
-665:export type Store = {
-761:export function createStore(dbPath?: string): Store {
-866:export type DocumentResult = {
-887:export function getDocid(hash: string): string {
-901:function emojiToHex(str: string): string {
-909:export function handelize(path: string): string {
-965:export type SearchResult = DocumentResult & {
-974:export type RankedResult = {
-983:export type RRFContributionTrace = {
-994:export type RRFScoreTrace = {
-1002:export type HybridQueryExplain = {
-1021:export type DocumentNotFound = {
-1030:export type MultiGetResult = {
-1039:export type CollectionInfo = {
-1047:export type IndexStatus = {
-1083:export function getHashesNeedingEmbedding(db: Database): number {
-1093:export type IndexHealthInfo = {
-1099:export function getIndexHealth(db: Database): IndexHealthInfo {
-1117:export function getCacheKey(url: string, body: object): string {
-1124:export function getCachedResult(db: Database, cacheKey: string): string | null {
-1129:export function setCachedResult(db: Database, cacheKey: string, result: string): void {
-1144:export function clearCache(db: Database): void {
-1156:export function deleteLLMCache(db: Database): number {
-1165:export function deleteInactiveDocuments(db: Database): number {
-1174:export function cleanupOrphanedContent(db: Database): number {
-1186:export function cleanupOrphanedVectors(db: Database): number {
-1232:export function vacuumDatabase(db: Database): void {
-1236:export function walCheckpointTruncate(db: Database): boolean {
-1245:export function cleanupSqliteSidecars(dbPath: string): {
-1274:export async function hashContent(content: string): Promise<string> {
-1302:export function extractTitle(content: string, filename: string): string {
-1320:export function insertContent(db: Database, hash: string, content: string, createdAt: string): void {
-1328:export function insertDocument(
-1348:export function upsertDocumentIngestion(
-1375:export function upsertDocumentLinks(db: Database, collectionName: string, sourcePath: string, targetPaths: string[]): void {
-1391:export function getLinkedDocuments(db: Database, collectionName: string, sourcePath: string): string[] {
-1397:export function getBacklinkedDocuments(db: Database, collectionName: string, targetPath: string): string[] {
-1403:export function getGraphConnectedCandidates(db: Database, virtualPaths: string[]): any[] {
-1467:export function getIndexCapabilities(db: Database): Record<string, string> {
-1493:export function findActiveDocument(
-1508:export function updateDocumentTitle(
-1522:export function updateDocument(
-1536:export function deactivateDocument(db: Database, collectionName: string, path: string): void {
-1555:export function getActiveDocumentPaths(db: Database, collectionName: string): string[] {
-1562:export { formatQueryForEmbedding, formatDocForEmbedding };
-1564:export function chunkDocument(
-1631:export async function chunkDocumentByTokens(
-1724:function levenshtein(a: string, b: string, maxDistance: number = Number.POSITIVE_INFINITY): number {
-1765:export function normalizeDocid(docid: string): string {
-1787:export function isDocid(input: string): boolean {
-1800:export function findDocumentByDocid(db: Database, docid: string): { filepath: string; hash: string } | null {
-1816:export function findSimilarFiles(db: Database, query: string, maxDistance: number = 3, limit: number = 5): string[] {
-1831:export function matchFilesByGlob(db: Database, pattern: string): { filepath: string; displayPath: string; bodyLength: number }[] {
-1893:export function getContextForPath(db: Database, collectionName: string, path: string): string | null {
-1937:export function getContextForFile(db: Database, filepath: string): string | null {
-2024:export function getCollectionByName(db: Database, name: string): { name: string; pwd: string; glob_pattern: string } | null {
-2039:export function listCollections(db: Database): { name: string; pwd: string; glob_pattern: string; doc_count: number; active_count: number; last_modified: string | null }[] {
-2070:export function removeCollection(db: Database, collectionName: string): { deletedDocs: number; cleanedHashes: number } {
-2093:export function renameCollection(db: Database, oldName: string, newName: string): void {
-2109:export function insertContext(db: Database, collectionId: number, pathPrefix: string, context: string): void {
-2124:export function deleteContext(db: Database, collectionName: string, pathPrefix: string): number {
-2134:export function deleteGlobalContexts(db: Database): number {
-2157:export function listPathContexts(db: Database): { collection_name: string; path_prefix: string; context: string }[] {
-2182:export function getAllCollections(db: Database): { name: string }[] {
-2191:export function getCollectionsWithoutContext(db: Database): { name: string; pwd: string; doc_count: number }[] {
-2223:export function getTopLevelPathsWithoutContext(db: Database, collectionName: string): string[] {
-2276:function sanitizeFTS5Term(term: string): string {
-2297:function buildFTS5Query(query: string): string | null {
-2369:export function validateSemanticQuery(query: string): string | null {
-2377:export function validateLexQuery(query: string): string | null {
-2388:export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {
-2449:function getMainDatabasePath(db: Database): string {
-2455:function mapVectorMatchesToDocuments(
-2524:export async function searchVec(
-2604:async function getEmbedding(text: string, model: string, isQuery: boolean, session?: ILLMSession): Promise<number[] | null> {
-2617:export function getHashesForEmbedding(db: Database): { hash: string; body: string; path: string }[] {
-2632:export function clearAllEmbeddings(db: Database): void {
-2648:function getInsertEmbeddingStmts(db: Database) {
-2666:export function insertEmbedding(
-2696:function getBulkInsertTxn(db: Database) {
-2738:export function bulkInsertEmbeddings(
-2757:export async function expandQuery(query: string, model: string = DEFAULT_QUERY_MODEL, db: Database): Promise<ExpandedQuery[]> {
-2812:export async function rerank(
-2887:export function reciprocalRankFusion(
-2936:export function buildRrfTrace(
-3018:function hasDocumentIngestTable(db: Database): boolean {
-3037:export function findDocument(db: Database, filename: string, options: { includeBody?: boolean } = {}): DocumentResult | DocumentNotFound {
-3201:export function getDocumentBody(db: Database, doc: DocumentResult | { filepath: string }, fromLine?: number, maxLines?: number): string | null {
-3251:export function findDocuments(
-3386:export function getStatus(db: Database): IndexStatus {
-3476:export type SnippetResult = {
-3484:export function extractSnippet(body: string, query: string, maxLen = 500, chunkPos?: number, chunkLen?: number): SnippetResult {
-3556:export function addLineNumbers(text: string, startLine: number = 1): string {
-3561:async function withTimeout<T>(task: Promise<T>, timeoutMs?: number): Promise<{ timedOut: boolean; value: T | null }> {
-3632:function getQueueController(key: string): QueueController {
-3654:function makeQueueRelease(controller: QueueController, concurrency: number): () => void {
-3676:async function acquireRerankSlot(config: RerankQueueConfig, timeoutMs?: number): Promise<QueueWaitResult> {
-3716:function getRerankQueueSnapshot(config: RerankQueueConfig): RerankQueueSnapshot {
-3736:function parsePositiveInt(raw: string | undefined): number | undefined {
-3742:export function getRerankThroughputSnapshot(collectionName?: string): RerankQueueSnapshot {
-3757:async function runWithConcurrencyLimit<T>(tasks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
-3792:export interface SearchHooks {
-3815:export type SearchRoutingProfile = "fast" | "balanced" | "max_precision";
-3817:export interface StructuredSearchDiagnostics {
-3867:export interface HybridQueryOptions {
-3879:export interface HybridQueryResult {
-3892:export type RankedListMeta = {
-3911:export async function hybridQuery(
-4164:export interface VectorSearchOptions {
-4171:export interface VectorSearchResult {
-4190:export async function vectorSearchQuery(
-4245:export interface StructuredSubSearch {
-4254:export interface StructuredSearchOptions {
-4274:export type StructuredSearchWithDiagnosticsResult = {
-4297:export async function structuredSearch(
-4306:export async function structuredSearchWithDiagnostics(
-4892:async function indexSingleFile(
-4962:async function unlinkSingleFile(
+acquireRerankSlot
+addLineNumbers
+buildFTS5Query
+buildRrfTrace
+buildVirtualPath
+bulkInsertEmbeddings
+chunkDocument
+chunkDocumentByTokens
+cleanupOrphanedContent
+cleanupOrphanedVectors
+cleanupSqliteSidecars
+clearAllEmbeddings
+clearCache
+createStore
+deactivateDocument
+DEFAULT_EMBED_MODEL
+DEFAULT_GLOB
+DEFAULT_MULTI_GET_MAX_BYTES
+DEFAULT_QUERY_MODEL
+DEFAULT_RERANK_MODEL
+deleteContext
+deleteGlobalContexts
+deleteInactiveDocuments
+deleteLLMCache
+enableProductionMode
+ensureVecTableInternal
+ensureVectorIndexIntegrity
+expandQuery
+extractSnippet
+extractTitle
+findActiveDocument
+findDocument
+findDocumentByDocid
+findDocuments
+findSimilarFiles
+getActiveDocumentPaths
+getAllCollections
+getBacklinkedDocuments
+getBulkInsertTxn
+getCachedResult
+getCacheKey
+getCollectionByName
+getCollectionRerankSettings
+getCollectionShardCount
+getCollectionsWithoutContext
+getContextForFile
+getContextForPath
+getDefaultDbPath
+getDocid
+getDocumentBody
+getEmbedding
+getGraphConnectedCandidates
+getHashesForEmbedding
+getHashesNeedingEmbedding
+getIndexCapabilities
+getIndexHealth
+getInsertEmbeddingStmts
+getLinkedDocuments
+getMainDatabasePath
+getPwd
+getQueueController
+getRealPath
+getRelativePathFromPrefix
+getRerankQueueSnapshot
+getRerankThroughputSnapshot
+getStatus
+getTopLevelPathsWithoutContext
+handelize
+hasDocumentIngestTable
+hashContent
+homedir
+hybridQuery
+indexSingleFile
+initializeDatabase
+insertContent
+insertContext
+insertDocument
+insertEmbedding
+isAbsolutePath
+isDocid
+isSqliteVecAvailable
+isVirtualPath
+listCollections
+listPathContexts
+makeQueueRelease
+mapVectorMatchesToDocuments
+matchFilesByGlob
+normalizeDocid
+normalizePathSeparators
+normalizeVirtualPath
+parsePositiveInt
+parseVirtualPath
+reciprocalRankFusion
+removeCollection
+renameCollection
+rerank
+RERANK_CANDIDATE_LIMIT
+resolve
+resolveVirtualPath
+runWithConcurrencyLimit
+sanitizeFTS5Term
+searchFTS
+searchVec
+setCachedResult
+STRONG_SIGNAL_MIN_GAP
+STRONG_SIGNAL_MIN_SCORE
+structuredSearch
+structuredSearchWithDiagnostics
+toVirtualPath
+unlinkSingleFile
+updateDocument
+updateDocumentTitle
+upsertDocumentIngestion
+upsertDocumentLinks
+vacuumDatabase
+validateLexQuery
+validateSemanticQuery
+vectorSearchQuery
+verifySqliteVecLoaded
+walCheckpointTruncate
+withTimeout

@@ -1,0 +1,31 @@
+// Public surface barrel for engine/repository.
+// As clusters land, they add `export * from "./<file>.js"` here.
+//
+// During the migration window, engine/repository.ts also re-exports
+// from this barrel via `export * from "./repository/index.js"`.
+//
+// Spec: docs/superpowers/specs/2026-05-20-kindx-strategic-refactor-program-design.md §5
+
+export * from "./paths.js";
+export * from "./llm-cache.js";
+export * from "./docid.js";
+export * from "./rerank-queue.js";
+export * from "./chunking.js";
+export * from "./fts.js";
+export * from "./collections.js";
+export * from "./context-annotations.js";
+export * from "./content.js";
+export * from "./indexing.js";
+export * from "./vec.js";
+export * from "./embeddings.js";
+export * from "./store-init.js";
+export * from "./store-maintenance.js";
+export * from "./handelize.js";
+export * from "./retrieval/expansion.js";
+export * from "./retrieval/rerank.js";
+export * from "./retrieval/rrf.js";
+export * from "./retrieval/document-lookup.js";
+export * from "./retrieval/hybrid.js";
+export * from "./retrieval/vector-query.js";
+export * from "./retrieval/structured.js";
+export type * from "./types.js";
