@@ -137,6 +137,7 @@ import {
   runWithConcurrencyLimit,
 } from "./repository/rerank-queue.js";
 import { chunkDocument, chunkDocumentByTokens } from "./repository/chunking.js";
+import { sanitizeFTS5Term, buildFTS5Query } from "./repository/fts.js";
 
 // =============================================================================
 // Virtual Path Utilities (kindx://)
@@ -1753,117 +1754,9 @@ export function getTopLevelPathsWithoutContext(db: Database, collectionName: str
 // FTS Search
 // =============================================================================
 
-function sanitizeFTS5Term(term: string): string {
-  // Preserve underscores so snake_case identifiers (e.g., my_function_name)
-  // are treated as single terms rather than being split into separate words.
-  return term.replace(/[^\p{L}\p{N}'_]/gu, '').toLowerCase();
-}
-
-/**
- * Parse lex query syntax into FTS5 query.
- *
- * Supports:
- * - Quoted phrases: "exact phrase" → "exact phrase" (exact match)
- * - Negation: -term or -"phrase" → uses FTS5 NOT operator
- * - Plain terms: term → "term"* (prefix match)
- *
- * FTS5 NOT is a binary operator: `term1 NOT term2` means "match term1 but not term2".
- * So `-term` only works when there are also positive terms.
- *
- * Examples:
- *   performance -sports     → "performance"* NOT "sports"*
- *   "machine learning"      → "machine learning"
- */
-function buildFTS5Query(query: string): string | null {
-  const positive: string[] = [];
-  const negative: string[] = [];
-
-  let i = 0;
-  const s = query.trim();
-
-  while (i < s.length) {
-    // Skip whitespace
-    while (i < s.length && /\s/.test(s[i]!)) i++;
-    if (i >= s.length) break;
-
-    // Check for negation prefix
-    const negated = s[i] === '-';
-    if (negated) i++;
-
-    // Check for quoted phrase
-    if (s[i] === '"') {
-      const start = i + 1;
-      i++;
-      while (i < s.length && s[i] !== '"') i++;
-      const phrase = s.slice(start, i).trim();
-      i++; // skip closing quote
-      if (phrase.length > 0) {
-        const sanitized = phrase.split(/\s+/).map(t => sanitizeFTS5Term(t)).filter(t => t).join(' ');
-        if (sanitized) {
-          const ftsPhrase = `"${sanitized}"`;  // Exact phrase, no prefix match
-          if (negated) {
-            negative.push(ftsPhrase);
-          } else {
-            positive.push(ftsPhrase);
-          }
-        }
-      }
-    } else {
-      // Plain term (until whitespace or quote)
-      const start = i;
-      while (i < s.length && !/[\s"]/.test(s[i]!)) i++;
-      const term = s.slice(start, i);
-
-      const sanitized = sanitizeFTS5Term(term);
-      if (sanitized) {
-        const ftsTerm = `"${sanitized}"*`;  // Prefix match
-        if (negated) {
-          negative.push(ftsTerm);
-        } else {
-          positive.push(ftsTerm);
-        }
-      }
-    }
-  }
-
-  if (positive.length === 0 && negative.length === 0) return null;
-
-  // If only negative terms, we can't search (FTS5 NOT is binary)
-  if (positive.length === 0) return null;
-
-  // Join positive terms with AND
-  let result = positive.join(' AND ');
-
-  // Add NOT clause for negative terms
-  for (const neg of negative) {
-    result = `${result} NOT ${neg}`;
-  }
-
-  return result;
-}
-
-/**
- * Validate that a vec/hyde query doesn't use lex-only syntax.
- * Returns error message if invalid, null if valid.
- */
-export function validateSemanticQuery(query: string): string | null {
-  // Check for negation syntax
-  if (/-\w/.test(query) || /-"/.test(query)) {
-    return 'Negation (-term) is not supported in vec/hyde queries. Use lex for exclusions.';
-  }
-  return null;
-}
-
-export function validateLexQuery(query: string): string | null {
-  if (/[\r\n]/.test(query)) {
-    return 'Lex queries must be a single line. Remove newline characters or split into separate lex: lines.';
-  }
-  const quoteCount = (query.match(/"/g) ?? []).length;
-  if (quoteCount % 2 === 1) {
-    return 'Lex query has an unmatched double quote ("). Add the closing quote or remove it.';
-  }
-  return null;
-}
+// FTS query construction + validators moved to engine/repository/fts.ts (W1 C10).
+// searchFTS stays here until SearchResult, getDocid, and getContextForFile
+// move in their respective clusters.
 
 export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
