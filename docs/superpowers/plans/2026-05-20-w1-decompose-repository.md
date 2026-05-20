@@ -94,17 +94,20 @@ Expected: `No circular dependency found!` If a cycle is reported, fix it before 
 Run: `npm test`
 Expected: all 59 (or current count) tests pass unchanged.
 
-- [ ] **Step 8: Run the working benchmarks (see baseline-capture plan note)**
+- [ ] **Step 8: Run the working performance gate**
 
 ```bash
-npm run bench:section6                              # quality (hit@3, hit@5, MRR)
-tsx tooling/benchmark_release_regressions.ts        # regressions
-tsx tooling/benchmark_warm_daemon.ts                # warm latency p50/p95/p99
+tsx tooling/benchmark_release_regressions.ts        # in-process micro-benchmarks
 ```
 
-Expected: all three pass and report numbers within ±5% of `tooling/artifacts/baseline-*`. If any track regresses > 5%, STOP and diagnose before committing.
+Expected: passes; numbers within ±5% of `tooling/artifacts/baseline-regressions.txt`. If regression > 5%, STOP and diagnose before committing.
 
-Note: the `npm run bench:quality`, `bench:regressions`, `bench:latency` scripts in `package.json` reference `tooling/benchmarks/runner.ts`, which does not exist. We use the working scripts directly. Do not try to "fix" the missing runner as part of W1 — it's out of scope.
+**Gate scope (honest framing, post-baseline-capture 2026-05-20):**
+- `bench:section6` (quality) — needs `tooling/benchmarks/test_corpus_msmarco/`, not in repo. Cannot gate W1 PRs.
+- `benchmark_warm_daemon.ts` (latency) — exits 0 with `err=1` on every row when no daemon listens on :8788; silent-fails. Cannot gate.
+- `benchmark_release_regressions.ts` — works. **The only working performance gate for W1.**
+- W1 PRs rely on: (a) `npm test` for behavioral correctness; (b) the regression bench for hot-path performance.
+- Quality-recall gaps will be caught by post-program manual testing (run `kindx query` on representative inputs) and by users. This is a documented weakening of the safety story relative to the spec.
 
 - [ ] **Step 9: Confirm file size budget**
 
