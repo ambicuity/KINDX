@@ -28,7 +28,6 @@
     "test": "vitest run --reporter=verbose specs/",
     "test:packages": "npm run test -w @ambicuity/kindx-schemas && npm run test -w @ambicuity/kindx-client",
     "test:python": "python3 -m unittest discover -s python/kindx-langchain/tests -v",
-    "test:openclaw-integration": "pnpm --dir openclaw-integration exec vitest run --config vitest.unit.config.ts src/memory/kindx-manager.test.ts",
     "test:all": "npm run pretest:all && npm run test && npm run test:packages && npm run test:python",
     "kindx": "tsx engine/kindx.ts",
     "index": "tsx engine/kindx.ts index",
