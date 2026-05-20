@@ -16,3 +16,4 @@ export * from "./collections.js";
 export * from "./context-annotations.js";
 export * from "./content.js";
 export * from "./indexing.js";
+export type * from "./types.js";
