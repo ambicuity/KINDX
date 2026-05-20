@@ -11,6 +11,11 @@
  *   const store = createStore();
  */
 
+// W1 decomposition — symbols progressively move into ./repository/.
+// The barrel re-exports below preserve the public surface during migration.
+// Spec: docs/superpowers/specs/2026-05-20-kindx-strategic-refactor-program-design.md §5
+export * from "./repository/index.js";
+
 import { openDatabase, loadSqliteVec } from "./runtime.js";
 import {
   CHUNK_SIZE_TOKENS,
