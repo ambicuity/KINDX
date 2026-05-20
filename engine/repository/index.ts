@@ -17,4 +17,5 @@ export * from "./context-annotations.js";
 export * from "./content.js";
 export * from "./indexing.js";
 export * from "./vec.js";
+export * from "./embeddings.js";
 export type * from "./types.js";
