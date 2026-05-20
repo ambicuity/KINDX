@@ -18,4 +18,7 @@ export * from "./content.js";
 export * from "./indexing.js";
 export * from "./vec.js";
 export * from "./embeddings.js";
+export * from "./store-init.js";
+export * from "./store-maintenance.js";
+export * from "./handelize.js";
 export type * from "./types.js";

@@ -124,6 +124,9 @@ import { resolve, homedir, getPwd, getRealPath, getDefaultDbPath } from "./repos
 import { getCacheKey, getCachedResult, setCachedResult, clearCache, deleteLLMCache } from "./repository/llm-cache.js";
 import { searchVec, getMainDatabasePath } from "./repository/vec.js";
 import { getEmbedding, getHashesForEmbedding, clearAllEmbeddings, insertEmbedding, bulkInsertEmbeddings } from "./repository/embeddings.js";
+import { initializeDatabase, ensureVecTableInternal, isSqliteVecAvailable } from "./repository/store-init.js";
+import { getHashesNeedingEmbedding, getIndexHealth, vacuumDatabase, getIndexCapabilities } from "./repository/store-maintenance.js";
+import { getDocid } from "./repository/handelize.js";
 import { isDocid, findDocumentByDocid, findSimilarFiles } from "./repository/docid.js";
 import {
   type RerankQueueConfig,
@@ -330,155 +333,9 @@ export function toVirtualPath(db: Database, absolutePath: string): string | null
   return null;
 }
 
-// =============================================================================
-// Database initialization
-// =============================================================================
-
-
-function createSqliteVecUnavailableError(reason: string): Error {
-  return new Error(
-    "sqlite-vec extension is unavailable. " +
-    `${reason}. ` +
-    "Install Homebrew SQLite so the sqlite-vec extension can be loaded, " +
-    "and set BREW_PREFIX if Homebrew is installed in a non-standard location."
-  );
-}
-
-function getErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-export function verifySqliteVecLoaded(db: Database): void {
-  try {
-    const row = db.prepare(`SELECT vec_version() AS version`).get() as { version?: string } | null;
-    if (!row?.version || typeof row.version !== "string") {
-      throw new Error("vec_version() returned no version");
-    }
-  } catch (err) {
-    const message = getErrorMessage(err);
-    throw createSqliteVecUnavailableError(`sqlite-vec probe failed (${message})`);
-  }
-}
-
-let _sqliteVecAvailable: boolean | null = null;
-
-function initializeDatabase(db: Database): void {
-  try {
-    loadSqliteVec(db);
-    verifySqliteVecLoaded(db);
-    _sqliteVecAvailable = true;
-  } catch {
-    // sqlite-vec is optional — vector search won't work but FTS is fine
-    _sqliteVecAvailable = false;
-  }
-  db.exec("PRAGMA journal_mode = WAL");
-  // Tier-1 perf: WAL mode's recommended pairing is synchronous=NORMAL, not
-  // FULL. FULL forces an extra fsync per commit (~2-3x write slowdown) for
-  // a durability guarantee WAL doesn't actually need — a crash with
-  // synchronous=NORMAL+WAL will roll back the most recent uncommitted
-  // transaction but never corrupt the database. Operators who specifically
-  // need group-commit durability can opt back in via KINDX_SYNCHRONOUS=FULL.
-  const syncMode = (process.env.KINDX_SYNCHRONOUS || "NORMAL").toUpperCase();
-  db.exec(`PRAGMA synchronous = ${syncMode === "FULL" ? "FULL" : "NORMAL"}`);
-  db.exec("PRAGMA busy_timeout = 30000"); // Allow concurrent processes to wait for lock
-  db.exec("PRAGMA foreign_keys = ON");
-
-  initializeCoreSchema(db);
-  
-  ensureVectorIndexIntegrity(db);
-}
-
-/**
- * Verifies that `vectors_vec` and `content_vectors` agree on row count and
- * hash_seq coverage.
- *
- * Behavior:
- *   - On mismatch with KINDX_REPAIR=1 (or callers passing `repair: true`):
- *     truncates both tables so the next embed run rebuilds the vector index.
- *   - On mismatch otherwise: logs a loud warning, records an `error` counter,
- *     and returns. Search continues to operate on what is in the tables; the
- *     operator sees the warning and runs `KINDX_REPAIR=1 kindx ...` (or a
- *     future `kindx repair` subcommand) to rebuild on demand.
- *
- * Auto-truncate was the previous default but the audit found this destroys
- * hours of GPU embedding work on any transient mismatch (interrupted embed,
- * schema upgrade, sharded delete) without consent.
- */
-export function ensureVectorIndexIntegrity(
-  db: Database,
-  opts: { repair?: boolean } = {}
-): { mismatch: boolean; rebuilt: boolean; contentCount: number; indexCount: number } {
-  const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
-  if (!tableCheck) return { mismatch: false, rebuilt: false, contentCount: 0, indexCount: 0 };
-
-  const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as any).c;
-  const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as any).c;
-
-  let mismatch = contentCount !== indexCount;
-
-  if (!mismatch && contentCount > 0) {
-    try {
-      const missingInIndex = db.prepare(`
-        SELECT 1 FROM content_vectors
-        WHERE NOT EXISTS (
-          SELECT 1 FROM vectors_vec
-          WHERE vectors_vec.hash_seq = content_vectors.hash || '_' || content_vectors.seq
-        ) LIMIT 1
-      `).get();
-      if (missingInIndex) mismatch = true;
-    } catch (e) {
-      // SQLite versions that prohibit virtual-table outer joins fail this
-      // probe. Surface as a quiet warning so operators can see when the
-      // probe is silently skipped — previously this catch was a black hole.
-      quietWarn("repository.vec_parity_probe_unsupported", { err: errString(e) });
-    }
-  }
-
-  if (!mismatch) return { mismatch: false, rebuilt: false, contentCount, indexCount };
-
-  const repairRequested = opts.repair === true || process.env.KINDX_REPAIR === "1";
-  if (!repairRequested) {
-    quietWarn("repository.vec_parity_mismatch", {
-      content_rows: contentCount,
-      index_rows: indexCount,
-    });
-    process.stderr.write(
-      `KINDX Warning: vector index parity mismatch (content_vectors=${contentCount}, ` +
-      `vectors_vec=${indexCount}). Vector search may return incomplete results until repaired. ` +
-      `Re-run with KINDX_REPAIR=1 to rebuild.\n`
-    );
-    return { mismatch: true, rebuilt: false, contentCount, indexCount };
-  }
-
-  process.stderr.write(
-    `KINDX Repair: vector index parity mismatch (content_vectors=${contentCount}, ` +
-    `vectors_vec=${indexCount}). KINDX_REPAIR=1 set — rebuilding...\n`
-  );
-  db.exec(`DELETE FROM vectors_vec`);
-  db.exec(`DELETE FROM content_vectors`);
-  return { mismatch: true, rebuilt: true, contentCount, indexCount };
-}
-
-export function isSqliteVecAvailable(): boolean {
-  return _sqliteVecAvailable === true;
-}
-
-function ensureVecTableInternal(db: Database, dimensions: number): void {
-  if (!_sqliteVecAvailable) {
-    throw new Error("sqlite-vec is not available. Vector operations require a SQLite build with extension loading support.");
-  }
-  const tableInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get() as { sql: string } | null;
-  if (tableInfo) {
-    const match = tableInfo.sql.match(/float\[(\d+)\]/);
-    const hasHashSeq = tableInfo.sql.includes('hash_seq');
-    const hasCosine = tableInfo.sql.includes('distance_metric=cosine');
-    const existingDims = match?.[1] ? parseInt(match[1], 10) : null;
-    if (existingDims === dimensions && hasHashSeq && hasCosine) return;
-    // Table exists but wrong schema - need to rebuild
-    db.exec("DROP TABLE IF EXISTS vectors_vec");
-  }
-  db.exec(`CREATE VIRTUAL TABLE vectors_vec USING vec0(hash_seq TEXT PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
-}
+// Database init (initializeDatabase, ensureVectorIndexIntegrity,
+// verifySqliteVecLoaded, isSqliteVecAvailable, ensureVecTableInternal)
+// moved to engine/repository/store-init.ts (W1 C3).
 
 // =============================================================================
 // Store Factory
@@ -687,83 +544,7 @@ export function createStore(dbPath?: string): Store {
  */
 // DocumentResult moved to engine/repository/types.ts (W1 C4).
 
-/**
- * Extract short docid from a full hash (first 6 characters).
- */
-export function getDocid(hash: string): string {
-  return hash.slice(0, 6);
-}
-
-/**
- * Handelize a filename to be more token-friendly.
- * - Convert triple underscore `___` to `/` (folder separator)
- * - Convert to lowercase
- * - Replace sequences of non-word chars (except /) with single dash
- * - Remove leading/trailing dashes from path segments
- * - Preserve folder structure (a/b/c/d.md stays structured)
- * - Preserve file extension
- */
-/** Replace emoji/symbol codepoints with their hex representation (e.g. 🐘 → 1f418) */
-function emojiToHex(str: string): string {
-  return str.replace(/(?:\p{So}\p{Mn}?|\p{Sk})+/gu, (run) => {
-    // Split the run into individual emoji and convert each to hex, dash-separated
-    return [...run].filter(c => /\p{So}|\p{Sk}/u.test(c))
-      .map(c => c.codePointAt(0)!.toString(16)).join('-');
-  });
-}
-
-export function handelize(path: string): string {
-  if (!path || path.trim() === '') {
-    throw new Error('handelize: path cannot be empty');
-  }
-
-  // Allow route-style "$" filenames while still rejecting paths with no usable content.
-  // Emoji (\p{So}) counts as valid content — they get converted to hex codepoints below.
-  const segments = path.split('/').filter(Boolean);
-  const lastSegment = segments[segments.length - 1] || '';
-  const filenameWithoutExt = lastSegment.replace(/\.[^.]+$/, '');
-  const hasValidContent = /[\p{L}\p{N}\p{So}\p{Sk}$]/u.test(filenameWithoutExt);
-  if (!hasValidContent) {
-    throw new Error(`handelize: path "${path}" has no valid filename content`);
-  }
-
-  const result = path
-    .replace(/___/g, '/')       // Triple underscore becomes folder separator
-    .toLowerCase()
-    .split('/')
-    .map((segment, idx, arr) => {
-      const isLastSegment = idx === arr.length - 1;
-
-      // Convert emoji to hex codepoints before cleaning
-      segment = emojiToHex(segment);
-
-      if (isLastSegment) {
-        // For the filename (last segment), preserve the extension
-        const extMatch = segment.match(/(\.[a-z0-9]+)$/i);
-        const ext = extMatch ? extMatch[1] : '';
-        const nameWithoutExt = ext ? segment.slice(0, -ext.length) : segment;
-
-        const cleanedName = nameWithoutExt
-          .replace(/[^\p{L}\p{N}$]+/gu, '-')  // Keep route marker "$", dash-separate other chars
-          .replace(/^-+|-+$/g, ''); // Remove leading/trailing dashes
-
-        return cleanedName + ext;
-      } else {
-        // For directories, just clean normally
-        return segment
-          .replace(/[^\p{L}\p{N}$]+/gu, '-')
-          .replace(/^-+|-+$/g, '');
-      }
-    })
-    .filter(Boolean)
-    .join('/');
-
-  if (!result) {
-    throw new Error(`handelize: path "${path}" resulted in empty string after processing`);
-  }
-
-  return result;
-}
+// getDocid, handelize, emojiToHex moved to engine/repository/handelize.ts (W1 C3).
 
 // SearchResult, RankedResult, RRFContributionTrace, RRFScoreTrace, HybridQueryExplain,
 // DocumentNotFound, MultiGetResult, CollectionInfo, IndexStatus moved to
@@ -773,31 +554,7 @@ export function handelize(path: string): string {
 // Index health
 // =============================================================================
 
-export function getHashesNeedingEmbedding(db: Database): number {
-  const result = db.prepare(`
-    SELECT COUNT(DISTINCT d.hash) as count
-    FROM documents d
-    LEFT JOIN content_vectors v ON d.hash = v.hash AND v.seq = 0
-    WHERE d.active = 1 AND v.hash IS NULL
-  `).get() as { count: number };
-  return result.count;
-}
-
-// IndexHealthInfo moved to engine/repository/types.ts (W1 C4).
-
-export function getIndexHealth(db: Database): IndexHealthInfo {
-  const needsEmbedding = getHashesNeedingEmbedding(db);
-  const totalDocs = (db.prepare(`SELECT COUNT(*) as count FROM documents WHERE active = 1`).get() as { count: number }).count;
-
-  const mostRecent = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
-  let daysStale: number | null = null;
-  if (mostRecent?.latest) {
-    const lastUpdate = new Date(mostRecent.latest);
-    daysStale = Math.floor((Date.now() - lastUpdate.getTime()) / (24 * 60 * 60 * 1000));
-  }
-
-  return { needsEmbedding, totalDocs, daysStale };
-}
+// getHashesNeedingEmbedding, getIndexHealth moved to engine/repository/store-maintenance.ts (W1 C3).
 
 // =============================================================================
 // Caching / LLM cache — moved to engine/repository/llm-cache.ts (W1 C12)
@@ -810,47 +567,7 @@ export function getIndexHealth(db: Database): IndexHealthInfo {
 // deleteInactiveDocuments, cleanupOrphanedContent, cleanupOrphanedVectors
 // moved to engine/repository/content.ts (W1 C5).
 
-/**
- * Run VACUUM to reclaim unused space in the database.
- * This operation rebuilds the database file to eliminate fragmentation.
- */
-export function vacuumDatabase(db: Database): void {
-  db.exec(`VACUUM`);
-}
-
-export function walCheckpointTruncate(db: Database): boolean {
-  try {
-    db.exec(`PRAGMA wal_checkpoint(TRUNCATE)`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function cleanupSqliteSidecars(dbPath: string): {
-  walRemoved: boolean;
-  shmRemoved: boolean;
-  lockedFiles: string[];
-} {
-  const lockedFiles: string[] = [];
-  const walPath = `${dbPath}-wal`;
-  const shmPath = `${dbPath}-shm`;
-  let walRemoved = false;
-  let shmRemoved = false;
-
-  for (const file of [walPath, shmPath]) {
-    if (!existsSync(file)) continue;
-    try {
-      unlinkSync(file);
-      if (file === walPath) walRemoved = true;
-      if (file === shmPath) shmRemoved = true;
-    } catch {
-      lockedFiles.push(file);
-    }
-  }
-
-  return { walRemoved, shmRemoved, lockedFiles };
-}
+// vacuumDatabase, walCheckpointTruncate, cleanupSqliteSidecars moved to engine/repository/store-maintenance.ts (W1 C3).
 
 // hashContent, extractTitle, insertContent, insertDocument, upsertDocumentIngestion,
 // upsertDocumentLinks, getLinkedDocuments, getBacklinkedDocuments moved to
@@ -922,28 +639,7 @@ export function getGraphConnectedCandidates(db: Database, virtualPaths: string[]
   return result;
 }
 
-export function getIndexCapabilities(db: Database): Record<string, string> {
-  const hasCapsTable = db.prepare(`
-    SELECT name
-    FROM sqlite_master
-    WHERE type='table' AND name='index_capabilities'
-  `).get() as { name?: string } | undefined;
-  if (!hasCapsTable?.name) {
-    return {
-      ann: "centroid-v1",
-      encryption: process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none",
-      extractors: "native-text+pdf-docx-adapter-v1",
-    };
-  }
-  const rows = db.prepare(`
-    SELECT capability, value
-    FROM index_capabilities
-    ORDER BY capability
-  `).all() as Array<{ capability: string; value: string }>;
-  const out: Record<string, string> = {};
-  for (const row of rows) out[row.capability] = row.value;
-  return out;
-}
+// getIndexCapabilities moved to engine/repository/store-maintenance.ts (W1 C3).
 
 // findActiveDocument, updateDocumentTitle, updateDocument, deactivateDocument,
 // getActiveDocumentPaths moved to engine/repository/content.ts (W1 C5).
