@@ -59,7 +59,6 @@ The core package is a Node.js/TypeScript project. It can run local GGUF models t
 ├── training/                  # query-expansion training and evaluation tools
 ├── capabilities/kindx/        # packaged KINDX skill files
 ├── demo/                      # sample data, recipes, demos, and comparison fixtures
-├── openclaw-integration/      # separate integration subtree
 ├── Dockerfile                 # multi-stage production image
 ├── package.json               # root package, workspace, scripts, and CLI metadata
 └── sample-catalog.yml         # example collection configuration
@@ -168,6 +167,10 @@ flowchart TD
 
     BLEND --> RESULTS["Ranked Results"]
 ```
+
+## Integrations
+
+- **OpenClaw** — KINDX integration code previously vendored at `openclaw-integration/` was extracted on 2026-05-20 to keep this repo focused on the core engine. Full history is preserved on the local branch `openclaw-extracted`, ready to be pushed to a dedicated sibling repository. The CLI command `kindx migrate openclaw <path>` for migrating external OpenClaw repos into KINDX remains supported (see `engine/migrate-openclaw.ts`).
 
 ## Prerequisites
 
@@ -278,7 +281,6 @@ npm run kindx -- multi-get "docs/**/*.md"
 | `npm test` | Builds the CLI, then runs Vitest tests in `specs/`. |
 | `npm run test:packages` | Runs package tests for schemas and client. |
 | `npm run test:python` | Runs Python unittest discovery for `python/kindx-langchain/tests`. |
-| `npm run test:openclaw-integration` | Runs the configured OpenClaw integration Vitest target through pnpm. |
 | `npm run test:all` | Builds all TypeScript targets, then runs root, package, and Python tests. |
 | `npm run kindx -- <args>` | Runs the CLI TypeScript source with `tsx`. |
 | `npm run index` | Runs `kindx index`. |
