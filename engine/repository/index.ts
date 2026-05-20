@@ -7,3 +7,4 @@
 // Spec: docs/superpowers/specs/2026-05-20-kindx-strategic-refactor-program-design.md §5
 
 export * from "./paths.js";
+export * from "./llm-cache.js";
