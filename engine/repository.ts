@@ -16,14 +16,8 @@
 // Spec: docs/superpowers/specs/2026-05-20-kindx-strategic-refactor-program-design.md §5
 export * from "./repository/index.js";
 
-import { openDatabase, loadSqliteVec } from "./runtime.js";
+import { openDatabase } from "./runtime.js";
 import {
-  CHUNK_SIZE_TOKENS,
-  CHUNK_OVERLAP_TOKENS,
-  CHUNK_SIZE_CHARS,
-  CHUNK_OVERLAP_CHARS,
-  CHUNK_WINDOW_TOKENS,
-  CHUNK_WINDOW_CHARS,
   scanBreakPoints,
   findCodeFences,
   isInsideCodeFence,
@@ -33,44 +27,21 @@ import {
 } from "./chunker.js";
 import type { Database } from "./runtime.js";
 import picomatch from "picomatch";
-import { createHash } from "crypto";
-import { dirname, resolve as pathResolve, relative, join } from "path";
-import { existsSync, realpathSync, statSync, mkdirSync, unlinkSync } from "node:fs";
-import { ingestFile } from "./ingestion.js";
+import { resolve as pathResolve, relative } from "path";
 import {
-  LLM,
-  getDefaultLLM,
   formatQueryForEmbedding,
   formatDocForEmbedding,
-  type RerankDocument,
   type RerankOptions,
   type ILLMSession,
 } from "./inference.js";
 import {
-  findContextForPath as collectionsFindContextForPath,
-  addContext as collectionsAddContext,
-  removeContext as collectionsRemoveContext,
-  listAllContexts as collectionsListAllContexts,
   getCollection,
   listCollections as collectionsListCollections,
-  addCollection as collectionsAddCollection,
-  removeCollection as collectionsRemoveCollection,
-  renameCollection as collectionsRenameCollection,
-  setGlobalContext,
   loadConfig as collectionsLoadConfig,
   type NamedCollection,
 } from "./catalogs.js";
 // SessionRegistry import removed — signal now propagated via options.signal
-import { initializeCoreSchema } from "./schema.js";
-import { describeEncryptionState, ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
-import {
-  getShardRuntimeStatus,
-  getAnnRuntimeStatus,
-  searchShardedVectorsWithDiagnostics,
-} from "./sharding.js";
-import { recordDirectUsage } from "./ai-usage.js";
-import { quietWarn, errString } from "./utils/quiet-warn.js";
-import { extractInternalLinks } from "./link-extractor.js";
+import { ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -120,44 +91,25 @@ export const RERANK_CANDIDATE_LIMIT = 40;
 // =============================================================================
 // All path symbols now re-exported via the barrel at the top of this file.
 // Imported back here for internal use:
-import { resolve, homedir, getPwd, getRealPath, getDefaultDbPath } from "./repository/paths.js";
+import { getDefaultDbPath } from "./repository/paths.js";
 import { getCacheKey, getCachedResult, setCachedResult, clearCache, deleteLLMCache } from "./repository/llm-cache.js";
-import { searchVec, getMainDatabasePath } from "./repository/vec.js";
-import { getEmbedding, getHashesForEmbedding, clearAllEmbeddings, insertEmbedding, bulkInsertEmbeddings } from "./repository/embeddings.js";
-import { initializeDatabase, ensureVecTableInternal, isSqliteVecAvailable } from "./repository/store-init.js";
-import { getHashesNeedingEmbedding, getIndexHealth, vacuumDatabase, getIndexCapabilities } from "./repository/store-maintenance.js";
+import { searchVec } from "./repository/vec.js";
+import { getHashesForEmbedding, clearAllEmbeddings, insertEmbedding, bulkInsertEmbeddings } from "./repository/embeddings.js";
+import { initializeDatabase, ensureVecTableInternal } from "./repository/store-init.js";
+import { getHashesNeedingEmbedding, getIndexHealth, vacuumDatabase } from "./repository/store-maintenance.js";
 import { getDocid } from "./repository/handelize.js";
-import { isDocid, findDocumentByDocid, findSimilarFiles } from "./repository/docid.js";
+import { findDocumentByDocid, findSimilarFiles } from "./repository/docid.js";
 import { expandQuery } from "./repository/retrieval/expansion.js";
 import { rerank } from "./repository/retrieval/rerank.js";
-import { reciprocalRankFusion, buildRrfTrace, type RankedListMeta } from "./repository/retrieval/rrf.js";
 import {
   findDocument,
   getDocumentBody,
   findDocuments,
   getStatus,
-  extractSnippet,
-  addLineNumbers,
-  withTimeout,
 } from "./repository/retrieval/document-lookup.js";
-import {
-  type RerankQueueConfig,
-  type RerankQueueSnapshot,
-  type RerankDropPolicy,
-  acquireRerankSlot,
-  getRerankQueueSnapshot,
-  getCollectionRerankSettings,
-  parsePositiveInt,
-  runWithConcurrencyLimit,
-} from "./repository/rerank-queue.js";
-import { chunkDocument, chunkDocumentByTokens } from "./repository/chunking.js";
-import { sanitizeFTS5Term, buildFTS5Query, validateLexQuery, validateSemanticQuery } from "./repository/fts.js";
+import { buildFTS5Query } from "./repository/fts.js";
 import {
   getCollectionByName,
-  listCollections,
-  removeCollection,
-  renameCollection,
-  getAllCollections,
 } from "./repository/collections.js";
 import {
   getContextForPath,
@@ -168,11 +120,8 @@ import {
   deleteInactiveDocuments,
   cleanupOrphanedContent,
   cleanupOrphanedVectors,
-  extractTitle,
   insertContent,
   insertDocument,
-  upsertDocumentIngestion,
-  upsertDocumentLinks,
   findActiveDocument,
   updateDocumentTitle,
   updateDocument,
@@ -184,16 +133,10 @@ import type {
   ExpandedQuery,
   DocumentResult,
   SearchResult,
-  RankedResult,
-  RRFContributionTrace,
-  RRFScoreTrace,
-  HybridQueryExplain,
   DocumentNotFound,
   MultiGetResult,
-  CollectionInfo,
   IndexStatus,
   IndexHealthInfo,
-  SnippetResult,
 } from "./repository/types.js";
 
 // =============================================================================
