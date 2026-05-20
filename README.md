@@ -541,7 +541,7 @@ npm run test -w @ambicuity/kindx-client
 
 ## Python Integration
 
-`python/kindx-langchain` contains an installable Python package named `kindx-langchain`.
+`python/kindx-langchain` is a thin LangChain retriever wrapper around the KINDX HTTP API. It is not a supported Python product tier — see [PYTHON.md](./PYTHON.md) for the policy and reversal criteria. For production integrations from Python, call the HTTP API directly.
 
 ```bash
 python3 -m unittest discover -s python/kindx-langchain/tests -v
