@@ -6,7 +6,9 @@
 
 **Architecture:** A single PR on a fresh branch that runs three benchmark scripts, snapshots LOC and the `engine/repository.ts` function listing, and commits the artifacts. No engine code changes.
 
-**Tech Stack:** Node 20+, npm, existing `tsx`-based bench scripts under `tooling/benchmarks/`, `wc`, `grep`.
+**Tech Stack:** Node 20+, npm, existing `tsx`-based bench scripts (`tooling/benchmarks/section6_bench.ts`, `tooling/benchmark_release_regressions.ts`, `tooling/benchmark_warm_daemon.ts`), `wc`, `grep`.
+
+**Note:** The `npm run bench:quality`, `bench:latency`, `bench:regressions` scripts in `package.json` reference `tooling/benchmarks/runner.ts`, which does not exist in the repo (verified 2026-05-20 via `git log --all --oneline -- tooling/benchmarks/runner.ts` returning empty). This plan uses the scripts that actually work and have producing artifacts: `bench:section6` (quality, judgment-based hit@K), `tooling/benchmark_release_regressions.ts` (regression detector), `tooling/benchmark_warm_daemon.ts` (warm latency). Fixing the missing runner is out of scope for this program.
 
 ---
 
@@ -75,100 +77,79 @@ Expected: file exists with execute bit (`-rwxr-xr-x`).
 ### Task 4: Capture quality benchmark baseline
 
 **Files:**
-- Create: `tooling/artifacts/baseline-quality.json`
+- Create: `tooling/artifacts/baseline-quality.log` and possibly `tooling/artifacts/baseline-quality-section6.json`
 
-- [ ] **Step 1: Run and capture quality benchmark**
+- [ ] **Step 1: Run the section6 quality benchmark**
 
-Run: `npm run bench:quality 2>&1 | tee tooling/artifacts/baseline-quality.log`
-Expected: bench completes; tail of log shows pass status.
+Run: `npm run bench:section6 2>&1 | tee tooling/artifacts/baseline-quality.log`
+Expected: bench completes; tail of log shows hit@3, hit@5, MRR by difficulty per BENCHMARKS.md §6.
 
-- [ ] **Step 2: Move the JSON output (if the runner writes one) or save the captured log**
+- [ ] **Step 2: Locate any JSON artifact written by the run**
 
-The runner is `tooling/benchmarks/runner.ts`. Check whether it writes a JSON artifact by default:
-
-Run: `ls tooling/benchmarks/*.json 2>/dev/null; ls tooling/artifacts/*.json 2>/dev/null`
-
-If a `*-quality*.json` file exists, copy it to the baseline path:
+The section6 bench writes its own JSON output (see `tooling/benchmarks/section6-results.schema.json`). Find the most recent one:
 
 ```bash
-LATEST=$(ls -t tooling/artifacts/*quality*.json 2>/dev/null | head -1)
-if [ -n "$LATEST" ] && [ "$LATEST" != "tooling/artifacts/baseline-quality.json" ]; then
-  cp "$LATEST" tooling/artifacts/baseline-quality.json
+LATEST=$(ls -t tooling/artifacts/*section6*.json 2>/dev/null | head -1)
+if [ -n "$LATEST" ] && [ "$LATEST" != "tooling/artifacts/baseline-quality-section6.json" ]; then
+  cp "$LATEST" tooling/artifacts/baseline-quality-section6.json
 fi
 ```
 
-If no JSON was written, rename the log so it serves as the baseline:
+If no JSON was written, the log itself is the baseline (see Step 3 below).
 
-```bash
-if [ ! -f tooling/artifacts/baseline-quality.json ]; then
-  mv tooling/artifacts/baseline-quality.log tooling/artifacts/baseline-quality.txt
-fi
-```
+- [ ] **Step 3: Verify the log and/or JSON is non-empty**
 
-Expected: either `tooling/artifacts/baseline-quality.json` or `tooling/artifacts/baseline-quality.txt` exists.
-
-- [ ] **Step 3: Verify the file is non-empty**
-
-Run: `wc -c tooling/artifacts/baseline-quality.*`
-Expected: byte count > 0.
+Run: `wc -c tooling/artifacts/baseline-quality.log tooling/artifacts/baseline-quality-section6.json 2>/dev/null`
+Expected: at least the log byte count > 0.
 
 ---
 
 ### Task 5: Capture regressions benchmark baseline
 
 **Files:**
-- Create: `tooling/artifacts/baseline-regressions.json` (or `.txt`).
+- Create: `tooling/artifacts/baseline-regressions.log`
 
-- [ ] **Step 1: Run and capture regressions benchmark**
+- [ ] **Step 1: Run the release-regressions benchmark (standalone)**
 
-Run: `npm run bench:regressions 2>&1 | tee tooling/artifacts/baseline-regressions.log`
-Expected: bench passes (the `--enforce` flag in package.json will fail the script if regressions exist; an unenforced baseline should still pass).
+Run: `tsx tooling/benchmark_release_regressions.ts 2>&1 | tee tooling/artifacts/baseline-regressions.log`
+Expected: bench completes; tail shows pass/fail summary.
 
-- [ ] **Step 2: Save as baseline (same pattern as Task 4)**
+- [ ] **Step 2: Locate any JSON artifact**
 
 ```bash
 LATEST=$(ls -t tooling/artifacts/*regression*.json 2>/dev/null | head -1)
 if [ -n "$LATEST" ] && [ "$LATEST" != "tooling/artifacts/baseline-regressions.json" ]; then
   cp "$LATEST" tooling/artifacts/baseline-regressions.json
 fi
-if [ ! -f tooling/artifacts/baseline-regressions.json ]; then
-  mv tooling/artifacts/baseline-regressions.log tooling/artifacts/baseline-regressions.txt
-fi
 ```
 
 - [ ] **Step 3: Verify**
 
-Run: `wc -c tooling/artifacts/baseline-regressions.*`
-Expected: byte count > 0.
+Run: `wc -c tooling/artifacts/baseline-regressions.* 2>/dev/null`
+Expected: at least the log byte count > 0.
 
 ---
 
 ### Task 6: Capture latency benchmark baseline
 
 **Files:**
-- Create: `tooling/artifacts/baseline-latency.json` (or `.txt`).
+- Create: `tooling/artifacts/baseline-latency.log`
 
-- [ ] **Step 1: Run latency benchmark**
+- [ ] **Step 1: Run the warm-daemon latency benchmark (standalone)**
 
-Run: `npm run bench:latency 2>&1 | tee tooling/artifacts/baseline-latency.log`
-Expected: bench reports p50/p95/p99 numbers (per BENCHMARKS.md §1).
+Run: `tsx tooling/benchmark_warm_daemon.ts 2>&1 | tee tooling/artifacts/baseline-latency.log`
+Expected: bench reports warm-daemon p50/p95/p99 numbers and writes `tooling/artifacts/warm-daemon-benchmark.json` (which already exists from a previous run; this one overwrites with the current baseline).
 
-- [ ] **Step 2: Save as baseline (same pattern as Task 4)**
+- [ ] **Step 2: Preserve the JSON artifact as a versioned baseline**
 
 ```bash
-LATEST=$(ls -t tooling/artifacts/*latency*.json 2>/dev/null | head -1)
-if [ -n "$LATEST" ] && [ "$LATEST" != "tooling/artifacts/baseline-latency.json" ]; then
-  cp "$LATEST" tooling/artifacts/baseline-latency.json
-fi
-if [ ! -f tooling/artifacts/baseline-latency.json ]; then
-  mv tooling/artifacts/baseline-latency.log tooling/artifacts/baseline-latency.txt
-fi
+cp tooling/artifacts/warm-daemon-benchmark.json tooling/artifacts/baseline-latency-warm-daemon.json
 ```
 
 - [ ] **Step 3: Verify**
 
-Run: `wc -c tooling/artifacts/baseline-latency.*`
-Expected: byte count > 0.
+Run: `wc -c tooling/artifacts/baseline-latency.* tooling/artifacts/baseline-latency-warm-daemon.json 2>/dev/null`
+Expected: byte count > 0 for at least the log.
 
 ---
 
@@ -233,11 +214,14 @@ Expected: file contains a single line like `1.4G  .git` (exact size depends on e
 
 ```bash
 git add tooling/artifacts/baseline-quality.* \
+        tooling/artifacts/baseline-quality-section6.json \
         tooling/artifacts/baseline-regressions.* \
         tooling/artifacts/baseline-latency.* \
+        tooling/artifacts/baseline-latency-warm-daemon.json \
         tooling/artifacts/baseline-loc.txt \
         tooling/artifacts/baseline-repository-functions.txt \
-        tooling/artifacts/baseline-git-size.txt
+        tooling/artifacts/baseline-git-size.txt 2>/dev/null
+git add tooling/artifacts/baseline-*
 ```
 
 - [ ] **Step 2: Confirm only baseline artifacts are staged**

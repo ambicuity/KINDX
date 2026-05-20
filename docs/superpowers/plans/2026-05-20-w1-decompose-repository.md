@@ -94,15 +94,17 @@ Expected: `No circular dependency found!` If a cycle is reported, fix it before 
 Run: `npm test`
 Expected: all 59 (or current count) tests pass unchanged.
 
-- [ ] **Step 8: Run the enforced benchmarks**
+- [ ] **Step 8: Run the working benchmarks (see baseline-capture plan note)**
 
 ```bash
-npm run bench:quality
-npm run bench:regressions
-npm run bench:latency
+npm run bench:section6                              # quality (hit@3, hit@5, MRR)
+tsx tooling/benchmark_release_regressions.ts        # regressions
+tsx tooling/benchmark_warm_daemon.ts                # warm latency p50/p95/p99
 ```
 
 Expected: all three pass and report numbers within ±5% of `tooling/artifacts/baseline-*`. If any track regresses > 5%, STOP and diagnose before committing.
+
+Note: the `npm run bench:quality`, `bench:regressions`, `bench:latency` scripts in `package.json` reference `tooling/benchmarks/runner.ts`, which does not exist. We use the working scripts directly. Do not try to "fix" the missing runner as part of W1 — it's out of scope.
 
 - [ ] **Step 9: Confirm file size budget**
 
