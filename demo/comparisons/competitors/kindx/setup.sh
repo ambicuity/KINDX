@@ -5,7 +5,7 @@ set -euo pipefail
 # Assumes Node.js >= 18 is installed
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORPUS_DIR="$(cd "$SCRIPT_DIR/../../../specs/eval-docs" && pwd)"
+CORPUS_DIR="$(cd "$SCRIPT_DIR/../../../../specs/eval-docs" && pwd)"
 
 echo "=== KINDX Setup ==="
 
