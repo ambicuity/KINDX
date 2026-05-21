@@ -178,17 +178,20 @@ BM25_MED=$(compute_median "${BM25_LATS[@]}")
 VECTOR_MED=$(compute_median "${VECTOR_LATS[@]}")
 HYBRID_MED=$(compute_median "${HYBRID_LATS[@]}")
 
-BM25_H1_RATE=$(echo "scale=3; $BM25_HIT1 / $NUM_QUERIES" | bc)
-BM25_H3_RATE=$(echo "scale=3; $BM25_HIT3 / $NUM_QUERIES" | bc)
-BM25_MRR=$(echo "scale=3; $BM25_RR_SUM / $NUM_QUERIES" | bc)
+# `bc` returns bare ".722" for values <1; prepend 0 so JSON parsers accept it.
+fmt_ratio() { local v; v=$(echo "scale=3; $1 / $2" | bc); [[ "$v" == .* ]] && v="0$v"; echo "$v"; }
 
-VECTOR_H1_RATE=$(echo "scale=3; $VECTOR_HIT1 / $NUM_QUERIES" | bc)
-VECTOR_H3_RATE=$(echo "scale=3; $VECTOR_HIT3 / $NUM_QUERIES" | bc)
-VECTOR_MRR=$(echo "scale=3; $VECTOR_RR_SUM / $NUM_QUERIES" | bc)
+BM25_H1_RATE=$(fmt_ratio "$BM25_HIT1" "$NUM_QUERIES")
+BM25_H3_RATE=$(fmt_ratio "$BM25_HIT3" "$NUM_QUERIES")
+BM25_MRR=$(fmt_ratio "$BM25_RR_SUM" "$NUM_QUERIES")
 
-HYBRID_H1_RATE=$(echo "scale=3; $HYBRID_HIT1 / $NUM_QUERIES" | bc)
-HYBRID_H3_RATE=$(echo "scale=3; $HYBRID_HIT3 / $NUM_QUERIES" | bc)
-HYBRID_MRR=$(echo "scale=3; $HYBRID_RR_SUM / $NUM_QUERIES" | bc)
+VECTOR_H1_RATE=$(fmt_ratio "$VECTOR_HIT1" "$NUM_QUERIES")
+VECTOR_H3_RATE=$(fmt_ratio "$VECTOR_HIT3" "$NUM_QUERIES")
+VECTOR_MRR=$(fmt_ratio "$VECTOR_RR_SUM" "$NUM_QUERIES")
+
+HYBRID_H1_RATE=$(fmt_ratio "$HYBRID_HIT1" "$NUM_QUERIES")
+HYBRID_H3_RATE=$(fmt_ratio "$HYBRID_HIT3" "$NUM_QUERIES")
+HYBRID_MRR=$(fmt_ratio "$HYBRID_RR_SUM" "$NUM_QUERIES")
 
 # Merge all results and write output
 ALL_RESULTS=$(jq -s 'add' "$BM25_RESULTS" "$VECTOR_RESULTS" "$HYBRID_RESULTS")

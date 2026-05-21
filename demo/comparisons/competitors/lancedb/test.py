@@ -92,12 +92,27 @@ def run_query_mode(query_text, mode):
             query_vec = model.encode([query_text])[0].tolist()
             results = table.search(query_vec).limit(5).to_list()
         elif mode == "hybrid":
+            # LanceDB's `query_type="hybrid"` requires a registered embedding
+            # function on the table. Rather than register one (which would
+            # change the test from "minimal LanceDB setup" to "configured
+            # LanceDB"), we do a manual RRF over the two queries the user
+            # would otherwise run themselves.
             query_vec = model.encode([query_text])[0].tolist()
-            results = (
-                table.search(query_text, query_type="hybrid")
-                .limit(5)
-                .to_list()
-            )
+            fts_hits = table.search(query_text, query_type="fts").limit(10).to_list()
+            vec_hits = table.search(query_vec).limit(10).to_list()
+            scored = {}
+            k = 60
+            for rank, hit in enumerate(fts_hits):
+                key = hit.get("text", "")
+                scored.setdefault(key, {"hit": hit, "score": 0.0})
+                scored[key]["score"] += 1.0 / (k + rank + 1)
+            for rank, hit in enumerate(vec_hits):
+                key = hit.get("text", "")
+                scored.setdefault(key, {"hit": hit, "score": 0.0})
+                scored[key]["score"] += 1.0 / (k + rank + 1)
+            results = [
+                v["hit"] for v in sorted(scored.values(), key=lambda x: -x["score"])[:5]
+            ]
         else:
             results = []
     except Exception as e:
