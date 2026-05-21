@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { cpSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -748,8 +748,41 @@ async function main(): Promise<void> {
   ];
 
   const datasets: DatasetResult[] = [];
+  const skipped: { manifest: string; reason: string }[] = [];
   for (const m of manifests) {
+    // Pre-flight: if the source corpus directory does not exist on disk,
+    // skip the dataset with a clear message instead of crashing in cpSync.
+    // The corpora are large fixtures (MS MARCO / DBpedia) that are not
+    // bundled with the repo — see tooling/benchmarks/README.md.
+    try {
+      const manifest = readJson<JudgmentManifest>(m);
+      const corpusDir = resolve(ROOT, manifest.source_corpus);
+      if (!existsSync(corpusDir)) {
+        const msg = `corpus not found at ${manifest.source_corpus}`;
+        console.warn(`[section6] SKIP ${basename(m)}: ${msg}`);
+        skipped.push({ manifest: basename(m), reason: msg });
+        continue;
+      }
+    } catch (err) {
+      const msg = `failed to read manifest: ${err}`;
+      console.warn(`[section6] SKIP ${basename(m)}: ${msg}`);
+      skipped.push({ manifest: basename(m), reason: msg });
+      continue;
+    }
     datasets.push(await benchmarkDataset(m));
+  }
+
+  if (datasets.length === 0) {
+    console.error(
+      `[section6] No datasets had a usable corpus. ${skipped.length} skipped:\n` +
+      skipped.map((s) => `  - ${s.manifest}: ${s.reason}`).join("\n") +
+      `\n\nSee tooling/benchmarks/README.md for how to populate the corpora.`
+    );
+    // Non-enforced: still write a report listing skips so CI artifacts are useful.
+    // Enforced: caller (runner.ts with --enforce) gets a non-zero exit.
+    if (process.env.KINDX_BENCH_ENFORCE === "1") {
+      process.exit(2);
+    }
   }
 
   const report: Section6Results = {
