@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6](https://github.com/ambicuity/KINDX/compare/v1.3.5...v1.3.6) (2026-05-21)
+
+
+### Bug Fixes
+
+* **repo C10:** also import validateLexQuery and validateSemanticQuery ([c030e33](https://github.com/ambicuity/KINDX/commit/c030e330f4d82c46da40b59a68d81b2fb549ad88))
+
 ## [Unreleased]
 
 ### Changed
