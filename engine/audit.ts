@@ -31,6 +31,7 @@ export type AuditAction =
   | "daemon_start"
   | "daemon_stop"
   | "memory_bulk"
+  | "memory_feedback"
   | "tool_denied"
   | "config_resolved"
   | "rate_limited"

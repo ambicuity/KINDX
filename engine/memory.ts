@@ -16,7 +16,19 @@ const SINGLE_CARDINALITY_KEYS = new Set([
   "card_holder_name",
 ]);
 
+const LIFECYCLE_EVERY_N_OPS = Number(process.env.KINDX_MEMORY_LIFECYCLE_INTERVAL) || 50;
+let _lifecycleOpsSinceLastRun = 0;
+
 let _memoryVectorPersistWarningEmitted = false;
+
+export function maybeRunLifecycleJobs(db: Database, scope: string): void {
+  _lifecycleOpsSinceLastRun += 1;
+  if (_lifecycleOpsSinceLastRun < LIFECYCLE_EVERY_N_OPS) return;
+  _lifecycleOpsSinceLastRun = 0;
+  if (Math.random() > 0.01) return;
+  purgeExpiredMemories(db, scope);
+  consolidateMemories(db, scope);
+}
 
 export type MemoryRecord = {
   id: number;
@@ -35,6 +47,8 @@ export type MemoryRecord = {
   searchText: string | null;
   /** ISO-8601 expiration timestamp. NULL means never expires. */
   expiresAt: string | null;
+  /** TTL in seconds. When set, expires_at is refreshed on access. */
+  ttlSeconds: number | null;
 };
 
 export type MemorySearchResult = {
@@ -88,6 +102,7 @@ export type UpsertMemoryInput = {
    * Inspired by Zep's temporal decay pattern.
    */
   ttl?: number;
+  crossPrefixThreshold?: number;
 };
 
 export type BulkMemoryOperation = 
@@ -265,6 +280,7 @@ function toMemoryRecord(row: any): MemoryRecord {
     supersededAt: row.superseded_at ?? null,
     searchText: row.search_text ?? null,
     expiresAt: row.expires_at ?? null,
+    ttlSeconds: row.ttl_seconds == null ? null : Number(row.ttl_seconds),
   };
 }
 
@@ -329,6 +345,22 @@ function getSemanticCandidates(db: Database, scope: string, prefix: string): { i
   }));
 }
 
+function getCrossPrefixCandidates(db: Database, scope: string): { id: number; key: string; embedding: Float32Array }[] {
+  const rows = db.prepare(`
+    SELECT m.id, m.key, e.embedding
+    FROM memories m
+    JOIN memory_embeddings e ON e.memory_id = m.id
+    WHERE m.scope = ?
+      AND m.superseded_by IS NULL
+  `).all(scope) as { id: number; key: string; embedding: Buffer }[];
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    key: String(row.key),
+    embedding: deserializeVector(row.embedding),
+  }));
+}
+
 function incrementCounters(db: Database, ids: number[]): void {
   if (ids.length === 0) return;
   const placeholders = ids.map(() => "?").join(",");
@@ -338,7 +370,12 @@ function incrementCounters(db: Database, ids: number[]): void {
     SET appeared_count = appeared_count + 1,
         accessed_count = accessed_count + 1,
         last_appeared_at = ?,
-        last_accessed_at = ?
+        last_accessed_at = ?,
+        expires_at = CASE
+          WHEN ttl_seconds IS NOT NULL
+          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          ELSE expires_at
+        END
     WHERE id IN (${placeholders})
   `).run(now, now, ...ids);
 }
@@ -361,14 +398,17 @@ function mergeSource(existingSource: string | null, incomingSource?: string): st
   return `${oldSource}, ${nextSource}`;
 }
 
-function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | Float32Array): void {
+function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | Float32Array, model?: string): void {
   if (!vector || vector.length === 0) return;
   const norm = normalizeVector(vector);
   const embeddedAt = nowIso();
+  const resolvedModel = model
+    ?? process.env.KINDX_EMBED_MODEL
+    ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
   db.prepare(`
     INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, model, embedded_at)
     VALUES (?, ?, ?, ?)
-  `).run(memoryId, serializeVector(norm), "kindx-local", embeddedAt);
+  `).run(memoryId, serializeVector(norm), resolvedModel, embeddedAt);
 
   const dimensions = norm.length;
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_vectors_vec'`).get();
@@ -399,15 +439,24 @@ function insertNewMemory(db: Database, params: {
   tags: string[];
   vector?: number[] | Float32Array;
   expiresAt?: string | null;
+  ttlSeconds?: number | null;
+  embedModel?: string;
 }): number {
   const now = nowIso();
+
+  // Eviction: enforce scope limits before inserting
+  const maxMemories = getScopeMemoryLimit(db, params.scope);
+  if (maxMemories !== null) {
+    evictIfNeeded(db, params.scope, maxMemories - 1);
+  }
+
   const run = db.prepare(`
     INSERT INTO memories (
       scope, key, value, confidence, source,
       appeared_count, accessed_count,
       created_at, last_appeared_at, last_accessed_at,
-      search_text, expires_at
-    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?, ?)
+      search_text, expires_at, ttl_seconds
+    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?, ?, ?)
   `).run(
     params.scope,
     params.key,
@@ -418,10 +467,11 @@ function insertNewMemory(db: Database, params: {
     now,
     params.searchText,
     params.expiresAt ?? null,
+    params.ttlSeconds ?? null,
   );
   const memoryId = Number(run.lastInsertRowid);
   ensureTags(db, memoryId, params.tags);
-  tryStoreEmbedding(db, memoryId, params.vector);
+  tryStoreEmbedding(db, memoryId, params.vector, params.embedModel);
   return memoryId;
 }
 
@@ -508,6 +558,11 @@ export function initializeMemorySchema(db: Database): void {
     db.exec(`ALTER TABLE memories ADD COLUMN expires_at TEXT`);
   }
 
+  // Migration: add ttl_seconds column for TTL refresh (backward-compatible)
+  if (!colNames.has("ttl_seconds")) {
+    db.exec(`ALTER TABLE memories ADD COLUMN ttl_seconds INTEGER`);
+  }
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_key_active ON memories(scope, key, superseded_by)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_search ON memories(scope, search_text)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_accessed ON memories(scope, accessed_count)`);
@@ -522,13 +577,197 @@ export function initializeMemorySchema(db: Database): void {
   `).run(MEMORY_SCHEMA_VERSION);
 }
 
-async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<number[] | undefined> {
-  if (precomputedVector && precomputedVector.length > 0) return precomputedVector;
+export type FeedbackSummary = {
+  result_id: number;
+  positive: number;
+  negative: number;
+  neutral: number;
+  total: number;
+};
+
+export function initializeMemoryFeedbackSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      query TEXT NOT NULL,
+      query_hash TEXT NOT NULL,
+      result_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      satisfaction TEXT NOT NULL CHECK(satisfaction IN ('positive', 'negative', 'neutral')),
+      source TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_feedback_scope_hash
+      ON memory_feedback(scope, query_hash)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_feedback_scope_result
+      ON memory_feedback(scope, result_id)
+  `);
+}
+
+export function recordFeedback(
+  db: Database,
+  scope: string,
+  query: string,
+  results: { id: number; satisfaction: "positive" | "negative" | "neutral" }[],
+  source?: string,
+): number {
+  if (results.length === 0) return 0;
+  const normalizedScope = normalizeScope(scope);
+  const now = nowIso();
+  const queryHash = createHash("sha256").update(query.trim().toLowerCase()).digest("hex");
+
+  return withTransaction(db, () => {
+    const stmt = db.prepare(`
+      INSERT INTO memory_feedback (scope, query, query_hash, result_id, satisfaction, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    let count = 0;
+    for (const r of results) {
+      stmt.run(normalizedScope, query, queryHash, r.id, r.satisfaction, source ?? null, now);
+      count++;
+    }
+    return count;
+  });
+}
+
+export function computeFeedbackBias(
+  db: Database,
+  scope: string,
+  memoryIds: number[],
+): Map<number, number> {
+  const biasMap = new Map<number, number>();
+  if (memoryIds.length === 0) return biasMap;
+
+  const normalizedScope = normalizeScope(scope);
+  const boostFactor = Number(process.env.KINDX_FEEDBACK_BOOST_FACTOR) || 0.3;
+  const placeholders = memoryIds.map(() => "?").join(",");
+
+  try {
+    const rows = db.prepare(`
+      SELECT result_id,
+        SUM(CASE WHEN satisfaction = 'positive' THEN 1 ELSE 0 END) AS positive,
+        COUNT(*) AS total
+      FROM memory_feedback
+      WHERE scope = ? AND result_id IN (${placeholders})
+      GROUP BY result_id
+    `).all(normalizedScope, ...memoryIds) as { result_id: number; positive: number; total: number }[];
+
+    for (const row of rows) {
+      const ratio = Number(row.positive) / Number(row.total);
+      const bias = 1 + boostFactor * (ratio - 0.5);
+      biasMap.set(Number(row.result_id), bias);
+    }
+  } catch {
+    // Table may not exist yet; treat as no feedback
+  }
+
+  // Fill in default 1.0 for IDs not in feedback table
+  for (const id of memoryIds) {
+    if (!biasMap.has(id)) biasMap.set(id, 1.0);
+  }
+
+  return biasMap;
+}
+
+export function getFeedbackForScope(db: Database, scope: string): FeedbackSummary[] {
+  const normalizedScope = normalizeScope(scope);
+  const rows = db.prepare(`
+    SELECT result_id,
+      SUM(CASE WHEN satisfaction = 'positive' THEN 1 ELSE 0 END) AS positive,
+      SUM(CASE WHEN satisfaction = 'negative' THEN 1 ELSE 0 END) AS negative,
+      SUM(CASE WHEN satisfaction = 'neutral' THEN 1 ELSE 0 END) AS neutral,
+      COUNT(*) AS total
+    FROM memory_feedback
+    WHERE scope = ?
+    GROUP BY result_id
+  `).all(normalizedScope) as { result_id: number; positive: number; negative: number; neutral: number; total: number }[];
+
+  return rows.map(r => ({
+    result_id: Number(r.result_id),
+    positive: Number(r.positive),
+    negative: Number(r.negative),
+    neutral: Number(r.neutral),
+    total: Number(r.total),
+  }));
+}
+
+export function initializeMemoryScopeConfigSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_scope_config (
+      scope TEXT PRIMARY KEY,
+      max_memories INTEGER,
+      eviction_policy TEXT NOT NULL DEFAULT 'lru',
+      updated_at TEXT NOT NULL
+    )
+  `);
+}
+
+export function setScopeMemoryLimit(db: Database, scope: string, maxMemories: number): void {
+  const normalizedScope = normalizeScope(scope);
+  const now = nowIso();
+  db.prepare(`
+    INSERT OR REPLACE INTO memory_scope_config (scope, max_memories, eviction_policy, updated_at)
+    VALUES (?, ?, 'lru', ?)
+  `).run(normalizedScope, maxMemories, now);
+}
+
+export function getScopeMemoryLimit(db: Database, scope: string): number | null {
+  const normalizedScope = normalizeScope(scope);
+  try {
+    const row = db.prepare(
+      `SELECT max_memories FROM memory_scope_config WHERE scope = ?`
+    ).get(normalizedScope) as { max_memories: number } | undefined;
+    if (row && Number(row.max_memories) > 0) return Number(row.max_memories);
+  } catch {
+    // Table may not exist yet
+  }
+
+  const envLimit = Number(process.env.KINDX_MEMORY_MAX_PER_SCOPE);
+  return Number.isFinite(envLimit) && envLimit > 0 ? Math.floor(envLimit) : null;
+}
+
+export function evictIfNeeded(db: Database, scope: string, maxMemories: number): number {
+  const normalizedScope = normalizeScope(scope);
+  const active = db.prepare(`
+    SELECT COUNT(*) AS cnt FROM memories
+    WHERE scope = ? AND superseded_by IS NULL
+      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  `).get(normalizedScope) as { cnt: number };
+
+  const count = Number(active.cnt);
+  if (count <= maxMemories) return 0;
+
+  const toEvict = count - maxMemories;
+  const oldest = db.prepare(`
+    SELECT id FROM memories
+    WHERE scope = ? AND superseded_by IS NULL
+      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ORDER BY last_accessed_at ASC NULLS FIRST
+    LIMIT ?
+  `).all(normalizedScope, toEvict) as { id: number }[];
+
+  let evicted = 0;
+  for (const row of oldest) {
+    const deleted = deleteMemory(db, normalizedScope, Number(row.id));
+    if (deleted) evicted++;
+  }
+  return evicted;
+}
+
+async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<{ vector: number[]; model: string } | undefined> {
+  const resolvedModel = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+  if (precomputedVector && precomputedVector.length > 0) return { vector: precomputedVector, model: resolvedModel };
   try {
     return await withLLMSession(async (session) => {
       const formatted = formatDocForEmbedding(searchText);
       const result = await session.embed(formatted, { isQuery: false });
-      return result?.embedding;
+      if (!result?.embedding) return undefined;
+      return { vector: result.embedding, model: resolvedModel };
     }, { maxDuration: 2 * 60 * 1000, name: "memory-embed-single" });
   } catch {
     return undefined;
@@ -543,6 +782,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   const confidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
   const tags = normalizeTags(input.tags);
   const semanticThreshold = input.semanticThreshold ?? DEFAULT_SEMANTIC_THRESHOLD;
+  let embedModel: string | undefined;
 
   if (!key || !value) {
     throw new Error("Both key and value are required for memory upsert.");
@@ -559,34 +799,48 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   `).get(scope, key, value) as { id: number; source: string | null; appeared_count: number } | undefined;
 
   if (exact) {
-    return withTransaction(db, () => {
+    const result = withTransaction(db, () => {
       const mergedSource = mergeSource(exact.source, source);
       const now = nowIso();
+      const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
       db.prepare(`
         UPDATE memories
         SET source = ?,
             confidence = ?,
             appeared_count = ?,
             last_appeared_at = ?,
-            search_text = ?
+            search_text = ?,
+            expires_at = CASE WHEN ? IS NOT NULL THEN datetime('now', '+' || ? || ' seconds') ELSE expires_at END,
+            ttl_seconds = CASE WHEN ? IS NOT NULL THEN ? ELSE ttl_seconds END
         WHERE id = ?
-      `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText, exact.id);
+      `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText,
+        ttlSeconds, ttlSeconds, ttlSeconds, ttlSeconds, exact.id);
       ensureTags(db, Number(exact.id), tags);
 
       const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(exact.id);
       return toMemoryRecord(row);
     });
+    maybeRunLifecycleJobs(db, scope);
+    return result;
   }
 
   let vector = input.precomputedVector;
   const prefix = keyPrefix(key);
 
   // 2) Semantic supersession within same key prefix + scope
+  let hadSamePrefixCandidates = false;
   if (!input.disableSemanticDedup) {
-    vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+    if (!vector) {
+      const computed = await computeMemoryVector(searchText, input.precomputedVector);
+      if (computed) {
+        vector = computed.vector;
+        embedModel = computed.model;
+      }
+    }
     if (vector && vector.length > 0) {
       const normQuery = normalizeVector(vector);
       const candidates = getSemanticCandidates(db, scope, prefix);
+      hadSamePrefixCandidates = candidates.length > 0;
       let best: { id: number; similarity: number } | null = null;
       for (const candidate of candidates) {
         const sim = cosineSimilarityNormalized(normQuery, candidate.embedding);
@@ -596,7 +850,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       }
 
       if (best) {
-        return withTransaction(db, () => {
+        const result = withTransaction(db, () => {
           const newId = insertNewMemory(db, {
             scope,
             key,
@@ -606,6 +860,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
             searchText,
             tags,
             vector,
+            embedModel,
           });
 
           const now = nowIso();
@@ -618,7 +873,41 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
           const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
           return toMemoryRecord(row);
         });
+        maybeRunLifecycleJobs(db, scope);
+        return result;
       }
+    }
+  }
+
+  // 2b) Cross-prefix semantic supersession (fallback when no same-prefix candidates exist)
+  if (!input.disableSemanticDedup && !hadSamePrefixCandidates && vector && vector.length > 0) {
+    const crossPrefixThreshold = input.crossPrefixThreshold ?? 0.94;
+    const normQuery = normalizeVector(vector);
+    const crossCandidates = getCrossPrefixCandidates(db, scope);
+    let crossBest: { id: number; similarity: number } | null = null;
+    for (const candidate of crossCandidates) {
+      const sim = cosineSimilarityNormalized(normQuery, candidate.embedding);
+      if (sim >= crossPrefixThreshold && (!crossBest || sim > crossBest.similarity)) {
+        crossBest = { id: candidate.id, similarity: sim };
+      }
+    }
+
+    if (crossBest) {
+      const result = withTransaction(db, () => {
+        const newId = insertNewMemory(db, {
+          scope, key, value, source, confidence, searchText, tags, vector, embedModel,
+        });
+
+        const now = nowIso();
+        db.prepare(`
+          UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE id = ?
+        `).run(newId, now, crossBest.id);
+
+        const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
+        return toMemoryRecord(row);
+      });
+      maybeRunLifecycleJobs(db, scope);
+      return result;
     }
   }
 
@@ -632,8 +921,14 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     `).get(scope, key) as { id: number } | undefined;
 
     if (old) {
-      vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
-      return withTransaction(db, () => {
+      if (!vector) {
+        const computed = await computeMemoryVector(searchText, input.precomputedVector);
+        if (computed) {
+          vector = computed.vector;
+          embedModel = computed.model;
+        }
+      }
+      const result = withTransaction(db, () => {
         const newId = insertNewMemory(db, {
           scope,
           key,
@@ -643,6 +938,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
           searchText,
           tags,
           vector,
+          embedModel,
         });
 
         db.prepare(`
@@ -654,13 +950,22 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
         const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
         return toMemoryRecord(row);
       });
+      maybeRunLifecycleJobs(db, scope);
+      return result;
     }
   }
 
   // 4) New insert
-  vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+  if (!vector) {
+    const computed = await computeMemoryVector(searchText, input.precomputedVector);
+    if (computed) {
+      vector = computed.vector;
+      embedModel = computed.model;
+    }
+  }
   const expiresAt = computeExpiresAt(input.ttl);
-  return withTransaction(db, () => {
+  const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
+  const result = withTransaction(db, () => {
     const newId = insertNewMemory(db, {
       scope,
       key,
@@ -671,11 +976,15 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       tags,
       vector,
       expiresAt,
+      ttlSeconds,
+      embedModel,
     });
 
     const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
     return toMemoryRecord(row);
   });
+  maybeRunLifecycleJobs(db, scope);
+  return result;
 }
 
 export function textSearchMemory(db: Database, scopeInput: string, queryInput: string, limit = 20): MemorySearchResult[] {
@@ -726,7 +1035,14 @@ export function textSearchMemory(db: Database, scopeInput: string, queryInput: s
       hitRate: Number(row.hit_rate || 0),
       score,
     };
-  }).sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
+    }).sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
+
+  // Apply feedback bias
+  const feedbackBias = computeFeedbackBias(db, scope, scored.map(s => s.id));
+  for (const s of scored) {
+    s.score *= feedbackBias.get(s.id) ?? 1.0;
+  }
+  scored.sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
 
   incrementCounters(db, scored.map((s) => s.id));
 
@@ -795,6 +1111,13 @@ export function semanticSearchMemoryWithVector(
     .filter((row) => row.similarity >= threshold)
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
     .slice(0, limit);
+
+  // Apply feedback bias
+  const feedbackBias = computeFeedbackBias(db, scope, scored.map(s => s.id));
+  for (const s of scored) {
+    s.similarity = (s.similarity ?? 0) * (feedbackBias.get(s.id) ?? 1.0);
+  }
+  scored.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
 
   incrementCounters(db, scored.map((s) => s.id));
 
@@ -865,7 +1188,12 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
   const run = db.prepare(`
     UPDATE memories
     SET accessed_count = accessed_count + 1,
-        last_accessed_at = ?
+        last_accessed_at = ?,
+        expires_at = CASE
+          WHEN ttl_seconds IS NOT NULL
+          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          ELSE expires_at
+        END
     WHERE id = ? AND scope = ?
   `).run(nowIso(), memoryId, scope);
   return Number(run.changes) > 0;
@@ -878,7 +1206,7 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
  */
 export function deleteMemory(db: Database, scopeInput: string, memoryId: number): boolean {
   const scope = normalizeScope(scopeInput);
-  return withTransaction(db, () => {
+  const result = withTransaction(db, () => {
     // Verify the memory belongs to this scope before deleting
     const exists = db.prepare(
       `SELECT id FROM memories WHERE id = ? AND scope = ?`
@@ -901,6 +1229,8 @@ export function deleteMemory(db: Database, scopeInput: string, memoryId: number)
     const run = db.prepare(`DELETE FROM memories WHERE id = ? AND scope = ?`).run(memoryId, scope);
     return Number(run.changes) > 0;
   });
+  if (result) maybeRunLifecycleJobs(db, scope);
+  return result;
 }
 
 /**
@@ -1005,12 +1335,13 @@ export async function embedMemories(
     return embedded.map((e) => e?.embedding);
   }, { maxDuration: 30 * 60 * 1000, name: "memory-embed-backfill" });
 
+  const model = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
   let embeddedCount = 0;
   for (let i = 0; i < rows.length; i += 1) {
     const memoryId = Number(rows[i]?.id);
     const vec = vectors[i];
     if (!memoryId || !vec || vec.length === 0) continue;
-    tryStoreEmbedding(db, memoryId, vec);
+    tryStoreEmbedding(db, memoryId, vec, model);
     embeddedCount += 1;
   }
 

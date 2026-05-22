@@ -1,5 +1,5 @@
 import type { Database } from "./runtime.js";
-import { initializeMemorySchema } from "./memory.js";
+import { initializeMemorySchema, initializeMemoryFeedbackSchema, initializeMemoryScopeConfigSchema } from "./memory.js";
 import { initializeAuditSchema } from "./audit.js";
 import { initializeAiUsageSchema } from "./ai-usage.js";
 import { KINDX_SCHEMA_VERSION, getUserVersion, setUserVersion } from "./utils/schema-version.js";
@@ -167,6 +167,8 @@ export function initializeCoreSchema(db: Database): void {
 
   // Agent memory subsystem (m13v-style), scoped by namespace.
   initializeMemorySchema(db);
+  initializeMemoryFeedbackSchema(db);
+  initializeMemoryScopeConfigSchema(db);
 
   // Audit logging subsystem — append-only operation log.
   initializeAuditSchema(db);

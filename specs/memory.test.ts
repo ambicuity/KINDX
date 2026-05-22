@@ -7,11 +7,17 @@ import {
   textSearchMemory,
   semanticSearchMemory,
   purgeExpiredMemories,
+  consolidateMemories,
   getMemoryHistory,
   getMemoryStats,
   markMemoryAccessed,
   deriveWorkspaceMemoryScope,
   resolveMemoryScope,
+  initializeMemoryFeedbackSchema,
+  recordFeedback,
+  getFeedbackForScope,
+  computeFeedbackBias,
+  evictIfNeeded,
 } from "../engine/memory.js";
 
 const openDbs: Database[] = [];
@@ -298,5 +304,407 @@ describe("memory subsystem", () => {
       { scope: "team-a", key: "k:team:active" },
       { scope: "team-b", key: "k:team:no-ttl" },
     ]);
+  });
+
+  test("initializeMemoryFeedbackSchema creates table and indexes", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const tables = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='memory_feedback'`
+    ).get() as { name: string } | undefined;
+    expect(tables?.name).toBe("memory_feedback");
+
+    const indexes = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_feedback'`
+    ).all() as { name: string }[];
+    const indexNames = indexes.map(i => i.name);
+    expect(indexNames).toContain("idx_memory_feedback_scope_hash");
+    expect(indexNames).toContain("idx_memory_feedback_scope_result");
+  });
+
+  test("recordFeedback inserts batch feedback rows", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "test value", "test:key test value");
+
+    const count = recordFeedback(db, "s1", "test query", [
+      { id: Number(mem.lastInsertRowid), satisfaction: "positive" },
+      { id: Number(mem.lastInsertRowid), satisfaction: "negative" },
+    ]);
+    expect(count).toBe(2);
+
+    const rows = db.prepare(
+      `SELECT * FROM memory_feedback WHERE scope = 's1'`
+    ).all();
+    expect(rows.length).toBe(2);
+  });
+
+  test("recordFeedback returns 0 for empty results array", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+    const count = recordFeedback(db, "s1", "test query", []);
+    expect(count).toBe(0);
+  });
+
+  test("getFeedbackForScope aggregates correctly", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "test value", "test:key test value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query a", [
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "negative" },
+    ]);
+
+    const summary = getFeedbackForScope(db, "s1");
+    expect(summary.length).toBe(1);
+    expect(summary[0]?.positive).toBe(2);
+    expect(summary[0]?.negative).toBe(1);
+    expect(summary[0]?.neutral).toBe(0);
+    expect(summary[0]?.total).toBe(3);
+  });
+
+  test("computeFeedbackBias returns empty Map for empty input", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+    const bias = computeFeedbackBias(db, "s1", []);
+    expect(bias.size).toBe(0);
+  });
+
+  test("positive feedback boosts bias above 1.0", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query", [
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBeGreaterThan(1.0);
+  });
+
+  test("negative feedback reduces bias below 1.0", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query", [
+      { id: memId, satisfaction: "negative" },
+      { id: memId, satisfaction: "negative" },
+      { id: memId, satisfaction: "negative" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBeLessThan(1.0);
+  });
+
+  test("no feedback defaults to 1.0 bias", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBe(1.0);
+  });
+
+  test("feedback from different scopes does not affect bias", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "other-scope", "query", [
+      { id: memId, satisfaction: "positive" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBe(1.0);
+  });
+
+  test("TTL refreshed on textSearchMemory access", async () => {
+    const db = createMemoryDb();
+
+    const ttlSeconds = 3600;
+    const futureExpiry = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, ?)
+    `).run("s1", "test:key", "searchable", "test:key searchable", futureExpiry, ttlSeconds);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    textSearchMemory(db, "s1", "searchable", 5);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE scope = 's1' AND key = 'test:key'`).get() as { expires_at: string };
+    const afterTime = new Date(after.expires_at).getTime();
+    expect(afterTime).toBeGreaterThan(new Date(futureExpiry).getTime());
+  });
+
+  test("TTL not refreshed when ttl_seconds is NULL", async () => {
+    const db = createMemoryDb();
+
+    const futureExpiry = new Date(Date.now() + 3600_000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, NULL)
+    `).run("s1", "test:key", "searchable", "test:key searchable", futureExpiry);
+
+    textSearchMemory(db, "s1", "searchable", 5);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE scope = 's1' AND key = 'test:key'`).get() as { expires_at: string };
+    expect(after.expires_at).toBe(futureExpiry);
+  });
+
+  test("cross-prefix semantic dedup supersedes similar memory under different prefix", async () => {
+    const db = createMemoryDb();
+
+    const oldMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "preference:editor",
+      value: "vim",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:editor",
+      value: "vim",
+      crossPrefixThreshold: 0.9,
+      precomputedVector: [0.98, 0.2, 0],
+    });
+
+    expect(newMemory.id).not.toBe(oldMemory.id);
+    const oldRow = db.prepare(`SELECT superseded_by FROM memories WHERE id = ?`).get(oldMemory.id) as { superseded_by: number };
+    expect(Number(oldRow.superseded_by)).toBe(newMemory.id);
+  });
+
+  test("cross-prefix dedup does not merge low-similarity memories", async () => {
+    const db = createMemoryDb();
+
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "preference:color",
+      value: "blue",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:language",
+      value: "TypeScript",
+      crossPrefixThreshold: 0.94,
+      precomputedVector: [0, 1, 0],
+    });
+
+    const activeCount = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(activeCount.cnt).toBe(2);
+  });
+
+  test("same-prefix dedup takes priority over cross-prefix", async () => {
+    const db = createMemoryDb();
+
+    const samePrefixOld = await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const crossPrefixOld = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:editor",
+      value: "vim",
+      disableSemanticDedup: true,
+      precomputedVector: [0.98, 0.2, 0],
+    });
+
+    // Now insert same-prefix update — should supersede samePrefixOld, not crossPrefixOld
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "neovim",
+      semanticThreshold: 0.9,
+      crossPrefixThreshold: 0.94,
+      precomputedVector: [0.97, 0.24, 0],
+    });
+
+    const oldRow = db.prepare(`SELECT superseded_by FROM memories WHERE id = ?`).get(samePrefixOld.id) as { superseded_by: number };
+    expect(Number(oldRow.superseded_by)).toBe(newMemory.id);
+  });
+
+  test("markMemoryAccessed refreshes TTL when ttl_seconds is set", async () => {
+    const db = createMemoryDb();
+
+    const ttlSeconds = 3600;
+    const futureExpiry = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const insert = db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, ?)
+    `).run("s1", "test:key", "value", "test:key value", futureExpiry, ttlSeconds);
+    const memId = Number(insert.lastInsertRowid);
+
+    await new Promise(r => setTimeout(r, 50));
+    markMemoryAccessed(db, "s1", memId);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE id = ?`).get(memId) as { expires_at: string };
+    const afterTime = new Date(after.expires_at).getTime();
+    expect(afterTime).toBeGreaterThan(new Date(futureExpiry).getTime());
+  });
+
+  test("evictIfNeeded returns 0 when under limit", async () => {
+    const db = createMemoryDb();
+    await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", precomputedVector: [1, 0] });
+
+    const evicted = evictIfNeeded(db, "s1", 10);
+    expect(evicted).toBe(0);
+  });
+
+  test("eviction removes oldest accessed memory when scope exceeds cap", async () => {
+    const db = createMemoryDb();
+
+    const mem1 = await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", precomputedVector: [1, 0] });
+    const mem2 = await upsertMemory(db, { scope: "s1", key: "k:b", value: "v2", precomputedVector: [0, 1] });
+    const mem3 = await upsertMemory(db, { scope: "s1", key: "k:c", value: "v3", precomputedVector: [1, 1] });
+
+    // Mark mem1 and mem2 as accessed (they get last_accessed_at updated)
+    markMemoryAccessed(db, "s1", mem1.id);
+    markMemoryAccessed(db, "s1", mem2.id);
+    // mem3 never accessed (last_accessed_at is NULL) — should be evicted first
+
+    // Cap at 2: should evict mem3
+    const evicted = evictIfNeeded(db, "s1", 2);
+    expect(evicted).toBe(1);
+
+    const remaining = db.prepare(
+      `SELECT id FROM memories WHERE scope = 's1' AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`
+    ).all() as { id: number }[];
+    const remainingIds = remaining.map(r => r.id);
+    expect(remainingIds).toContain(mem1.id);
+    expect(remainingIds).toContain(mem2.id);
+    expect(remainingIds).not.toContain(mem3.id);
+  });
+
+  test("eviction cleans up tags and embeddings", async () => {
+    const db = createMemoryDb();
+    const mem1 = await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", tags: ["t1"], precomputedVector: [1, 0] });
+
+    const evicted = evictIfNeeded(db, "s1", 0);
+    expect(evicted).toBe(1);
+
+    const tags = db.prepare(`SELECT * FROM memory_tags WHERE memory_id = ?`).all(mem1.id);
+    expect(tags.length).toBe(0);
+
+    const embeddings = db.prepare(`SELECT * FROM memory_embeddings WHERE memory_id = ?`).all(mem1.id);
+    expect(embeddings.length).toBe(0);
+  });
+
+  test("maybeRunLifecycleJobs purges expired memories when triggered", () => {
+    const db = createMemoryDb();
+
+    const expiredIso = new Date(Date.now() - 60_000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1, 0, datetime('now'), datetime('now'), ?, ?, 60)
+    `).run("s1", "k:expired", "v", "k:expired v", expiredIso);
+
+    const before = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = 's1'`).get() as { cnt: number };
+    expect(before.cnt).toBe(1);
+
+    purgeExpiredMemories(db, "s1");
+
+    const after = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = 's1'`).get() as { cnt: number };
+    expect(after.cnt).toBe(0);
+  });
+
+  test("consolidateMemories merges near-duplicate memories", async () => {
+    const db = createMemoryDb();
+
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim",
+      precomputedVector: [1, 0],
+    });
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim editor",
+      disableSemanticDedup: true,
+      precomputedVector: [0.99, 0.14],
+    });
+
+    const before = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(before.cnt).toBe(2);
+
+    consolidateMemories(db, "s1", 0.9);
+
+    const after = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(after.cnt).toBe(1);
+  });
+
+  test("embedding model is not hardcoded to kindx-local", async () => {
+    const db = createMemoryDb();
+    const mem = await upsertMemory(db, {
+      scope: "s1",
+      key: "test:model",
+      value: "check model",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const row = db.prepare(
+      `SELECT model FROM memory_embeddings WHERE memory_id = ?`
+    ).get(mem.id) as { model: string } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row?.model).not.toBe("kindx-local");
+    expect(row?.model).toBe(
+      process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf"
+    );
   });
 });

@@ -97,6 +97,7 @@ export type RBACOperation =
   | "memory_history"
   | "memory_stats"
   | "memory_mark_accessed"
+  | "memory_feedback"
   | "collection_add"
   | "collection_remove"
   | "collection_rename"
@@ -113,14 +114,14 @@ export type RBACOperation =
 const ROLE_PERMISSIONS: Record<TenantRole, Set<RBACOperation>> = {
   admin: new Set([
     "query", "search", "get", "multi_get", "status",
-    "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed",
+    "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed", "memory_feedback",
     "collection_add", "collection_remove", "collection_rename",
     "embed", "update", "backup", "doctor", "tenant_manage",
     "index_list", "index_create", "index_delete", "index_migrate",
   ]),
   editor: new Set([
     "query", "search", "get", "multi_get", "status",
-    "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed",
+    "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed", "memory_feedback",
     "embed", "update", "doctor",
     "index_list",
   ]),
