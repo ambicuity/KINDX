@@ -1,7 +1,7 @@
 # KINDX Industry Roadmap
 
 **Date:** 2026-05-22
-**Status:** Draft
+**Status:** Ready for Review
 **Branch:** `feature/industry-roadmap-doc`
 **Author:** Industry analysis (evidence-based)
 
@@ -51,7 +51,7 @@ The AI industry is moving from chatbots to agents. Agents need memory, tools, co
 
 **Trend:** RAG systems are adding feedback loops — agents can signal "this result wasn't useful" and the system adapts. Corrective RAG, self-RAG, and adaptive retrieval are active research areas.
 
-**Evidence for KINDX:** No feedback loop exists. Open issue for corrective RAG. `engine/memory.ts` has supersession logic that could inform feedback.
+**Evidence for KINDX:** No feedback loop exists. Tracked in [#25](https://github.com/ambicuity/KINDX/issues/25). `engine/memory.ts` has supersession logic that could inform feedback.
 
 ### 2.7 Graph and Structured Retrieval
 
@@ -63,7 +63,7 @@ The AI industry is moving from chatbots to agents. Agents need memory, tools, co
 
 **Trend:** RAG is expanding beyond text to images, audio, video, and structured data. Vision RAG (image understanding + retrieval) is a fast-growing area. Multimodal embedding models are becoming practical.
 
-**Evidence for KINDX:** `engine/ingestion.ts` handles PDF/DOCX text extraction. No image, audio, or video support. Open issue for multimodal pipeline.
+**Evidence for KINDX:** `engine/ingestion.ts` handles PDF/DOCX text extraction. No image, audio, or video support. Tracked in [#15](https://github.com/ambicuity/KINDX/issues/15).
 
 ### 2.9 Retrieval Observability/Evaluation
 
@@ -95,9 +95,56 @@ The AI industry is moving from chatbots to agents. Agents need memory, tools, co
 
 **Evidence for KINDX:** `engine/rbac.ts` has multi-tenant RBAC. But no workspace concept, no shared memory pools, no collaboration features.
 
+
+
 ---
 
-## 3. Implications for KINDX
+## 3. Competitor Landscape
+
+### Direct Competitors
+
+| Competitor | Category | Strengths | Weaknesses | KINDX Advantage |
+|------------|----------|-----------|------------|-----------------|
+| **Chroma** | Vector DB | Simple API, good DX, popular | No hybrid search, no MCP, no memory | Full stack vs. vector-only |
+| **Qdrant** | Vector DB | High performance, filtering, cloud | No BM25, no agent memory, cloud-first | Local-first, hybrid retrieval |
+| **LanceDB** | Embedded Vector DB | Embedded, serverless, multimodal | No MCP, no memory, limited retrieval | MCP-native, agent memory |
+| **Weaviate** | Vector DB | Hybrid search (BM25+vector), GraphQL | Cloud-first, complex, no MCP server | Local-first, MCP-native |
+| **Pinecone** | Vector DB | Managed, fast, serverless | Cloud-only, expensive, no local | Local-first, no vendor lock-in |
+| **LlamaIndex** | Framework | Flexible, many integrations | Framework not product, complex | Standalone product, simpler |
+| **LangChain** | Framework | Ecosystem, agent support | Framework not product, heavy | Standalone, lightweight |
+| **Microsoft GraphRAG** | Graph RAG | Knowledge graphs, research | Complex, no local-first, no MCP | Local-first, MCP-native |
+
+### Adjacent Competitors
+
+| Competitor | Category | Overlap | KINDX Differentiator |
+|------------|----------|---------|---------------------|
+| **Obsidian + plugins** | Personal knowledge | Local markdown | Agent-native, MCP, retrieval |
+| **Notion AI** | Workspace memory | Team knowledge | Local-first, no cloud dependency |
+| **Mem.ai** | Agent memory | Memory lifecycle | Local-first, open-source |
+| **M3 Memory** | Agent memory | Scoped memory | Hybrid retrieval, benchmarks |
+
+### Competitive Positioning
+
+KINDX occupies a unique position: **MCP-native, local-first, hybrid retrieval with agent memory**. No competitor combines all four.
+
+```
+                    Local-First
+                         ↑
+                         |
+            KINDX ●      |
+                         |
+    ←────────────────────┼────────────────────→
+    Simple               |               Complex
+    (Vector DB)          |          (Full Platform)
+                         |
+                         |
+                         ↓
+                    Cloud-First
+```
+
+---
+
+## 4. Implications for KINDX
 
 | Trend | Why It Matters | KINDX Readiness | Gap | Recommended Response | Priority |
 |-------|---------------|-----------------|-----|---------------------|----------|
@@ -269,41 +316,41 @@ Evaluable RAG (2026)
 
 ### Now (0-30 days)
 
-| Initiative | Industry Trend | Evidence |
+| Initiative | Industry Trend | Evidence | Effort | Success Metrics |
 |------------|---------------|----------|
-| Fix onboarding (kindx init wizard) | Personal knowledge bases for AI agents | `demo/cli-demos/basic-workflow.sh` (8 steps) |
-| Golden demo video | Personal knowledge bases for AI agents | `demo/video-scripts/` (scripts exist, no videos) |
-| Security posture doc | Security and prompt/tool injection | `SECURITY.md` (105 lines) |
-| Capability manifest design | MCP standardization | Open issue |
+| Fix onboarding (kindx init wizard) | Personal knowledge bases for AI agents | `demo/cli-demos/basic-workflow.sh` (8 steps) | M | Time to first index < 2 min; onboarding completion rate > 80% |
+| Golden demo video | Personal knowledge bases for AI agents | `demo/video-scripts/` (scripts exist, no videos) | S | Video published; 100+ views in first week |
+| Security posture doc | Security and prompt/tool injection | `SECURITY.md` (105 lines) | S | Doc reviewed by 2+ contributors |
+| Capability manifest design | MCP standardization | [#27](https://github.com/ambicuity/KINDX/issues/27) | M | Design doc approved; implementation plan created |
 
 ### 30 Days (30-90 days)
 
-| Initiative | Industry Trend | Evidence |
+| Initiative | Industry Trend | Evidence | Effort | Success Metrics |
 |------------|---------------|----------|
-| Named indexes | Agent-to-agent comms | Open issue, `engine/sharding.ts` |
-| Session lifecycle | MCP standardization | Open issue, `engine/session.ts` |
-| Capability manifest | MCP standardization | Open issue |
-| Corrective RAG feedback loop | Corrective/self-improving RAG | Open issue |
-| Retrieval quality CI gate | Retrieval observability | `specs/evaluation.test.ts` (informational, not blocking) |
+| Named indexes | Agent-to-agent comms | [#28](https://github.com/ambicuity/KINDX/issues/28), `engine/sharding.ts` | L | 2+ agents can query isolated indexes; RBAC enforced |
+| Session lifecycle | MCP standardization | [#93](https://github.com/ambicuity/KINDX/issues/93), `engine/session.ts` | M | Sessions created/destroyed cleanly; abort propagation works |
+| Capability manifest | MCP standardization | [#27](https://github.com/ambicuity/KINDX/issues/27) | M | `kindx://capabilities` resource returns structured manifest |
+| Corrective RAG feedback loop | Corrective/self-improving RAG | [#25](https://github.com/ambicuity/KINDX/issues/25) | M | Agents can signal feedback; retrieval adapts within 10 queries |
+| Retrieval quality CI gate | Retrieval observability | `specs/evaluation.test.ts` (informational, not blocking) | M | CI blocks PRs that degrade MRR by > 5% |
 
 ### 90 Days (3-6 months)
 
-| Initiative | Industry Trend | Evidence |
+| Initiative | Industry Trend | Evidence | Effort | Success Metrics |
 |------------|---------------|----------|
-| Multimodal ingestion | Multimodal RAG | Open issue, `engine/ingestion.ts` |
-| Graph retrieval | Graph and structured retrieval | `engine/link-extractor.ts` |
-| Production MCP auth | MCP enterprise readiness | `engine/protocol.ts` (bearer tokens only) |
-| Memory lifecycle | Agent memory as infrastructure | `engine/memory.ts` (TTL but no decay) |
-| Input sanitization | Security and prompt injection | No defense exists |
+| Multimodal ingestion | Multimodal RAG | [#15](https://github.com/ambicuity/KINDX/issues/15), `engine/ingestion.ts` | L | Images indexed and searchable; OCR accuracy > 90% |
+| Graph retrieval | Graph and structured retrieval | `engine/link-extractor.ts` | L | Graph-connected results improve recall by 15% |
+| Production MCP auth | MCP enterprise readiness | `engine/protocol.ts` (bearer tokens only) | L | OAuth2 flow works; rate limiting enforced |
+| Memory lifecycle | Agent memory as infrastructure | `engine/memory.ts` (TTL but no decay) | M | Decay reduces old memory; consolidation merges duplicates |
+| Input sanitization | Security and prompt injection | No defense exists | M | Prompt injection attempts blocked; no false positives on clean input |
 
 ### 6 Months (6-12 months)
 
-| Initiative | Industry Trend | Evidence |
+| Initiative | Industry Trend | Evidence | Effort | Success Metrics |
 |------------|---------------|----------|
-| Sync layer | Local-first + optional sync | No implementation |
-| Team/workspace mode | Workspace/team memory | `engine/rbac.ts` (no workspace concept) |
-| Hosted optional control plane | Enterprise governance | No hosted infrastructure |
-| Ecosystem integrations | Agent framework ecosystem | `python/kindx-langchain/` (thin adapter) |
+| Sync layer | Local-first + optional sync | No implementation | L | 2+ devices sync indexes; conflict resolution works |
+| Team/workspace mode | Workspace/team memory | `engine/rbac.ts` (no workspace concept) | L | 5+ users share workspace; per-user scoping works |
+| Hosted optional control plane | Enterprise governance | No hosted infrastructure | L | Control plane deployed; 10+ organizations onboarded |
+| Ecosystem integrations | Agent framework ecosystem | `python/kindx-langchain/` (thin adapter) | M | 3+ framework integrations; 100+ users via integrations |
 
 ---
 
@@ -315,7 +362,33 @@ Evaluable RAG (2026)
 
 ---
 
-## 11. Acceptance Criteria
+
+
+---
+
+## 12. Dependency Map
+
+```mermaid
+graph TD
+    A[Capability Manifest #27] --> B[Named Indexes #28]
+    A --> C[Session Lifecycle #93]
+    B --> D[Corrective RAG #25]
+    B --> E[Graph Retrieval]
+    C --> D
+    F[Security Posture Doc] --> G[Input Sanitization]
+    G --> H[Production MCP Auth]
+    I[Retrieval Quality CI] --> J[Multimodal Ingestion #15]
+    I --> K[Memory Lifecycle]
+    L[Onboarding Fix] --> M[Golden Demo Video]
+    H --> N[Team/Workspace Mode]
+    K --> N
+    E --> O[Sync Layer]
+    N --> O
+```
+
+**Critical Path:** Capability Manifest → Named Indexes → Corrective RAG → Graph Retrieval → Sync Layer
+
+## 13. Acceptance Criteria
 
 - [x] 13 industry trends mapped to KINDX decisions
 - [x] Each trend has readiness assessment, gap, and recommended response
@@ -325,6 +398,11 @@ Evaluable RAG (2026)
 - [x] 5 strategic bets defined with rationale and risk
 - [x] 5 anti-bets defined with rationale
 - [x] 12-month roadmap aligned to industry trends
+- [x] Competitor landscape with 8 direct and 4 adjacent competitors
+- [x] Success metrics for each roadmap phase
+- [x] Dependency map for initiatives
+- [x] Effort estimation (S/M/L) for each initiative
+- [x] GitHub issue links for tracked items
 
 ---
 
@@ -346,3 +424,14 @@ Evaluable RAG (2026)
 | RBAC | `engine/rbac.ts` | Multi-tenant RBAC |
 | Encryption | `engine/encryption.ts` | SQLCipher support |
 | Audit | `engine/audit.ts` | Append-only audit log |
+
+
+---
+
+## 14. Related Strategy Docs
+
+- `docs/strategy/KINDX_COMPETITIVE_ANALYSIS.md` - Detailed competitor analysis
+- `docs/strategy/KINDX_TECHNICAL_GAP_ANALYSIS.md` - Technical gap analysis
+- `docs/strategy/KINDX_PRODUCT_STRATEGY.md` - Product strategy
+- `docs/strategy/KINDX_EXECUTION_PLAN.md` - Execution plan
+
