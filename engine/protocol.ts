@@ -40,7 +40,8 @@ import type {
   StructuredSearchDiagnostics,
 } from "./repository.js";
 import { getCollection, getGlobalContext, getDefaultCollectionNames } from "./catalogs.js";
-import { disposeDefaultLLM, disposeSensitiveContexts, withLLMScope } from "./inference.js";
+import { disposeDefaultLLM, disposeSensitiveContexts, getDefaultLLM, withLLMScope } from "./inference.js";
+import { HealthChecker } from "./health-checker.js";
 import {
   upsertMemory,
   semanticSearchMemory,
@@ -2358,6 +2359,39 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         nodeRes.end(body);
         recordHttpMetrics(200);
         logger.info(`GET /health (${Date.now() - reqStart}ms)`);
+        return;
+      }
+
+      if (pathname === "/ready" && nodeReq.method === "GET") {
+        const checker = new HealthChecker({
+          getModelsStatus: () => {
+            getDefaultLLM();
+            return {
+              embed: true,
+              rerank: true,
+              generate: true,
+            };
+          },
+          getGpuStatus: () => ({
+            available: true,
+            vramFree: 0,
+          }),
+          getAnnStatus: () => ({
+            mode: "ann" as const,
+            state: "ready",
+          }),
+          getDatabaseStatus: () => ({
+            accessible: true,
+          }),
+        });
+
+        const readiness = await checker.checkReadiness();
+        const statusCode = readiness.status === "ready" ? 200 : 503;
+        const body = JSON.stringify(readiness);
+        nodeRes.writeHead(statusCode, { "Content-Type": "application/json" });
+        nodeRes.end(body);
+        recordHttpMetrics(statusCode);
+        logger.info(`GET /ready (${Date.now() - reqStart}ms) ${readiness.status}`);
         return;
       }
 
