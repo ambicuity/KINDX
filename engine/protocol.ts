@@ -50,6 +50,8 @@ import {
   markMemoryAccessed,
   resolveMemoryScope,
   deriveWorkspaceMemoryScope,
+  recordFeedback,
+  initializeMemoryFeedbackSchema,
 } from "./memory.js";
 import {
   KindxSession,
@@ -1709,6 +1711,52 @@ Intent-aware lex (C++ performance, not sports):
     }
   );
 
+  maybeRegisterTool(
+    "memory_feedback",
+    {
+      title: "Memory Feedback",
+      description: "Record satisfaction feedback on memory search results.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
+        query: z.string().describe("The search query that produced these results"),
+        results: z.array(z.object({
+          id: z.number().int().positive().describe("Memory ID that received feedback"),
+          satisfaction: z.enum(["positive", "negative", "neutral"]).describe("Satisfaction signal"),
+        })).describe("Feedback entries per result"),
+        source: z.string().optional().describe("Optional attribution source"),
+      },
+    },
+    async ({ scope, query, results, source }: any) => {
+      const resolved = resolveToolScope({ scope });
+      if (!resolved.scope) {
+        return {
+          content: [{ type: "text", text: resolved.errorText || "scope_resolution_failed" }],
+          isError: true,
+        };
+      }
+
+      if (!Array.isArray(results) || results.length === 0) {
+        return {
+          content: [{ type: "text", text: "results array is empty or missing" }],
+          isError: true,
+        };
+      }
+
+      const recorded = recordFeedback(store.db, resolved.scope, query, results, source);
+      recordAudit(store.db, {
+        action: "memory_feedback",
+        scope: resolved.scope,
+        detail: `query_hash=${createHash("sha256").update(query.trim().toLowerCase()).digest("hex").slice(0, 16)} recorded=${recorded}`,
+        success: true,
+      });
+      return {
+        content: [{ type: "text", text: `recorded ${recorded} feedback entries in scope '${resolved.scope}'` }],
+        structuredContent: { scope: resolved.scope, recorded },
+      };
+    }
+  );
+
   return server;
 }
 
@@ -2837,6 +2885,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               memory_mark_accessed: "memory_mark_accessed",
               memory_delete: "memory_delete" as import("./rbac.js").RBACOperation,
               memory_bulk: "memory_bulk" as import("./rbac.js").RBACOperation,
+              memory_feedback: "memory_feedback" as import("./rbac.js").RBACOperation,
             };
             const op = toolToOp[toolName];
             if (op === undefined || (op && !isPermitted(requestIdentity, op))) {

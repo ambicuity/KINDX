@@ -30,7 +30,8 @@ export type AuditAction =
   | "config_change"
   | "daemon_start"
   | "daemon_stop"
-  | "memory_bulk";
+  | "memory_bulk"
+  | "memory_feedback";
 
 export type AuditEntry = {
   id: number;

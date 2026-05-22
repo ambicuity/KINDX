@@ -522,6 +522,86 @@ export function initializeMemorySchema(db: Database): void {
   `).run(MEMORY_SCHEMA_VERSION);
 }
 
+export type FeedbackSummary = {
+  result_id: number;
+  positive: number;
+  negative: number;
+  neutral: number;
+  total: number;
+};
+
+export function initializeMemoryFeedbackSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      query TEXT NOT NULL,
+      query_hash TEXT NOT NULL,
+      result_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      satisfaction TEXT NOT NULL CHECK(satisfaction IN ('positive', 'negative', 'neutral')),
+      source TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_feedback_scope_hash
+      ON memory_feedback(scope, query_hash)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_feedback_scope_result
+      ON memory_feedback(scope, result_id)
+  `);
+}
+
+export function recordFeedback(
+  db: Database,
+  scope: string,
+  query: string,
+  results: { id: number; satisfaction: "positive" | "negative" | "neutral" }[],
+  source?: string,
+): number {
+  if (results.length === 0) return 0;
+  const normalizedScope = normalizeScope(scope);
+  const now = nowIso();
+  const queryHash = createHash("sha256").update(query.trim().toLowerCase()).digest("hex");
+
+  return withTransaction(db, () => {
+    const stmt = db.prepare(`
+      INSERT INTO memory_feedback (scope, query, query_hash, result_id, satisfaction, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    let count = 0;
+    for (const r of results) {
+      stmt.run(normalizedScope, query, queryHash, r.id, r.satisfaction, source ?? null, now);
+      count++;
+    }
+    return count;
+  });
+}
+
+export function getFeedbackForScope(db: Database, scope: string): FeedbackSummary[] {
+  const normalizedScope = normalizeScope(scope);
+  const rows = db.prepare(`
+    SELECT result_id,
+      SUM(CASE WHEN satisfaction = 'positive' THEN 1 ELSE 0 END) AS positive,
+      SUM(CASE WHEN satisfaction = 'negative' THEN 1 ELSE 0 END) AS negative,
+      SUM(CASE WHEN satisfaction = 'neutral' THEN 1 ELSE 0 END) AS neutral,
+      COUNT(*) AS total
+    FROM memory_feedback
+    WHERE scope = ?
+    GROUP BY result_id
+  `).all(normalizedScope) as { result_id: number; positive: number; negative: number; neutral: number; total: number }[];
+
+  return rows.map(r => ({
+    result_id: Number(r.result_id),
+    positive: Number(r.positive),
+    negative: Number(r.negative),
+    neutral: Number(r.neutral),
+    total: Number(r.total),
+  }));
+}
+
 async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<number[] | undefined> {
   if (precomputedVector && precomputedVector.length > 0) return precomputedVector;
   try {

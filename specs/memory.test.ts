@@ -12,6 +12,9 @@ import {
   markMemoryAccessed,
   deriveWorkspaceMemoryScope,
   resolveMemoryScope,
+  initializeMemoryFeedbackSchema,
+  recordFeedback,
+  getFeedbackForScope,
 } from "../engine/memory.js";
 
 const openDbs: Database[] = [];
@@ -298,5 +301,74 @@ describe("memory subsystem", () => {
       { scope: "team-a", key: "k:team:active" },
       { scope: "team-b", key: "k:team:no-ttl" },
     ]);
+  });
+
+  test("initializeMemoryFeedbackSchema creates table and indexes", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const tables = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='memory_feedback'`
+    ).get() as { name: string } | undefined;
+    expect(tables?.name).toBe("memory_feedback");
+
+    const indexes = db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_feedback'`
+    ).all() as { name: string }[];
+    const indexNames = indexes.map(i => i.name);
+    expect(indexNames).toContain("idx_memory_feedback_scope_hash");
+    expect(indexNames).toContain("idx_memory_feedback_scope_result");
+  });
+
+  test("recordFeedback inserts batch feedback rows", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "test value", "test:key test value");
+
+    const count = recordFeedback(db, "s1", "test query", [
+      { id: Number(mem.lastInsertRowid), satisfaction: "positive" },
+      { id: Number(mem.lastInsertRowid), satisfaction: "negative" },
+    ]);
+    expect(count).toBe(2);
+
+    const rows = db.prepare(
+      `SELECT * FROM memory_feedback WHERE scope = 's1'`
+    ).all();
+    expect(rows.length).toBe(2);
+  });
+
+  test("recordFeedback returns 0 for empty results array", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+    const count = recordFeedback(db, "s1", "test query", []);
+    expect(count).toBe(0);
+  });
+
+  test("getFeedbackForScope aggregates correctly", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "test value", "test:key test value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query a", [
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "negative" },
+    ]);
+
+    const summary = getFeedbackForScope(db, "s1");
+    expect(summary.length).toBe(1);
+    expect(summary[0]?.positive).toBe(2);
+    expect(summary[0]?.negative).toBe(1);
+    expect(summary[0]?.neutral).toBe(0);
+    expect(summary[0]?.total).toBe(3);
   });
 });
