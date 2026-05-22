@@ -299,6 +299,7 @@ export function toVirtualPath(db: Database, absolutePath: string): string | null
 export type Store = {
   db: Database;
   dbPath: string;
+  indexName: string;
   close: () => void;
   ensureVecTable: (dimensions: number) => void;
 
@@ -392,8 +393,8 @@ export type Store = {
  * @param dbPath - Path to the SQLite database file
  * @returns Store instance with all methods bound to the database
  */
-export function createStore(dbPath?: string): Store {
-  const resolvedPath = dbPath || getDefaultDbPath();
+export function createStore(dbPath?: string, indexName?: string): Store {
+  const resolvedPath = dbPath || getDefaultDbPath(indexName || "index");
   ensureEncryptedIndexReady(resolvedPath);
   ensureEncryptedShardIndexesReady(resolvedPath);
   const db = openDatabase(resolvedPath);
@@ -402,6 +403,7 @@ export function createStore(dbPath?: string): Store {
   return {
     db,
     dbPath: resolvedPath,
+    indexName: indexName || "index",
     close: () => db.close(),
     ensureVecTable: (dimensions: number) => ensureVecTableInternal(db, dimensions),
 
@@ -487,6 +489,10 @@ export function createStore(dbPath?: string): Store {
     insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
     bulkInsertEmbeddings: (embeddings: ReadonlyArray<{ hash: string; seq: number; pos: number; embedding: Float32Array; model: string; embeddedAt: string }>) => bulkInsertEmbeddings(db, embeddings),
   };
+}
+
+export function createStoreForIndex(indexName: string): Store {
+  return createStore(undefined, indexName);
 }
 
 // =============================================================================
