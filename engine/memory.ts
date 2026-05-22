@@ -398,14 +398,17 @@ function mergeSource(existingSource: string | null, incomingSource?: string): st
   return `${oldSource}, ${nextSource}`;
 }
 
-function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | Float32Array): void {
+function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | Float32Array, model?: string): void {
   if (!vector || vector.length === 0) return;
   const norm = normalizeVector(vector);
   const embeddedAt = nowIso();
+  const resolvedModel = model
+    ?? process.env.KINDX_EMBED_MODEL
+    ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
   db.prepare(`
     INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, model, embedded_at)
     VALUES (?, ?, ?, ?)
-  `).run(memoryId, serializeVector(norm), "kindx-local", embeddedAt);
+  `).run(memoryId, serializeVector(norm), resolvedModel, embeddedAt);
 
   const dimensions = norm.length;
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memory_vectors_vec'`).get();
@@ -437,6 +440,7 @@ function insertNewMemory(db: Database, params: {
   vector?: number[] | Float32Array;
   expiresAt?: string | null;
   ttlSeconds?: number | null;
+  embedModel?: string;
 }): number {
   const now = nowIso();
 
@@ -467,7 +471,7 @@ function insertNewMemory(db: Database, params: {
   );
   const memoryId = Number(run.lastInsertRowid);
   ensureTags(db, memoryId, params.tags);
-  tryStoreEmbedding(db, memoryId, params.vector);
+  tryStoreEmbedding(db, memoryId, params.vector, params.embedModel);
   return memoryId;
 }
 
@@ -755,13 +759,15 @@ export function evictIfNeeded(db: Database, scope: string, maxMemories: number):
   return evicted;
 }
 
-async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<number[] | undefined> {
-  if (precomputedVector && precomputedVector.length > 0) return precomputedVector;
+async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<{ vector: number[]; model: string } | undefined> {
+  const resolvedModel = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+  if (precomputedVector && precomputedVector.length > 0) return { vector: precomputedVector, model: resolvedModel };
   try {
     return await withLLMSession(async (session) => {
       const formatted = formatDocForEmbedding(searchText);
       const result = await session.embed(formatted, { isQuery: false });
-      return result?.embedding;
+      if (!result?.embedding) return undefined;
+      return { vector: result.embedding, model: resolvedModel };
     }, { maxDuration: 2 * 60 * 1000, name: "memory-embed-single" });
   } catch {
     return undefined;
@@ -776,6 +782,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   const confidence = Number.isFinite(input.confidence) ? Number(input.confidence) : 1.0;
   const tags = normalizeTags(input.tags);
   const semanticThreshold = input.semanticThreshold ?? DEFAULT_SEMANTIC_THRESHOLD;
+  let embedModel: string | undefined;
 
   if (!key || !value) {
     throw new Error("Both key and value are required for memory upsert.");
@@ -823,7 +830,13 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   // 2) Semantic supersession within same key prefix + scope
   let hadSamePrefixCandidates = false;
   if (!input.disableSemanticDedup) {
-    vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+    if (!vector) {
+      const computed = await computeMemoryVector(searchText, input.precomputedVector);
+      if (computed) {
+        vector = computed.vector;
+        embedModel = computed.model;
+      }
+    }
     if (vector && vector.length > 0) {
       const normQuery = normalizeVector(vector);
       const candidates = getSemanticCandidates(db, scope, prefix);
@@ -847,6 +860,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
             searchText,
             tags,
             vector,
+            embedModel,
           });
 
           const now = nowIso();
@@ -881,7 +895,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     if (crossBest) {
       const result = withTransaction(db, () => {
         const newId = insertNewMemory(db, {
-          scope, key, value, source, confidence, searchText, tags, vector,
+          scope, key, value, source, confidence, searchText, tags, vector, embedModel,
         });
 
         const now = nowIso();
@@ -907,7 +921,13 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     `).get(scope, key) as { id: number } | undefined;
 
     if (old) {
-      vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+      if (!vector) {
+        const computed = await computeMemoryVector(searchText, input.precomputedVector);
+        if (computed) {
+          vector = computed.vector;
+          embedModel = computed.model;
+        }
+      }
       const result = withTransaction(db, () => {
         const newId = insertNewMemory(db, {
           scope,
@@ -918,6 +938,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
           searchText,
           tags,
           vector,
+          embedModel,
         });
 
         db.prepare(`
@@ -935,7 +956,13 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   }
 
   // 4) New insert
-  vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
+  if (!vector) {
+    const computed = await computeMemoryVector(searchText, input.precomputedVector);
+    if (computed) {
+      vector = computed.vector;
+      embedModel = computed.model;
+    }
+  }
   const expiresAt = computeExpiresAt(input.ttl);
   const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
   const result = withTransaction(db, () => {
@@ -950,6 +977,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       vector,
       expiresAt,
       ttlSeconds,
+      embedModel,
     });
 
     const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
@@ -1307,12 +1335,13 @@ export async function embedMemories(
     return embedded.map((e) => e?.embedding);
   }, { maxDuration: 30 * 60 * 1000, name: "memory-embed-backfill" });
 
+  const model = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
   let embeddedCount = 0;
   for (let i = 0; i < rows.length; i += 1) {
     const memoryId = Number(rows[i]?.id);
     const vec = vectors[i];
     if (!memoryId || !vec || vec.length === 0) continue;
-    tryStoreEmbedding(db, memoryId, vec);
+    tryStoreEmbedding(db, memoryId, vec, model);
     embeddedCount += 1;
   }
 

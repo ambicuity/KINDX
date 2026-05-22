@@ -687,4 +687,24 @@ describe("memory subsystem", () => {
     `).get() as { cnt: number };
     expect(after.cnt).toBe(1);
   });
+
+  test("embedding model is not hardcoded to kindx-local", async () => {
+    const db = createMemoryDb();
+    const mem = await upsertMemory(db, {
+      scope: "s1",
+      key: "test:model",
+      value: "check model",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const row = db.prepare(
+      `SELECT model FROM memory_embeddings WHERE memory_id = ?`
+    ).get(mem.id) as { model: string } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row?.model).not.toBe("kindx-local");
+    expect(row?.model).toBe(
+      process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf"
+    );
+  });
 });
