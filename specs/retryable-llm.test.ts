@@ -68,4 +68,30 @@ describe("RetryableLLM", () => {
     await retryable.dispose();
     expect(mock.dispose).toHaveBeenCalledTimes(1);
   });
+
+  it("should retry modelExists on transient I/O error", async () => {
+    const mock = createMockLLM();
+    mock.modelExists
+      .mockRejectedValueOnce(new Error("ENOENT: no such file or directory"))
+      .mockResolvedValue({ name: "model.gguf", exists: true });
+
+    const retryable = new RetryableLLM(mock, { maxRetries: 3, baseDelayMs: 10 });
+    const result = await retryable.modelExists("model.gguf");
+
+    expect(result).toEqual({ name: "model.gguf", exists: true });
+    expect(mock.modelExists).toHaveBeenCalledTimes(2);
+  });
+
+  it("should retry on EACCES error", async () => {
+    const mock = createMockLLM();
+    mock.modelExists
+      .mockRejectedValueOnce(new Error("EACCES: permission denied"))
+      .mockResolvedValue({ name: "model.gguf", exists: false });
+
+    const retryable = new RetryableLLM(mock, { maxRetries: 3, baseDelayMs: 10 });
+    const result = await retryable.modelExists("model.gguf");
+
+    expect(result).toEqual({ name: "model.gguf", exists: false });
+    expect(mock.modelExists).toHaveBeenCalledTimes(2);
+  });
 });

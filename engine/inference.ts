@@ -15,6 +15,7 @@ import {
   type Token as LlamaToken,
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
+import { RetryableLLM } from "./retryable-llm.js";
 import { Spinner, renderProgressBar, formatBytes, cursor, progress as termProgress, c } from "./utils/ui.js";
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1959,7 +1960,8 @@ export function getDefaultLLM(): LLM {
       defaultLLM = new RemoteLLM();
     } else {
       const embedModel = process.env.KINDX_EMBED_MODEL;
-      defaultLLM = new LlamaCpp(embedModel ? { embedModel } : {});
+      const inner = new LlamaCpp(embedModel ? { embedModel } : {});
+      defaultLLM = new RetryableLLM(inner);
     }
   }
   return defaultLLM;

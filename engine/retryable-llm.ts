@@ -32,6 +32,13 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
     "vram",
     "ggml",
     "gpu",
+    "read",
+    "file",
+    "epipe",
+    "EACCES",
+    "ECONNRESET",
+    "ENOENT",
+    "EIO",
   ],
 };
 
@@ -57,7 +64,7 @@ export class RetryableLLM implements LLM {
   }
 
   async modelExists(model: string): Promise<ModelInfo> {
-    return this.inner.modelExists(model);
+    return this.withRetry(() => this.inner.modelExists(model));
   }
 
   async expandQuery(query: string, options?: { context?: string; includeLexical?: boolean }): Promise<Queryable[]> {
