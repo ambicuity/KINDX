@@ -2846,6 +2846,7 @@ function parseCLI() {
       "parity-sample": { type: "string" },
       path: { type: "string" },
       resume: { type: "boolean" },
+      description: { type: "string" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -3844,6 +3845,16 @@ if (isMain) {
         console.error("Usage: kindx migrate <chroma|openclaw> <path>");
         process.exit(1);
       }
+      break;
+    }
+
+    case "index": {
+      const { runIndexCommand } = await import("./commands/index-command.js");
+      const code = await runIndexCommand(
+        cli.args,
+        cli.values as Record<string, unknown>,
+      );
+      if (code !== 0) process.exit(code);
       break;
     }
 

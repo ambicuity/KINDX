@@ -90,6 +90,7 @@ type SearchResultItem = {
   score: number;
   context: string | null;
   snippet: string;
+  _index?: string;
 };
 
 type StatusResult = {
@@ -935,9 +936,12 @@ Intent-aware lex (C++ performance, not sports):
         maxSnippetLines: z.number().optional().describe(
           "Maximum lines per result snippet. Truncates to the most relevant excerpt. Reduces token usage for agents with limited context windows."
         ),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to query (cross-index federation). Omit to use current index."
+        ),
       },
     },
-    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections, maxSnippetLines }: any) => {
+    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections, maxSnippetLines, indexes }: any) => {
       try {
       const totalStart = Date.now();
       const timings = newTimings();
@@ -972,51 +976,86 @@ Intent-aware lex (C++ performance, not sports):
         encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
       }));
 
-      const results = await withLLMScope(
-        scopeKey,
-        () => raceWithTimeout(
-          (signal) => structuredSearchWithDiagnostics(store, subSearches, {
-            collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
-            limit,
-            minScore,
-            candidateLimit: profilePolicy.candidateLimit,
-            maxRerankCandidates,
-            rerankTimeoutMs,
-            rerankQueueLimit,
-            rerankConcurrency,
-            rerankDropPolicy,
-            vectorFanoutWorkers,
-            rerankLimit: profilePolicy.rerankLimit,
-            disableRerank: profile === "fast",
-            routingProfile: profile,
-            signal,
-            hooks: {
-              onExpand: (_original, _expanded, elapsedMs) => {
-                timings.expand_ms += elapsedMs;
-                pushSpan(timings, "expand", Date.now() - elapsedMs);
+      let results;
+      if (indexes && indexes.length > 0) {
+        const identity = requestIdentityScope.getStore();
+        const primaryQ = subSearches.find((s: any) => s.type === 'lex')?.query
+          || subSearches.find((s: any) => s.type === 'vec')?.query
+          || subSearches[0]?.query || "";
+        const { federatedQuery } = await import("./repository.js");
+        const { enforce } = await import("./rbac.js");
+        // RBAC filter: only query indexes the identity has access to
+        const authorizedIndexes = indexes.filter((idx: string) => {
+          if (!identity) return true;
+          try { enforce(identity, "query", idx); return true; }
+          catch { return false; }
+        });
+        const fedResults = federatedQuery(authorizedIndexes, primaryQ, { limit });
+
+        results = {
+          results: fedResults.matches.map(m => ({
+            docid: m.docid,
+            displayPath: m.file,
+            title: m.title || "",
+            score: m.score,
+            context: m.context || "",
+            bestChunk: m.snippet || "",
+            _index: m._index,
+          })),
+          diagnostics: {
+            degradedMode: fedResults.indexes_skipped.length > 0,
+            fallbackReasons: fedResults.indexes_skipped.length > 0
+              ? [`skipped indexes: ${fedResults.indexes_skipped.join(", ")}`]
+              : [],
+          },
+        };
+      } else {
+        results = await withLLMScope(
+          scopeKey,
+          () => raceWithTimeout(
+            (signal) => structuredSearchWithDiagnostics(store, subSearches, {
+              collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+              limit,
+              minScore,
+              candidateLimit: profilePolicy.candidateLimit,
+              maxRerankCandidates,
+              rerankTimeoutMs,
+              rerankQueueLimit,
+              rerankConcurrency,
+              rerankDropPolicy,
+              vectorFanoutWorkers,
+              rerankLimit: profilePolicy.rerankLimit,
+              disableRerank: profile === "fast",
+              routingProfile: profile,
+              signal,
+              hooks: {
+                onExpand: (_original, _expanded, elapsedMs) => {
+                  timings.expand_ms += elapsedMs;
+                  pushSpan(timings, "expand", Date.now() - elapsedMs);
+                },
+                onEmbedDone: (elapsedMs) => {
+                  timings.embed_ms += elapsedMs;
+                  pushSpan(timings, "embed", Date.now() - elapsedMs);
+                },
+                onRetrievalDone: (elapsedMs) => {
+                  timings.retrieval_ms = elapsedMs;
+                  pushSpan(timings, "retrieve", Date.now() - elapsedMs);
+                },
+                onRerankInitDone: (elapsedMs) => {
+                  timings.rerank_init_ms += elapsedMs;
+                  pushSpan(timings, "rerank_init", Date.now() - elapsedMs);
+                },
+                onRerankDone: (elapsedMs) => {
+                  timings.rerank_ms += elapsedMs;
+                  pushSpan(timings, "rerank", Date.now() - elapsedMs);
+                },
               },
-              onEmbedDone: (elapsedMs) => {
-                timings.embed_ms += elapsedMs;
-                pushSpan(timings, "embed", Date.now() - elapsedMs);
-              },
-              onRetrievalDone: (elapsedMs) => {
-                timings.retrieval_ms = elapsedMs;
-                pushSpan(timings, "retrieve", Date.now() - elapsedMs);
-              },
-              onRerankInitDone: (elapsedMs) => {
-                timings.rerank_init_ms += elapsedMs;
-                pushSpan(timings, "rerank_init", Date.now() - elapsedMs);
-              },
-              onRerankDone: (elapsedMs) => {
-                timings.rerank_ms += elapsedMs;
-                pushSpan(timings, "rerank", Date.now() - elapsedMs);
-              },
-            },
-          }),
-          resolveTimeoutByProfile(timeoutMs, profile),
-          "query_timeout"
-        )
-      );
+            }),
+            resolveTimeoutByProfile(timeoutMs, profile),
+            "query_timeout"
+          )
+        );
+      }
       timings.total_ms = Date.now() - totalStart;
       pushSpan(timings, "total", totalStart);
 
@@ -1036,6 +1075,7 @@ Intent-aware lex (C++ performance, not sports):
           }
         }
         return {
+          _index: (r as any)._index || undefined,
           docid: `#${r.docid}`,
           file: r.displayPath,
           title: r.title,
@@ -1064,7 +1104,7 @@ Intent-aware lex (C++ performance, not sports):
         dedupe_join_hits: false,
         replay_artifact: null,
         replay_artifact_path: null,
-        diagnostics: results.diagnostics,
+        diagnostics: results.diagnostics as any,
       };
       metadata.replay_artifact = await writeReplayArtifact({
         requestId: stableHash({
@@ -1145,9 +1185,12 @@ Intent-aware lex (C++ performance, not sports):
         fromLine: z.number().optional().describe("Start from this line number (1-indexed)"),
         maxLines: z.number().optional().describe("Maximum number of lines to return"),
         lineNumbers: z.boolean().optional().default(false).describe("Add line numbers to output (format: 'N: content')"),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to search for the document. Omit to use current index."
+        ),
       },
     },
-    async ({ file, fromLine, maxLines, lineNumbers }: any) => {
+    async ({ file, fromLine, maxLines, lineNumbers, indexes }: any) => {
       try {
       // Support :line suffix in `file` (e.g. "foo.md:120") when fromLine isn't provided
       let parsedFromLine = fromLine;
@@ -1158,7 +1201,7 @@ Intent-aware lex (C++ performance, not sports):
         lookup = lookup.slice(0, -colonMatch[0].length);
       }
 
-      const result = store.findDocument(lookup, { includeBody: false });
+      let result = store.findDocument(lookup, { includeBody: false });
 
       if (!("error" in result)) {
         const { filterAllowedCollections } = await import("./rbac.js");
@@ -1171,6 +1214,26 @@ Intent-aware lex (C++ performance, not sports):
               isError: true,
             };
           }
+        }
+      }
+
+      // If not found in current index, try named indexes
+      if ("error" in result && indexes && indexes.length > 0) {
+        const { createStoreForIndex } = await import("./repository.js");
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        for (const idxName of indexes) {
+          try {
+            if (identity) enforce(identity, "get", idxName);
+            const idxStore = createStoreForIndex(idxName);
+            try {
+              const idxDoc = idxStore.findDocument(lookup, { includeBody: true });
+              if (idxDoc && !("error" in idxDoc)) {
+                result = idxDoc as any;
+                break;
+              }
+            } finally { idxStore.close(); }
+          } catch { continue; }
         }
       }
 
@@ -1243,11 +1306,39 @@ Intent-aware lex (C++ performance, not sports):
         maxLines: z.number().optional().describe("Maximum lines per file"),
         maxBytes: z.number().optional().default(10240).describe("Skip files larger than this (default: 10240 = 10KB)"),
         lineNumbers: z.boolean().optional().default(false).describe("Add line numbers to output (format: 'N: content')"),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to search for documents. Omit to use current index."
+        ),
       },
     },
-    async ({ pattern, maxLines, maxBytes, lineNumbers }: any) => {
+    async ({ pattern, maxLines, maxBytes, lineNumbers, indexes }: any) => {
       try {
       const { docs, errors } = store.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
+
+      // Cross-index federation: also search named indexes
+      if (indexes && indexes.length > 0) {
+        const seenFiles = new Set(docs.map((d: any) => d.doc?.displayPath));
+        const { createStoreForIndex } = await import("./repository.js");
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        for (const idxName of indexes) {
+          try {
+            if (identity) enforce(identity, "multi_get", idxName);
+            const idxStore = createStoreForIndex(idxName);
+            try {
+              const idxResult = idxStore.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
+              for (const d of idxResult.docs) {
+                const path = d.doc?.displayPath;
+                if (path && !seenFiles.has(path)) {
+                  seenFiles.add(path);
+                  docs.push(d);
+                }
+              }
+              errors.push(...idxResult.errors);
+            } finally { idxStore.close(); }
+          } catch { continue; }
+        }
+      }
 
       if (docs.length === 0 && errors.length === 0) {
         return {
@@ -1715,6 +1806,213 @@ Intent-aware lex (C++ performance, not sports):
         structuredContent: result,
         isError: result.failed > 0,
       };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_list
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_list",
+    {
+      title: "List Indexes",
+      description: "List all named indexes. Returns index name, description, creation date, and whether it is the default.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_list");
+        const { ensureDefaultIndexRegistered, listIndexes, getDefaultIndexName } = await import("./index-manager.js");
+        ensureDefaultIndexRegistered();
+        const indexes = listIndexes();
+        const defaultName = getDefaultIndexName();
+
+        return {
+          content: [{ type: "text", text: `${indexes.length} index(es) found. Default: ${defaultName}` }],
+          structuredContent: {
+            indexes: indexes.map(i => ({
+              name: i.name,
+              description: i.description || null,
+              created_at: i.created_at,
+              is_default: i.name === defaultName,
+            })),
+          },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_list_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_create
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_create",
+    {
+      title: "Create Index",
+      description: "Create a new named index with its own SQLite database. Admin only.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        name: z.string().describe("Index name (lowercase, 2-64 chars, alphanumeric + hyphens)"),
+        description: z.string().optional().describe("Human-readable description"),
+      },
+    },
+    async ({ name, description }: any) => {
+      try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_create");
+        const { registerIndex } = await import("./index-manager.js");
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { openDatabase } = await import("./runtime.js");
+        const { initializeDatabase } = await import("./repository/store-init.js");
+
+        const entry = registerIndex(name, description);
+        const dbPath = getDefaultDbPath(name);
+        const db = openDatabase(dbPath);
+        initializeDatabase(db);
+        db.close();
+
+        return {
+          content: [{ type: "text", text: `Created index '${name}' at ${dbPath}` }],
+          structuredContent: { name, db_path: dbPath, created_at: entry.created_at },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_create_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_delete
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_delete",
+    {
+      title: "Delete Index",
+      description: "Permanently delete a named index and all its data. Admin only. Requires force=true to confirm.",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
+      inputSchema: {
+        name: z.string().describe("Index name to delete"),
+        force: z.boolean().default(false).describe("Must be true to confirm deletion"),
+      },
+    },
+    async ({ name, force }: any) => {
+      try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_delete");
+        if (!force) {
+          return {
+            content: [{ type: "text", text: `Deletion of index '${name}' requires force=true to confirm.` }],
+            isError: true,
+          };
+        }
+
+        const { unregisterIndex, getDefaultIndexName } = await import("./index-manager.js");
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { existsSync, unlinkSync } = await import("node:fs");
+
+        if (name === getDefaultIndexName()) {
+          return {
+            content: [{ type: "text", text: `Cannot delete the default index '${name}'.` }],
+            isError: true,
+          };
+        }
+
+        unregisterIndex(name);
+        const dbPath = getDefaultDbPath(name);
+        for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try { if (existsSync(p)) unlinkSync(p); } catch {}
+        }
+
+        return {
+          content: [{ type: "text", text: `Deleted index '${name}'.` }],
+          structuredContent: { deleted: true, name },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_delete_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_migrate
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_migrate",
+    {
+      title: "Migrate Collection",
+      description: "Copy a collection and its data from one index to another. Admin only.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        collection: z.string().describe("Collection name to migrate"),
+        from_index: z.string().describe("Source index name"),
+        to_index: z.string().describe("Destination index name"),
+      },
+    },
+    async ({ collection, from_index, to_index }: any) => {
+      try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_migrate");
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { openDatabase } = await import("./runtime.js");
+        const srcDbPath = getDefaultDbPath(from_index);
+        const dstDbPath = getDefaultDbPath(to_index);
+
+        const srcDb = openDatabase(srcDbPath);
+        const dstDb = openDatabase(dstDbPath);
+
+        const count = (srcDb.prepare(
+          `SELECT COUNT(*) as c FROM content WHERE collection = ?`
+        ).get(collection) as any)?.c || 0;
+
+        if (count === 0) {
+          srcDb.close();
+          dstDb.close();
+          return {
+            content: [{ type: "text", text: `Collection '${collection}' is empty in source index '${from_index}'.` }],
+          };
+        }
+
+        dstDb.exec(`ATTACH DATABASE '${srcDbPath}' AS src`);
+        dstDb.prepare(`INSERT OR IGNORE INTO main.content SELECT * FROM src.content WHERE collection = ?`).run(collection);
+        dstDb.prepare(`INSERT OR IGNORE INTO main.documents SELECT * FROM src.documents WHERE collection = ?`).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.content_vectors SELECT cv.* FROM src.content_vectors cv WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = cv.hash AND c.collection = ?)`
+        ).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.documents_fts SELECT * FROM src.documents_fts WHERE docid IN (SELECT docid FROM src.documents WHERE collection = ?)`
+        ).run(collection);
+        dstDb.prepare(`DETACH DATABASE src`).run();
+
+        srcDb.close();
+        dstDb.close();
+
+        return {
+          content: [{ type: "text", text: `Migrated ${count} documents from '${from_index}' to '${to_index}' collection '${collection}'.` }],
+          structuredContent: { collection, from_index, to_index, documents_migrated: count },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_migrate_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -2479,7 +2777,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             return;
           }
           // Single-tenant → admin identity
-          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*", allowedIndexes: ["*"] };
         } else {
           // No auth configured — restrict to loopback connections only
           const remoteAddr = nodeReq.socket.remoteAddress || "";
@@ -2495,7 +2793,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             logger.info(`403 Forbidden ${nodeReq.method} ${pathname} (no-auth requires loopback)`);
             return;
           }
-          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*", allowedIndexes: ["*"] };
         }
       }
 

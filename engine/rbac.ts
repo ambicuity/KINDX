@@ -52,6 +52,8 @@ export interface Tenant {
    * Empty array means no collection access.
    */
   allowedCollections: string[];
+  /** Indexes this tenant can access. `["*"]` means all indexes. */
+  allowedIndexes: string[];
   /** ISO-8601 creation timestamp. */
   createdAt: string;
   /** Optional description / notes. */
@@ -72,6 +74,7 @@ export interface ResolvedIdentity {
   tenantId: string;
   role: TenantRole;
   allowedCollections: string[] | "*";
+  allowedIndexes: string[] | "*";
 }
 
 // =============================================================================
@@ -101,7 +104,11 @@ export type RBACOperation =
   | "update"
   | "backup"
   | "doctor"
-  | "tenant_manage";
+  | "tenant_manage"
+  | "index_list"
+  | "index_create"
+  | "index_delete"
+  | "index_migrate";
 
 const ROLE_PERMISSIONS: Record<TenantRole, Set<RBACOperation>> = {
   admin: new Set([
@@ -109,16 +116,19 @@ const ROLE_PERMISSIONS: Record<TenantRole, Set<RBACOperation>> = {
     "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed",
     "collection_add", "collection_remove", "collection_rename",
     "embed", "update", "backup", "doctor", "tenant_manage",
+    "index_list", "index_create", "index_delete", "index_migrate",
   ]),
   editor: new Set([
     "query", "search", "get", "multi_get", "status",
     "memory_put", "memory_delete", "memory_bulk", "memory_search", "memory_history", "memory_stats", "memory_mark_accessed",
     "embed", "update", "doctor",
+    "index_list",
   ]),
   viewer: new Set([
     "query", "search", "get", "multi_get", "status",
     "memory_search", "memory_history", "memory_stats",
     "doctor",
+    "index_list",
   ]),
 };
 
@@ -412,6 +422,7 @@ export function createTenant(
   name: string,
   role: TenantRole,
   allowedCollections: string[],
+  allowedIndexes: string[] = ["*"],
   description?: string,
 ): { tenant: Tenant; plaintextToken: string } {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
@@ -430,6 +441,7 @@ export function createTenant(
     role,
     tokenHash: hashToken(plaintextToken),
     allowedCollections: role === "admin" ? ["*"] : allowedCollections,
+    allowedIndexes: role === "admin" ? ["*"] : allowedIndexes,
     createdAt: new Date().toISOString(),
     description,
     active: true,
@@ -487,7 +499,7 @@ export function rotateTenantToken(id: string): string {
  */
 export function updateTenant(
   id: string,
-  updates: Partial<Pick<Tenant, "role" | "allowedCollections" | "active" | "name" | "description">>,
+  updates: Partial<Pick<Tenant, "role" | "allowedCollections" | "allowedIndexes" | "active" | "name" | "description">>,
 ): Tenant | null {
   const registry = loadTenantRegistry();
   const tenant = registry.tenants[id];
@@ -495,6 +507,7 @@ export function updateTenant(
 
   if (updates.role !== undefined) tenant.role = updates.role;
   if (updates.allowedCollections !== undefined) tenant.allowedCollections = updates.allowedCollections;
+  if (updates.allowedIndexes !== undefined) tenant.allowedIndexes = updates.allowedIndexes;
   if (updates.active !== undefined) tenant.active = updates.active;
   if (updates.name !== undefined) tenant.name = updates.name;
   if (updates.description !== undefined) tenant.description = updates.description;
@@ -532,6 +545,34 @@ export function revokeCollections(id: string, collections: string[]): boolean {
   const toRemove = new Set(collections);
   tenant.allowedCollections = tenant.allowedCollections.filter(c => !toRemove.has(c));
 
+  saveTenantRegistry(registry);
+  return true;
+}
+
+/**
+ * Grant a tenant access to additional indexes.
+ */
+export function grantIndexes(id: string, indexes: string[]): boolean {
+  const registry = loadTenantRegistry();
+  const tenant = registry.tenants[id];
+  if (!tenant) return false;
+  if (tenant.allowedIndexes.includes("*")) return true;
+  const existing = new Set(tenant.allowedIndexes);
+  for (const i of indexes) existing.add(i);
+  tenant.allowedIndexes = Array.from(existing);
+  saveTenantRegistry(registry);
+  return true;
+}
+
+/**
+ * Revoke a tenant's access to specific indexes.
+ */
+export function revokeIndexes(id: string, indexes: string[]): boolean {
+  const registry = loadTenantRegistry();
+  const tenant = registry.tenants[id];
+  if (!tenant) return false;
+  const toRemove = new Set(indexes);
+  tenant.allowedIndexes = tenant.allowedIndexes.filter(i => !toRemove.has(i));
   saveTenantRegistry(registry);
   return true;
 }
@@ -581,6 +622,9 @@ export function resolveTokenToIdentity(token: string): ResolvedIdentity | null {
     allowedCollections: matched.allowedCollections.includes("*")
       ? "*"
       : matched.allowedCollections,
+    allowedIndexes: !matched.allowedIndexes || matched.allowedIndexes.includes("*") || matched.allowedIndexes.length === 0
+      ? "*"
+      : matched.allowedIndexes,
   };
 }
 
@@ -605,6 +649,15 @@ export function canAccessCollection(identity: ResolvedIdentity, collectionName: 
 }
 
 /**
+ * Check whether the identity can access a specific index.
+ */
+export function canAccessIndex(identity: ResolvedIdentity, indexName: string): boolean {
+  if (identity.allowedIndexes === "*") return true;
+  if (!Array.isArray(identity.allowedIndexes)) return true;
+  return identity.allowedIndexes.includes(indexName);
+}
+
+/**
  * Filter a list of collection names to only those the identity can access.
  */
 export function filterAllowedCollections(
@@ -622,6 +675,7 @@ export function filterAllowedCollections(
 export function enforce(
   identity: ResolvedIdentity,
   operation: RBACOperation,
+  indexName?: string,
   collectionName?: string,
 ): void {
   // Tier-1: permission check FIRST. Previously rate-limit ran before
@@ -632,6 +686,12 @@ export function enforce(
   if (!isPermitted(identity, operation)) {
     throw new RBACDeniedError(
       `Tenant '${identity.tenantId}' (role=${identity.role}) is not permitted to perform '${operation}'`
+    );
+  }
+
+  if (indexName && !canAccessIndex(identity, indexName)) {
+    throw new RBACDeniedError(
+      `Tenant '${identity.tenantId}' does not have access to index '${indexName}'`
     );
   }
 

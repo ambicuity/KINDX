@@ -42,6 +42,7 @@ import {
 } from "./catalogs.js";
 // SessionRegistry import removed — signal now propagated via options.signal
 import { ensureEncryptedIndexReady, ensureEncryptedShardIndexesReady } from "./encryption.js";
+import { quietWarn, errString } from "./utils/quiet-warn.js";
 
 export { scanBreakPoints, findCodeFences, isInsideCodeFence, findBestCutoff };
 export type { BreakPoint, CodeFenceRegion };
@@ -299,6 +300,7 @@ export function toVirtualPath(db: Database, absolutePath: string): string | null
 export type Store = {
   db: Database;
   dbPath: string;
+  indexName: string;
   close: () => void;
   ensureVecTable: (dimensions: number) => void;
 
@@ -392,8 +394,8 @@ export type Store = {
  * @param dbPath - Path to the SQLite database file
  * @returns Store instance with all methods bound to the database
  */
-export function createStore(dbPath?: string): Store {
-  const resolvedPath = dbPath || getDefaultDbPath();
+export function createStore(dbPath?: string, indexName?: string): Store {
+  const resolvedPath = dbPath || getDefaultDbPath(indexName || "index");
   ensureEncryptedIndexReady(resolvedPath);
   ensureEncryptedShardIndexesReady(resolvedPath);
   const db = openDatabase(resolvedPath);
@@ -402,6 +404,7 @@ export function createStore(dbPath?: string): Store {
   return {
     db,
     dbPath: resolvedPath,
+    indexName: indexName || "index",
     close: () => db.close(),
     ensureVecTable: (dimensions: number) => ensureVecTableInternal(db, dimensions),
 
@@ -486,6 +489,97 @@ export function createStore(dbPath?: string): Store {
     clearAllEmbeddings: () => clearAllEmbeddings(db),
     insertEmbedding: (hash: string, seq: number, pos: number, embedding: Float32Array, model: string, embeddedAt: string) => insertEmbedding(db, hash, seq, pos, embedding, model, embeddedAt),
     bulkInsertEmbeddings: (embeddings: ReadonlyArray<{ hash: string; seq: number; pos: number; embedding: Float32Array; model: string; embeddedAt: string }>) => bulkInsertEmbeddings(db, embeddings),
+  };
+}
+
+export function createStoreForIndex(indexName: string): Store {
+  return createStore(undefined, indexName);
+}
+
+export interface FederatedMatch {
+  _index: string;
+  docid: string;
+  file: string;
+  title?: string;
+  score: number;
+  context?: string;
+  snippet?: string;
+}
+
+export interface FederatedResult {
+  matches: FederatedMatch[];
+  indexes_queried: string[];
+  indexes_skipped: string[];
+}
+
+function runIndexQuery(
+  indexName: string,
+  queryText: string,
+  limit: number = 10,
+): { matches: Array<{ docid: string; displayPath: string; title?: string; score: number; context?: string; snippet?: string }> } {
+  const store = createStoreForIndex(indexName);
+  try {
+    const ftsMatches = store.searchFTS(queryText, limit * 2);
+    const matches = ftsMatches.slice(0, limit).map(m => ({
+      docid: m.docid,
+      displayPath: m.displayPath,
+      title: m.title || "",
+      score: m.score,
+      context: m.context || "",
+      snippet: m.body || "",
+    }));
+    return { matches };
+  } finally {
+    store.close();
+  }
+}
+
+export function federatedQuery(
+  indexes: string[],
+  queryText: string,
+  options: { limit?: number } = {},
+): FederatedResult {
+  const allMatches: Array<{ index: string; match: any }> = [];
+  const skipped: string[] = [];
+  const limit = options.limit ?? 10;
+
+  for (const indexName of indexes) {
+    try {
+      const { matches } = runIndexQuery(indexName, queryText, limit);
+      for (const m of matches) {
+        allMatches.push({ index: indexName, match: m });
+      }
+    } catch (e) {
+      quietWarn("federated_query.index_skipped", { index: indexName, err: errString(e) });
+      skipped.push(indexName);
+    }
+  }
+
+  const seen = new Map<string, { match: any; index: string; score: number }>();
+  for (const { index, match } of allMatches) {
+    const key = match.docid;
+    const existing = seen.get(key);
+    if (!existing || match.score > existing.score) {
+      seen.set(key, { match, index, score: match.score });
+    }
+  }
+
+  const merged = Array.from(seen.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return {
+    matches: merged.map(({ match, index }) => ({
+      _index: index,
+      docid: match.docid,
+      file: match.displayPath,
+      title: match.title,
+      score: Math.round(match.score * 100) / 100,
+      context: match.context,
+      snippet: match.snippet,
+    })),
+    indexes_queried: indexes.filter(i => !skipped.includes(i)),
+    indexes_skipped: skipped,
   };
 }
 
