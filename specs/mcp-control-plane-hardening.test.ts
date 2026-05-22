@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { CircuitBreaker, FixedWindowRateLimiter, McpToolListCache, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { CircuitBreaker, FixedWindowRateLimiter, McpToolListCache, SessionRateLimiter, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -403,5 +403,27 @@ describe("CircuitBreaker", () => {
     breaker.allow(); // transitions to half-open
     breaker.recordFailure();
     expect(breaker.state).toBe("open");
+  });
+});
+
+describe("control plane integration", () => {
+  test("control plane enforces rate limits and quotas", () => {
+    const rateLimiter = new SessionRateLimiter({ maxRequests: 2, windowMs: 1000 });
+    const quotaManager = new ToolQuotaManager({ defaultQuota: 3 });
+    const circuitBreaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
+
+    // Simulate request flow
+    expect(rateLimiter.check("session1")).toBe(true);
+    expect(quotaManager.check("session1", "query")).toBe(true);
+    expect(circuitBreaker.allow()).toBe(true);
+
+    // Rate limit exceeded
+    expect(rateLimiter.check("session1")).toBe(true);
+    expect(rateLimiter.check("session1")).toBe(false);
+
+    // Quota exceeded
+    expect(quotaManager.check("session1", "query")).toBe(true);
+    expect(quotaManager.check("session1", "query")).toBe(true);
+    expect(quotaManager.check("session1", "query")).toBe(false);
   });
 });

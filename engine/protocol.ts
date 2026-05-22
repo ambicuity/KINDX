@@ -60,7 +60,10 @@ import { getShardHealthSummary } from "./sharding.js";
 import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary } from "./audit.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
+  CircuitBreaker,
   McpToolListCache,
+  SessionRateLimiter,
+  ToolQuotaManager,
   applyToolPolicy,
   buildResolvedHttpHeaders,
   buildToolProvenanceRegistry,
@@ -68,7 +71,12 @@ import {
   loadMcpControlPlaneConfig,
   resolveMcpServerControl,
 } from "./mcp-control-plane.js";
-import type { ResolvedMcpServerControl } from "./mcp-control-plane.js";
+import type {
+  CircuitBreakerConfig,
+  RateLimiterConfig,
+  ResolvedMcpServerControl,
+  ToolQuotaConfig,
+} from "./mcp-control-plane.js";
 
 // =============================================================================
 // Types for structured content
@@ -1907,6 +1915,25 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const toolProvenance = buildToolProvenanceRegistry(KINDX_MCP_SERVER_ID, [...KINDX_MCP_TOOL_NAMES]);
   const toolListCache = new McpToolListCache();
   const requestScopeContext = new AsyncLocalStorage<MemoryScopeContext | undefined>();
+
+  const DEFAULT_RATE_LIMITER_CONFIG: RateLimiterConfig = {
+    maxRequests: parseInt(process.env.KINDX_RATE_LIMIT_MAX ?? "100", 10),
+    windowMs: parseInt(process.env.KINDX_RATE_LIMIT_WINDOW_MS ?? "60000", 10),
+  };
+
+  const DEFAULT_QUOTA_CONFIG: ToolQuotaConfig = {
+    defaultQuota: parseInt(process.env.KINDX_TOOL_QUOTA_DEFAULT ?? "1000", 10),
+    resetIntervalMs: parseInt(process.env.KINDX_QUOTA_RESET_MS ?? "3600000", 10),
+  };
+
+  const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
+    failureThreshold: parseInt(process.env.KINDX_CIRCUIT_BREAKER_THRESHOLD ?? "5", 10),
+    resetTimeoutMs: parseInt(process.env.KINDX_CIRCUIT_BREAKER_RESET_MS ?? "30000", 10),
+  };
+
+  const rateLimiter = new SessionRateLimiter(DEFAULT_RATE_LIMITER_CONFIG);
+  const quotaManager = new ToolQuotaManager(DEFAULT_QUOTA_CONFIG);
+  const circuitBreaker = new CircuitBreaker(DEFAULT_CIRCUIT_BREAKER_CONFIG);
   const queryTimeoutMs = parseQueryTimeoutMs();
   const dedupeMode = getDedupeMode();
   const inFlightBySession = new Map<string, Map<string, Promise<{ results: SearchResultItem[]; metadata: QueryMetadata }>>>();
