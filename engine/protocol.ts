@@ -11,6 +11,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteFile } from "./utils/atomic-write.js";
+import { timingSafeStringEqual } from "./utils/timing-safe.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -2426,8 +2427,8 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           }
           logger.info(`RBAC: tenant=${requestIdentity.tenantId} role=${requestIdentity.role} ${nodeReq.method} ${pathname}`);
         } else if (mcpToken) {
-          // Single-tenant legacy mode — exact token match
-          if (!authHeader || authHeader !== `Bearer ${mcpToken}`) {
+          // Single-tenant legacy mode — constant-time token match
+          if (!authHeader || !timingSafeStringEqual(authHeader, `Bearer ${mcpToken}`)) {
             nodeRes.writeHead(401, { "Content-Type": "application/json" });
             nodeRes.end(JSON.stringify({ error: "Unauthorized: set Authorization: Bearer <KINDX_MCP_TOKEN>" }));
             recordHttpMetrics(401);
@@ -2437,7 +2438,20 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           // Single-tenant → admin identity
           requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
         } else {
-          // No auth configured — admin identity (open access, local-only deployments)
+          // No auth configured — restrict to loopback connections only
+          const remoteAddr = nodeReq.socket.remoteAddress || "";
+          const isLoopback = remoteAddr === "127.0.0.1" || remoteAddr === "::1"
+            || remoteAddr === "::ffff:127.0.0.1" || remoteAddr === ""
+            || remoteAddr.startsWith("::ffff:127.");
+          if (!isLoopback) {
+            nodeRes.writeHead(403, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({
+              error: "Forbidden: KINDX_MCP_TOKEN must be configured for non-localhost access"
+            }));
+            recordHttpMetrics(403);
+            logger.info(`403 Forbidden ${nodeReq.method} ${pathname} (no-auth requires loopback)`);
+            return;
+          }
           requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
         }
       }
