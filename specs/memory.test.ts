@@ -488,6 +488,86 @@ describe("memory subsystem", () => {
     expect(after.expires_at).toBe(futureExpiry);
   });
 
+  test("cross-prefix semantic dedup supersedes similar memory under different prefix", async () => {
+    const db = createMemoryDb();
+
+    const oldMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "preference:editor",
+      value: "vim",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:editor",
+      value: "vim",
+      crossPrefixThreshold: 0.9,
+      precomputedVector: [0.98, 0.2, 0],
+    });
+
+    expect(newMemory.id).not.toBe(oldMemory.id);
+    const oldRow = db.prepare(`SELECT superseded_by FROM memories WHERE id = ?`).get(oldMemory.id) as { superseded_by: number };
+    expect(Number(oldRow.superseded_by)).toBe(newMemory.id);
+  });
+
+  test("cross-prefix dedup does not merge low-similarity memories", async () => {
+    const db = createMemoryDb();
+
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "preference:color",
+      value: "blue",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:language",
+      value: "TypeScript",
+      crossPrefixThreshold: 0.94,
+      precomputedVector: [0, 1, 0],
+    });
+
+    const activeCount = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(activeCount.cnt).toBe(2);
+  });
+
+  test("same-prefix dedup takes priority over cross-prefix", async () => {
+    const db = createMemoryDb();
+
+    const samePrefixOld = await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim",
+      precomputedVector: [1, 0, 0],
+    });
+
+    const crossPrefixOld = await upsertMemory(db, {
+      scope: "s1",
+      key: "setting:editor",
+      value: "vim",
+      disableSemanticDedup: true,
+      precomputedVector: [0.98, 0.2, 0],
+    });
+
+    // Now insert same-prefix update — should supersede samePrefixOld, not crossPrefixOld
+    const newMemory = await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "neovim",
+      semanticThreshold: 0.9,
+      crossPrefixThreshold: 0.94,
+      precomputedVector: [0.97, 0.24, 0],
+    });
+
+    const oldRow = db.prepare(`SELECT superseded_by FROM memories WHERE id = ?`).get(samePrefixOld.id) as { superseded_by: number };
+    expect(Number(oldRow.superseded_by)).toBe(newMemory.id);
+  });
+
   test("markMemoryAccessed refreshes TTL when ttl_seconds is set", async () => {
     const db = createMemoryDb();
 

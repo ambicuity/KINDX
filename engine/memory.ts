@@ -90,6 +90,7 @@ export type UpsertMemoryInput = {
    * Inspired by Zep's temporal decay pattern.
    */
   ttl?: number;
+  crossPrefixThreshold?: number;
 };
 
 export type BulkMemoryOperation = 
@@ -324,6 +325,22 @@ function getSemanticCandidates(db: Database, scope: string, prefix: string): { i
       AND m.superseded_by IS NULL
       AND (m.key = ? OR m.key LIKE ? || ':%')
   `).all(scope, prefix, prefix) as { id: number; key: string; embedding: Buffer }[];
+
+  return rows.map((row) => ({
+    id: Number(row.id),
+    key: String(row.key),
+    embedding: deserializeVector(row.embedding),
+  }));
+}
+
+function getCrossPrefixCandidates(db: Database, scope: string): { id: number; key: string; embedding: Float32Array }[] {
+  const rows = db.prepare(`
+    SELECT m.id, m.key, e.embedding
+    FROM memories m
+    JOIN memory_embeddings e ON e.memory_id = m.id
+    WHERE m.scope = ?
+      AND m.superseded_by IS NULL
+  `).all(scope) as { id: number; key: string; embedding: Buffer }[];
 
   return rows.map((row) => ({
     id: Number(row.id),
@@ -720,11 +737,13 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   const prefix = keyPrefix(key);
 
   // 2) Semantic supersession within same key prefix + scope
+  let hadSamePrefixCandidates = false;
   if (!input.disableSemanticDedup) {
     vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
     if (vector && vector.length > 0) {
       const normQuery = normalizeVector(vector);
       const candidates = getSemanticCandidates(db, scope, prefix);
+      hadSamePrefixCandidates = candidates.length > 0;
       let best: { id: number; similarity: number } | null = null;
       for (const candidate of candidates) {
         const sim = cosineSimilarityNormalized(normQuery, candidate.embedding);
@@ -757,6 +776,36 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
           return toMemoryRecord(row);
         });
       }
+    }
+  }
+
+  // 2b) Cross-prefix semantic supersession (fallback when no same-prefix candidates exist)
+  if (!input.disableSemanticDedup && !hadSamePrefixCandidates && vector && vector.length > 0) {
+    const crossPrefixThreshold = input.crossPrefixThreshold ?? 0.94;
+    const normQuery = normalizeVector(vector);
+    const crossCandidates = getCrossPrefixCandidates(db, scope);
+    let crossBest: { id: number; similarity: number } | null = null;
+    for (const candidate of crossCandidates) {
+      const sim = cosineSimilarityNormalized(normQuery, candidate.embedding);
+      if (sim >= crossPrefixThreshold && (!crossBest || sim > crossBest.similarity)) {
+        crossBest = { id: candidate.id, similarity: sim };
+      }
+    }
+
+    if (crossBest) {
+      return withTransaction(db, () => {
+        const newId = insertNewMemory(db, {
+          scope, key, value, source, confidence, searchText, tags, vector,
+        });
+
+        const now = nowIso();
+        db.prepare(`
+          UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE id = ?
+        `).run(newId, now, crossBest.id);
+
+        const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
+        return toMemoryRecord(row);
+      });
     }
   }
 
