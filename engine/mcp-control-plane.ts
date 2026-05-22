@@ -240,18 +240,40 @@ export function buildResolvedHttpHeaders(control: ResolvedMcpServerControl): Rec
   return out;
 }
 
-export function isToolEnabledByPolicy(control: ResolvedMcpServerControl, toolName: string): boolean {
-  if (control.project_scoped && !control.trusted_project) return false;
-
-  // Explicit deny always wins.
-  if (control.disabled_tools.includes(toolName)) return false;
-
-  // If enabled_tools is set, treat it as an allowlist.
-  if (Array.isArray(control.enabled_tools)) {
-    return control.enabled_tools.includes(toolName);
+export function isToolEnabledByPolicy(
+  control: ResolvedMcpServerControl,
+  toolName: string,
+  options?: { audit?: (entry: { action: string; scope: string; detail: string }) => void },
+): boolean {
+  if (control.project_scoped && !control.trusted_project) {
+    options?.audit?.({
+      action: "tool_denied",
+      scope: `${control.id}/${toolName}`,
+      detail: "project_scoped=true but trusted_project=false",
+    });
+    return false;
   }
 
-  // No explicit allowlist configured: allow by default.
+  if (control.disabled_tools.includes(toolName)) {
+    options?.audit?.({
+      action: "tool_denied",
+      scope: `${control.id}/${toolName}`,
+      detail: "explicitly disabled",
+    });
+    return false;
+  }
+
+  if (Array.isArray(control.enabled_tools)) {
+    if (!control.enabled_tools.includes(toolName)) {
+      options?.audit?.({
+        action: "tool_denied",
+        scope: `${control.id}/${toolName}`,
+        detail: "not in allowlist",
+      });
+      return false;
+    }
+  }
+
   return true;
 }
 
