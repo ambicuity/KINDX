@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { FixedWindowRateLimiter, McpToolListCache, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { CircuitBreaker, FixedWindowRateLimiter, McpToolListCache, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -353,5 +353,55 @@ describe("ToolQuotaManager", () => {
     quotas.reset("session1");
     expect(quotas.check("session1", "query")).toBe(true);
     expect(quotas.check("session1", "get")).toBe(true);
+  });
+});
+
+describe("CircuitBreaker", () => {
+  test("starts in closed state", () => {
+    const breaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
+    expect(breaker.state).toBe("closed");
+    expect(breaker.allow()).toBe(true);
+  });
+
+  test("opens after threshold failures", () => {
+    const breaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.state).toBe("closed");
+    expect(breaker.allow()).toBe(true);
+    breaker.recordFailure();
+    expect(breaker.state).toBe("open");
+    expect(breaker.allow()).toBe(false);
+  });
+
+  test("transitions to half-open after timeout", async () => {
+    const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.state).toBe("open");
+    expect(breaker.allow()).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(breaker.state).toBe("half-open");
+    expect(breaker.allow()).toBe(true);
+  });
+
+  test("closes after success in half-open state", async () => {
+    const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
+    breaker.recordFailure();
+    breaker.recordFailure();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    breaker.allow(); // transitions to half-open
+    breaker.recordSuccess();
+    expect(breaker.state).toBe("closed");
+  });
+
+  test("re-opens on failure in half-open state", async () => {
+    const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
+    breaker.recordFailure();
+    breaker.recordFailure();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    breaker.allow(); // transitions to half-open
+    breaker.recordFailure();
+    expect(breaker.state).toBe("open");
   });
 });

@@ -5,6 +5,60 @@ import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
+export type CircuitBreakerConfig = {
+  failureThreshold: number;
+  resetTimeoutMs: number;
+};
+
+export class CircuitBreaker {
+  private _state: "closed" | "open" | "half-open" = "closed";
+  private failures = 0;
+  private lastFailureAt = 0;
+  private readonly failureThreshold: number;
+  private readonly resetTimeoutMs: number;
+
+  constructor(config: CircuitBreakerConfig) {
+    this.failureThreshold = config.failureThreshold;
+    this.resetTimeoutMs = config.resetTimeoutMs;
+  }
+
+  get state(): "closed" | "open" | "half-open" {
+    if (this._state === "open") {
+      const elapsed = Date.now() - this.lastFailureAt;
+      if (elapsed >= this.resetTimeoutMs) {
+        this._state = "half-open";
+      }
+    }
+    return this._state;
+  }
+
+  allow(): boolean {
+    const currentState = this.state;
+    if (currentState === "closed") return true;
+    if (currentState === "half-open") return true;
+    return false;
+  }
+
+  recordSuccess(): void {
+    this.failures = 0;
+    this._state = "closed";
+  }
+
+  recordFailure(): void {
+    this.failures++;
+    this.lastFailureAt = Date.now();
+    if (this.failures >= this.failureThreshold) {
+      this._state = "open";
+    }
+  }
+
+  reset(): void {
+    this.failures = 0;
+    this._state = "closed";
+    this.lastFailureAt = 0;
+  }
+}
+
 export type RateLimiterConfig = {
   maxRequests: number;
   windowMs: number;
