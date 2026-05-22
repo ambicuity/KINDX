@@ -81,6 +81,10 @@ export class ToolQuotaManager {
     this.resetIntervalMs = config.resetIntervalMs ?? 3_600_000; // 1 hour default
   }
 
+  get size(): number {
+    return this.usage.size;
+  }
+
   check(sessionId: string, toolName: string): boolean {
     const key = `${sessionId}:${toolName}`;
     const now = Date.now();
@@ -88,6 +92,7 @@ export class ToolQuotaManager {
     const entry = this.usage.get(key);
 
     if (!entry || now >= entry.resetAt) {
+      this.pruneExpired(now);
       this.usage.set(key, { count: 1, resetAt: now + this.resetIntervalMs });
       return true;
     }
@@ -108,6 +113,14 @@ export class ToolQuotaManager {
         if (key.startsWith(`${sessionId}:`)) {
           this.usage.delete(key);
         }
+      }
+    }
+  }
+
+  private pruneExpired(now: number): void {
+    for (const [key, entry] of this.usage) {
+      if (now >= entry.resetAt) {
+        this.usage.delete(key);
       }
     }
   }
