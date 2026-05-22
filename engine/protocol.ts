@@ -25,6 +25,7 @@ import { WebStandardStreamableHTTPServerTransport }
   from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { buildCapabilityManifest, SERVER_VERSION, type ToolRegistration } from "./capability-manifest.js";
 export const requestIdentityScope = new AsyncLocalStorage<import("./rbac.js").ResolvedIdentity | null>();
 import {
   createStore,
@@ -714,8 +715,9 @@ function createMcpServer(
   },
 ): McpServer {
   const mcpControl = options?.mcpControl;
+  const registeredToolDefs: ToolRegistration[] = [];
   const server = new McpServer(
-    { name: "kindx", version: "1.3.4" },
+    { name: "kindx", version: SERVER_VERSION },
     { instructions: buildInstructions(store, getSession?.() ?? undefined) },
   );
   const maybeRegisterTool = (
@@ -740,6 +742,12 @@ function createMcpServer(
       return;
     }
 
+    registeredToolDefs.push({
+      name,
+      description: def.description,
+      readOnly: def.annotations?.readOnlyHint ?? false,
+      inputSchema: def.inputSchema ?? {},
+    });
     server.registerTool(name, def, handler);
   };
 
@@ -822,6 +830,43 @@ function createMcpServer(
           text,
         }],
       };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Resource: kindx://capabilities - machine-readable capability manifest
+  // ---------------------------------------------------------------------------
+
+  server.registerResource(
+    "capabilities",
+    "kindx://capabilities",
+    {
+      title: "KINDX Capabilities",
+      description: "Machine-readable manifest of available tools, query types, collections, and runtime state.",
+      mimeType: "application/json",
+    },
+    async (uri: any) => {
+      try {
+        const manifest = buildCapabilityManifest(store, registeredToolDefs);
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(manifest, null, 2),
+          }],
+        };
+      } catch (err) {
+        return {
+          contents: [{
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify({
+              version: "1.0",
+              error: err instanceof Error ? err.message : String(err),
+            }, null, 2),
+          }],
+        };
+      }
     }
   );
 

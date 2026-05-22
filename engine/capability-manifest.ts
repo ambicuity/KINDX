@@ -67,7 +67,7 @@ export type CapabilityManifest = {
 // Builder
 // =============================================================================
 
-const SERVER_VERSION = "1.3.4";
+export const SERVER_VERSION = "1.3.4";
 
 export function buildCapabilityManifest(
   store: Store,
