@@ -1856,6 +1856,11 @@ export type HttpServerHandle = {
   host: string;
   url: string;
   stop: () => Promise<void>;
+  controlPlane: {
+    rateLimiter: InstanceType<typeof SessionRateLimiter>;
+    quotaManager: InstanceType<typeof ToolQuotaManager>;
+    circuitBreaker: InstanceType<typeof CircuitBreaker>;
+  };
 };
 
 function isHostBindRetryableError(error: unknown): boolean {
@@ -1916,19 +1921,24 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   const toolListCache = new McpToolListCache();
   const requestScopeContext = new AsyncLocalStorage<MemoryScopeContext | undefined>();
 
+  function parseEnvInt(value: string | undefined, fallback: number): number {
+    const raw = parseInt(value ?? "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+  }
+
   const DEFAULT_RATE_LIMITER_CONFIG: RateLimiterConfig = {
-    maxRequests: parseInt(process.env.KINDX_RATE_LIMIT_MAX ?? "100", 10),
-    windowMs: parseInt(process.env.KINDX_RATE_LIMIT_WINDOW_MS ?? "60000", 10),
+    maxRequests: parseEnvInt(process.env.KINDX_RATE_LIMIT_MAX, 100),
+    windowMs: parseEnvInt(process.env.KINDX_RATE_LIMIT_WINDOW_MS, 60000),
   };
 
   const DEFAULT_QUOTA_CONFIG: ToolQuotaConfig = {
-    defaultQuota: parseInt(process.env.KINDX_TOOL_QUOTA_DEFAULT ?? "1000", 10),
-    resetIntervalMs: parseInt(process.env.KINDX_QUOTA_RESET_MS ?? "3600000", 10),
+    defaultQuota: parseEnvInt(process.env.KINDX_TOOL_QUOTA_DEFAULT, 1000),
+    resetIntervalMs: parseEnvInt(process.env.KINDX_QUOTA_RESET_MS, 3600000),
   };
 
   const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
-    failureThreshold: parseInt(process.env.KINDX_CIRCUIT_BREAKER_THRESHOLD ?? "5", 10),
-    resetTimeoutMs: parseInt(process.env.KINDX_CIRCUIT_BREAKER_RESET_MS ?? "30000", 10),
+    failureThreshold: parseEnvInt(process.env.KINDX_CIRCUIT_BREAKER_THRESHOLD, 5),
+    resetTimeoutMs: parseEnvInt(process.env.KINDX_CIRCUIT_BREAKER_RESET_MS, 30000),
   };
 
   const rateLimiter = new SessionRateLimiter(DEFAULT_RATE_LIMITER_CONFIG);
@@ -3212,7 +3222,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   });
 
   logger.info(`KINDX MCP server listening on ${url}`);
-  return { httpServer, port: actualPort, host: boundHost, url, stop };
+  return { httpServer, port: actualPort, host: boundHost, url, stop, controlPlane: { rateLimiter, quotaManager, circuitBreaker } };
 }
 
 // Run if this is the main module
