@@ -174,46 +174,35 @@ export function loadMcpControlPlaneConfig(cwd?: string): {
   return { runtime, project, user, trustedProject, projectHash };
 }
 
+function logConfigResolved(id: string, tier: string): void {
+  process.stderr.write(JSON.stringify({
+    event: "config_resolved",
+    server: id,
+    tier,
+    timestamp: new Date().toISOString(),
+  }) + "\n");
+}
+
 function pickServerConfig(
   all: { runtime: McpControlPlaneConfig | null; project: McpControlPlaneConfig | null; user: McpControlPlaneConfig | null },
   id: string
 ): { source: ResolvedMcpServerControl["source"]; cfg: McpServerControlConfig } {
   const fromRuntime = all.runtime?.mcp_servers?.[id];
   if (fromRuntime) {
-    process.stderr.write(JSON.stringify({
-      event: "config_resolved",
-      server: id,
-      tier: "runtime",
-      timestamp: new Date().toISOString(),
-    }) + "\n");
+    logConfigResolved(id, "runtime");
     return { source: "runtime", cfg: fromRuntime };
   }
   const fromProject = all.project?.mcp_servers?.[id];
   if (fromProject) {
-    process.stderr.write(JSON.stringify({
-      event: "config_resolved",
-      server: id,
-      tier: "project",
-      timestamp: new Date().toISOString(),
-    }) + "\n");
+    logConfigResolved(id, "project");
     return { source: "project", cfg: fromProject };
   }
   const fromUser = all.user?.mcp_servers?.[id];
   if (fromUser) {
-    process.stderr.write(JSON.stringify({
-      event: "config_resolved",
-      server: id,
-      tier: "user",
-      timestamp: new Date().toISOString(),
-    }) + "\n");
+    logConfigResolved(id, "user");
     return { source: "user", cfg: fromUser };
   }
-  process.stderr.write(JSON.stringify({
-    event: "config_resolved",
-    server: id,
-    tier: "defaults",
-    timestamp: new Date().toISOString(),
-  }) + "\n");
+  logConfigResolved(id, "defaults");
   return { source: "defaults", cfg: {} };
 }
 

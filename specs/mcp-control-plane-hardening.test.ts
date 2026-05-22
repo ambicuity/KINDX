@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { McpToolListCache, isToolEnabledByPolicy, loadMcpControlPlaneConfig, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { McpToolListCache, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -130,15 +130,95 @@ describe("isToolEnabledByPolicy audit logging", () => {
 });
 
 describe("pickServerConfig config resolution logging", () => {
-  test("pickServerConfig logs which tier was used", () => {
+  test("logs defaults tier when no config provided", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      const loaded = loadMcpControlPlaneConfig();
-      const resolved = resolveMcpServerControl("kindx", loaded);
-      // Default case should log "defaults" tier
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining("config_resolved")
-      );
+      resolveMcpServerControl("kindx", {
+        runtime: null,
+        project: null,
+        user: null,
+        trustedProject: true,
+        projectHash: "p",
+      });
+      const call = stderrSpy.mock.calls.find((c) => String(c[0]).includes("config_resolved"));
+      expect(call).toBeDefined();
+      const log = JSON.parse(String(call![0]));
+      expect(log.tier).toBe("defaults");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("logs runtime tier when runtime config matches", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      resolveMcpServerControl("kindx", {
+        runtime: { mcp_servers: { kindx: { enabled_tools: ["query"] } } },
+        project: null,
+        user: null,
+        trustedProject: true,
+        projectHash: "p",
+      });
+      const call = stderrSpy.mock.calls.find((c) => String(c[0]).includes("config_resolved"));
+      expect(call).toBeDefined();
+      const log = JSON.parse(String(call![0]));
+      expect(log.tier).toBe("runtime");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("logs project tier when only project config matches", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      resolveMcpServerControl("kindx", {
+        runtime: null,
+        project: { mcp_servers: { kindx: { enabled_tools: ["query"] } } },
+        user: null,
+        trustedProject: true,
+        projectHash: "p",
+      });
+      const call = stderrSpy.mock.calls.find((c) => String(c[0]).includes("config_resolved"));
+      expect(call).toBeDefined();
+      const log = JSON.parse(String(call![0]));
+      expect(log.tier).toBe("project");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("logs user tier when only user config matches", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      resolveMcpServerControl("kindx", {
+        runtime: null,
+        project: null,
+        user: { mcp_servers: { kindx: { enabled_tools: ["query"] } } },
+        trustedProject: true,
+        projectHash: "p",
+      });
+      const call = stderrSpy.mock.calls.find((c) => String(c[0]).includes("config_resolved"));
+      expect(call).toBeDefined();
+      const log = JSON.parse(String(call![0]));
+      expect(log.tier).toBe("user");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  test("runtime takes precedence over project and user", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      resolveMcpServerControl("kindx", {
+        runtime: { mcp_servers: { kindx: { enabled_tools: ["query"] } } },
+        project: { mcp_servers: { kindx: { enabled_tools: ["status"] } } },
+        user: { mcp_servers: { kindx: { enabled_tools: ["run"] } } },
+        trustedProject: true,
+        projectHash: "p",
+      });
+      const call = stderrSpy.mock.calls.find((c) => String(c[0]).includes("config_resolved"));
+      const log = JSON.parse(String(call![0]));
+      expect(log.tier).toBe("runtime");
     } finally {
       stderrSpy.mockRestore();
     }
