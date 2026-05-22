@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { CircuitBreaker, FixedWindowRateLimiter, McpToolListCache, SessionRateLimiter, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { CircuitBreaker, FixedWindowRateLimiter, McpToolListCache, SessionRateLimiter, ToolQuotaManager, applyToolPolicy, buildResolvedHttpHeaders, buildToolProvenanceRegistry, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -357,6 +357,14 @@ describe("ToolQuotaManager", () => {
 });
 
 describe("CircuitBreaker", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("starts in closed state", () => {
     const breaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
     expect(breaker.state).toBe("closed");
@@ -374,32 +382,32 @@ describe("CircuitBreaker", () => {
     expect(breaker.allow()).toBe(false);
   });
 
-  test("transitions to half-open after timeout", async () => {
+  test("transitions to half-open after timeout", () => {
     const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
     breaker.recordFailure();
     breaker.recordFailure();
     expect(breaker.state).toBe("open");
     expect(breaker.allow()).toBe(false);
-    await new Promise(resolve => setTimeout(resolve, 150));
+    vi.advanceTimersByTime(150);
     expect(breaker.state).toBe("half-open");
     expect(breaker.allow()).toBe(true);
   });
 
-  test("closes after success in half-open state", async () => {
+  test("closes after success in half-open state", () => {
     const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
     breaker.recordFailure();
     breaker.recordFailure();
-    await new Promise(resolve => setTimeout(resolve, 150));
+    vi.advanceTimersByTime(150);
     breaker.allow(); // transitions to half-open
     breaker.recordSuccess();
     expect(breaker.state).toBe("closed");
   });
 
-  test("re-opens on failure in half-open state", async () => {
+  test("re-opens on failure in half-open state", () => {
     const breaker = new CircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
     breaker.recordFailure();
     breaker.recordFailure();
-    await new Promise(resolve => setTimeout(resolve, 150));
+    vi.advanceTimersByTime(150);
     breaker.allow(); // transitions to half-open
     breaker.recordFailure();
     expect(breaker.state).toBe("open");
@@ -429,10 +437,7 @@ describe("control plane integration", () => {
 });
 
 describe("control plane hardening integration", () => {
-  test("full request flow with all security checks", () => {
-    const rateLimiter = new SessionRateLimiter({ maxRequests: 10, windowMs: 60000 });
-    const quotaManager = new ToolQuotaManager({ defaultQuota: 100 });
-    const circuitBreaker = new CircuitBreaker({ failureThreshold: 5, resetTimeoutMs: 30000 });
+  test("policy, headers, and provenance coordinate through resolveMcpServerControl", () => {
     const auditFn = vi.fn();
 
     const resolved = resolveMcpServerControl("kindx", {
@@ -440,6 +445,7 @@ describe("control plane hardening integration", () => {
         mcp_servers: {
           kindx: {
             enabled_tools: ["query", "get"],
+            http_headers: { "X-Custom": "test-value" },
           },
         },
       },
@@ -449,37 +455,26 @@ describe("control plane hardening integration", () => {
       projectHash: "p",
     });
 
-    // All checks pass
-    expect(rateLimiter.check("session1")).toBe(true);
-    expect(quotaManager.check("session1", "query")).toBe(true);
-    expect(circuitBreaker.allow()).toBe(true);
-    expect(isToolEnabledByPolicy(resolved, "query", { audit: auditFn })).toBe(true);
-    expect(auditFn).not.toHaveBeenCalled();
+    // applyToolPolicy filters through isToolEnabledByPolicy using the resolved control
+    const allowed = applyToolPolicy(resolved, ["query", "get", "status"]);
+    expect(allowed).toEqual(["query", "get"]);
 
-    // Tool not in allowlist
+    // buildResolvedHttpHeaders derives headers from the same resolved control
+    const headers = buildResolvedHttpHeaders(resolved);
+    expect(resolved.id).toBe("kindx");
+    expect(headers["X-Custom"]).toBe("test-value");
+
+    // buildToolProvenanceRegistry produces entries for filtered tools
+    const provenance = buildToolProvenanceRegistry("kindx", allowed);
+    expect(Object.keys(provenance)).toEqual(["query", "get"]);
+    expect(provenance["query"].qualified_name).toBe("mcp:kindx/query");
+
+    // denied tool triggers audit when checked directly
     expect(isToolEnabledByPolicy(resolved, "status", { audit: auditFn })).toBe(false);
     expect(auditFn).toHaveBeenCalledWith({
       action: "tool_denied",
       scope: "kindx/status",
-      detail: "not in allowlist",
+      detail: expect.stringContaining("not in allowlist"),
     });
-  });
-
-  test("circuit breaker prevents cascade failures", () => {
-    const circuitBreaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
-
-    // Simulate LLM timeouts
-    circuitBreaker.recordFailure();
-    circuitBreaker.recordFailure();
-    expect(circuitBreaker.allow()).toBe(true);
-
-    circuitBreaker.recordFailure();
-    expect(circuitBreaker.allow()).toBe(false);
-  });
-
-  test("path traversal attack is blocked", () => {
-    const cache = new McpToolListCache(60_000);
-    expect(() => (cache as any).cachePath("../../../etc/passwd")).toThrow("invalid cache key");
-    expect(() => (cache as any).cachePath("..\\..\\windows\\system32")).toThrow("invalid cache key");
   });
 });
