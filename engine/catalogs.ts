@@ -601,3 +601,28 @@ export function updateCollectionPattern(name: string, newPattern: string): boole
   saveConfig(config);
   return true;
 }
+
+/**
+ * Load collection config for a specific named index.
+ * Temporarily switches the current index name, loads the config, and restores.
+ */
+export function getConfigForIndex(indexName: string): CollectionConfig {
+  const prevName = currentIndexName;
+  try {
+    setConfigIndexName(indexName);
+    return loadConfig();
+  } finally {
+    setConfigIndexName(prevName);
+  }
+}
+
+/**
+ * List all collections in a specific named index.
+ */
+export function listCollectionsForIndex(indexName: string): NamedCollection[] {
+  const config = getConfigForIndex(indexName);
+  return Object.entries(config.collections).map(([name, col]) => ({
+    name,
+    ...col,
+  }));
+}
