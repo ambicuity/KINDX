@@ -114,5 +114,18 @@ describe("Index Manager", () => {
       indexManager.saveRegistry(registry);
       expect(indexManager.getDefaultIndexName()).toBe("custom");
     });
+
+    it("getIndex returns a registered index by name", () => {
+      indexManager.registerIndex("my-project", "My Project");
+      const idx = indexManager.getIndex("my-project");
+      expect(idx).not.toBeNull();
+      expect(idx!.name).toBe("my-project");
+      expect(idx!.description).toBe("My Project");
+    });
+
+    it("getIndex returns null for unregistered index", () => {
+      const idx = indexManager.getIndex("nonexistent");
+      expect(idx).toBeNull();
+    });
   });
 });
