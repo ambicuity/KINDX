@@ -24,7 +24,7 @@ import * as os from "node:os";
 import { resolve, join } from "path";
 import { homedir } from "node:os";
 import type { ModelUsage } from "./ai-usage.js";
-import { writeModelChecksum } from "./model-integrity.js";
+import { verifyModelIntegrity, writeModelChecksum } from "./model-integrity.js";
 
 // Re-export ModelUsage so consumers of inference.ts can access it without
 // importing ai-usage.ts directly.
@@ -879,6 +879,8 @@ export class LlamaCpp implements LLM {
     if (started) {
       process.stderr.write(" - Done.\n");
     }
+
+    await verifyModelIntegrity(path);
     
     return path;
   }
