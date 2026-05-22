@@ -10,6 +10,7 @@
 import { describe, test, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   LlamaCpp,
+  RetryableLLM,
   getDefaultLLM,
   disposeDefaultLLM,
   setDefaultLLM,
@@ -30,7 +31,7 @@ describe("Default LlamaCpp Singleton", () => {
     const llm1 = getDefaultLLM();
     const llm2 = getDefaultLLM();
     expect(llm1).toBe(llm2);
-    expect(llm1).toBeInstanceOf(LlamaCpp);
+    expect(llm1).toBeInstanceOf(RetryableLLM);
   });
 });
 

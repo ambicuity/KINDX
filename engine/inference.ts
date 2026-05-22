@@ -16,6 +16,7 @@ import {
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
 import { RetryableLLM } from "./retryable-llm.js";
+export { RetryableLLM } from "./retryable-llm.js";
 import { Spinner, renderProgressBar, formatBytes, cursor, progress as termProgress, c } from "./utils/ui.js";
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
