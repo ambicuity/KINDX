@@ -1203,3 +1203,125 @@ export function searchShardedVectors(
 ): Array<{ hash_seq: string; distance: number }> {
   return searchShardedVectorsWithDiagnostics(dbPath, collection, shardCount, embedding, perShardK).matches;
 }
+
+export interface HnswNode {
+  id: number;
+  neighbors: number[];
+  level: number;
+}
+
+export interface HnswIndex {
+  nodes: HnswNode[];
+  vectors: Float32Array[];
+  dimensions: number;
+  entryPoint: number;
+  M: number;
+  ef: number;
+}
+
+export interface HnswSearchResult {
+  id: number;
+  distance: number;
+}
+
+export function buildHnswIndex(
+  vectors: Float32Array[],
+  dimensions: number,
+  config: { M: number; ef: number }
+): HnswIndex {
+  const nodes: HnswNode[] = [];
+  const M = config.M;
+
+  if (vectors.length > 0) {
+    nodes.push({ id: 0, neighbors: [], level: 0 });
+  }
+
+  for (let i = 1; i < vectors.length; i++) {
+    const level = Math.floor(-Math.log(Math.random()) * (1 / Math.log(M)));
+    const node: HnswNode = { id: i, neighbors: [], level };
+
+    const nearest = findNearest(nodes, vectors, vectors[i]!, Math.min(M, i));
+
+    for (const neighborId of nearest) {
+      node.neighbors.push(neighborId);
+      nodes[neighborId]!.neighbors.push(i);
+
+      if (nodes[neighborId]!.neighbors.length > M * 2) {
+        const pruned = findNearest(
+          nodes,
+          vectors,
+          vectors[neighborId]!,
+          M * 2,
+          nodes[neighborId]!.neighbors
+        );
+        nodes[neighborId]!.neighbors = pruned;
+      }
+    }
+
+    nodes.push(node);
+  }
+
+  return {
+    nodes,
+    vectors,
+    dimensions,
+    entryPoint: 0,
+    M,
+    ef: config.ef,
+  };
+}
+
+export function searchHnsw(
+  index: HnswIndex,
+  query: Float32Array,
+  k: number
+): HnswSearchResult[] {
+  const { nodes, vectors, entryPoint, ef } = index;
+
+  if (nodes.length === 0) return [];
+
+  const visited = new Set<number>();
+  const candidates: Array<{ id: number; distance: number }> = [];
+
+  const searchAtLevel = (startId: number) => {
+    const queue = [{ id: startId, distance: cosineDistance(query, vectors[startId]!) }];
+    visited.add(startId);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      candidates.push(current);
+
+      if (candidates.length >= ef) break;
+
+      for (const neighborId of nodes[current.id]!.neighbors) {
+        if (visited.has(neighborId)) continue;
+        visited.add(neighborId);
+
+        const distance = cosineDistance(query, vectors[neighborId]!);
+        queue.push({ id: neighborId, distance });
+        queue.sort((a, b) => a.distance - b.distance);
+      }
+    }
+  };
+
+  searchAtLevel(entryPoint);
+
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates.slice(0, k).map((c) => ({ id: c.id, distance: c.distance }));
+}
+
+function findNearest(
+  nodes: HnswNode[],
+  vectors: Float32Array[],
+  query: Float32Array,
+  k: number,
+  candidates?: number[]
+): number[] {
+  const ids = candidates ?? nodes.map((_, i) => i);
+  const distances = ids.map((id) => ({
+    id,
+    distance: cosineDistance(query, vectors[id]!),
+  }));
+  distances.sort((a, b) => a.distance - b.distance);
+  return distances.slice(0, k).map((d) => d.id);
+}
