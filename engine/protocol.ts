@@ -2363,25 +2363,24 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       }
 
       if (pathname === "/ready" && nodeReq.method === "GET") {
+        const status = store.getStatus();
+        const ops = buildOperationalStatus(store.db, store.dbPath, status.hasVectorIndex);
         const checker = new HealthChecker({
-          getModelsStatus: () => {
-            getDefaultLLM();
-            return {
-              embed: true,
-              rerank: true,
-              generate: true,
-            };
-          },
+          getModelsStatus: () => ({
+            embed: ops.models_ready,
+            rerank: ops.models_ready,
+            generate: ops.models_ready,
+          }),
           getGpuStatus: () => ({
-            available: true,
+            available: ops.models_ready,
             vramFree: 0,
           }),
           getAnnStatus: () => ({
-            mode: "ann" as const,
-            state: "ready",
+            mode: status.ann.mode,
+            state: status.ann.state,
           }),
           getDatabaseStatus: () => ({
-            accessible: true,
+            accessible: ops.db_integrity === "ok",
           }),
         });
 
@@ -2433,7 +2432,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       //  2. Multi-tenant: tenants.yml exists. Each bearer token resolves to a
       //     tenant with role + collection ACL. Unknown tokens are rejected.
       //
-      // /health and /metrics are intentionally unauthenticated for monitoring.
+      // /health, /ready, and /metrics are intentionally unauthenticated for monitoring.
       // -----------------------------------------------------------------------
       let requestIdentity: import("./rbac.js").ResolvedIdentity | null = null;
       {
