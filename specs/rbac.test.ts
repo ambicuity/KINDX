@@ -6,6 +6,7 @@ import { mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomBytes, createHash } from "crypto";
+import type { ResolvedIdentity } from "../engine/rbac.js";
 
 // Module under test — use dynamic import to set KINDX_CONFIG_DIR before load
 let rbac: typeof import("../engine/rbac.js");
@@ -150,10 +151,11 @@ describe("RBAC", () => {
 
   describe("Permission Enforcement", () => {
     it("admin can do everything", () => {
-      const adminId: import("../engine/rbac.js").ResolvedIdentity = {
+      const adminId: ResolvedIdentity = {
         tenantId: "admin1",
         role: "admin",
         allowedCollections: "*",
+        allowedIndexes: "*",
       };
       expect(rbac.isPermitted(adminId, "query")).toBe(true);
       expect(rbac.isPermitted(adminId, "memory_put")).toBe(true);
@@ -163,10 +165,11 @@ describe("RBAC", () => {
     });
 
     it("editor can query and write but not manage", () => {
-      const editorId: import("../engine/rbac.js").ResolvedIdentity = {
+      const editorId: ResolvedIdentity = {
         tenantId: "e1",
         role: "editor",
         allowedCollections: ["docs"],
+        allowedIndexes: "*",
       };
       expect(rbac.isPermitted(editorId, "query")).toBe(true);
       expect(rbac.isPermitted(editorId, "memory_put")).toBe(true);
@@ -177,10 +180,11 @@ describe("RBAC", () => {
     });
 
     it("viewer is read-only", () => {
-      const viewerId: import("../engine/rbac.js").ResolvedIdentity = {
+      const viewerId: ResolvedIdentity = {
         tenantId: "v1",
         role: "viewer",
         allowedCollections: ["docs"],
+        allowedIndexes: "*",
       };
       expect(rbac.isPermitted(viewerId, "query")).toBe(true);
       expect(rbac.isPermitted(viewerId, "get")).toBe(true);
@@ -194,20 +198,22 @@ describe("RBAC", () => {
 
   describe("Collection ACL", () => {
     it("wildcard allows all collections", () => {
-      const id: import("../engine/rbac.js").ResolvedIdentity = {
+      const id: ResolvedIdentity = {
         tenantId: "a1",
         role: "admin",
         allowedCollections: "*",
+        allowedIndexes: "*",
       };
       expect(rbac.canAccessCollection(id, "anything")).toBe(true);
       expect(rbac.filterAllowedCollections(id, ["docs", "notes", "secret"])).toEqual(["docs", "notes", "secret"]);
     });
 
     it("restricts to allowed collections only", () => {
-      const id: import("../engine/rbac.js").ResolvedIdentity = {
+      const id: ResolvedIdentity = {
         tenantId: "v1",
         role: "viewer",
         allowedCollections: ["docs", "notes"],
+        allowedIndexes: "*",
       };
       expect(rbac.canAccessCollection(id, "docs")).toBe(true);
       expect(rbac.canAccessCollection(id, "secret")).toBe(false);
@@ -215,20 +221,22 @@ describe("RBAC", () => {
     });
 
     it("enforce throws RBACDeniedError on collection violation", () => {
-      const id: import("../engine/rbac.js").ResolvedIdentity = {
+      const id: ResolvedIdentity = {
         tenantId: "v1",
         role: "viewer",
         allowedCollections: ["docs"],
+        allowedIndexes: "*",
       };
       expect(() => rbac.enforce(id, "query", undefined, "docs")).not.toThrow();
       expect(() => rbac.enforce(id, "query", undefined, "secret")).toThrow(rbac.RBACDeniedError);
     });
 
     it("enforce throws RBACDeniedError on operation violation", () => {
-      const id: import("../engine/rbac.js").ResolvedIdentity = {
+      const id: ResolvedIdentity = {
         tenantId: "v1",
         role: "viewer",
         allowedCollections: ["docs"],
+        allowedIndexes: "*",
       };
       expect(() => rbac.enforce(id, "memory_put")).toThrow(rbac.RBACDeniedError);
     });
@@ -315,7 +323,7 @@ describe("RBAC", () => {
     });
 
     it("enforce rejects tenant for unpermitted index", () => {
-      const identity: rbac.ResolvedIdentity = {
+      const identity: ResolvedIdentity = {
         tenantId: "bot",
         role: "viewer",
         allowedCollections: ["docs"],
@@ -326,7 +334,7 @@ describe("RBAC", () => {
     });
 
     it("enforce allows tenant for permitted index", () => {
-      const identity: rbac.ResolvedIdentity = {
+      const identity: ResolvedIdentity = {
         tenantId: "bot",
         role: "viewer",
         allowedCollections: ["docs"],
@@ -336,7 +344,7 @@ describe("RBAC", () => {
     });
 
     it("enforce allows tenant without indexName param (backward compat)", () => {
-      const identity: rbac.ResolvedIdentity = {
+      const identity: ResolvedIdentity = {
         tenantId: "bot",
         role: "viewer",
         allowedCollections: ["docs"],
@@ -346,7 +354,7 @@ describe("RBAC", () => {
     });
 
     it("wildcard allowedIndexes grants access to any index", () => {
-      const identity: rbac.ResolvedIdentity = {
+      const identity: ResolvedIdentity = {
         tenantId: "bot",
         role: "viewer",
         allowedCollections: ["*"],
@@ -385,9 +393,9 @@ describe("RBAC", () => {
     });
 
     it("new RBAC operations are permitted by correct roles", () => {
-      const adminIdentity: rbac.ResolvedIdentity = { tenantId: "a", role: "admin", allowedCollections: "*", allowedIndexes: "*" };
-      const editorIdentity: rbac.ResolvedIdentity = { tenantId: "e", role: "editor", allowedCollections: "*", allowedIndexes: "*" };
-      const viewerIdentity: rbac.ResolvedIdentity = { tenantId: "v", role: "viewer", allowedCollections: "*", allowedIndexes: "*" };
+      const adminIdentity: ResolvedIdentity = { tenantId: "a", role: "admin", allowedCollections: "*", allowedIndexes: "*" };
+      const editorIdentity: ResolvedIdentity = { tenantId: "e", role: "editor", allowedCollections: "*", allowedIndexes: "*" };
+      const viewerIdentity: ResolvedIdentity = { tenantId: "v", role: "viewer", allowedCollections: "*", allowedIndexes: "*" };
 
       expect(() => rbac.enforce(adminIdentity, "index_list")).not.toThrow();
       expect(() => rbac.enforce(editorIdentity, "index_list")).not.toThrow();

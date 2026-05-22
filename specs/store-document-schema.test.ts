@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
-import Database from "better-sqlite3";
+import { openDatabase } from "../engine/runtime.js";
 import { storeDocumentSchema } from "../engine/schema.js";
 
 describe("storeDocumentSchema", () => {
   test("creates document_schemas table and stores schema", () => {
-    const db = new Database(":memory:");
+    const db = openDatabase(":memory:");
     try {
       const schema = { name: "string", age: "number", active: "boolean" };
       storeDocumentSchema(db, "users", "user.csv", schema);
@@ -23,7 +23,7 @@ describe("storeDocumentSchema", () => {
   });
 
   test("overwrites existing schema for same collection/path", () => {
-    const db = new Database(":memory:");
+    const db = openDatabase(":memory:");
     try {
       storeDocumentSchema(db, "users", "user.csv", { name: "string" });
       storeDocumentSchema(db, "users", "user.csv", { name: "string", email: "string" });
@@ -39,7 +39,7 @@ describe("storeDocumentSchema", () => {
   });
 
   test("stores multiple schemas for different paths", () => {
-    const db = new Database(":memory:");
+    const db = openDatabase(":memory:");
     try {
       storeDocumentSchema(db, "users", "users.csv", { name: "string" });
       storeDocumentSchema(db, "users", "orders.json", { total: "number" });
