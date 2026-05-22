@@ -33,7 +33,7 @@ export async function indexSingleFile(
   try {
     const stat = statSync(absolutePath);
     const path = handelize(relativePath);
-    const ingested = ingestFile(absolutePath);
+    const ingested = await ingestFile(absolutePath);
     const content = ingested.text;
 
     // Match full-index behavior: skip empty or unsupported payloads.

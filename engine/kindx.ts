@@ -1736,7 +1736,7 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
     let ingestFormat = "unknown";
     let ingestExtractor = "unknown";
     try {
-      const ingested = ingestFile(filepath);
+      const ingested = await ingestFile(filepath);
       content = ingested.text;
       ingestWarnings = ingested.warnings;
       ingestFormat = ingested.metadata.format;

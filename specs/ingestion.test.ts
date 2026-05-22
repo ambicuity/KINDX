@@ -10,7 +10,7 @@ describe("ingestion adapter", () => {
     try {
       const path = join(dir, "sample.ts");
       await writeFile(path, "export const ok = true;\n");
-      const out = ingestFile(path);
+      const out = await ingestFile(path);
       expect(out.metadata.extractor).toBe("native_utf8");
       expect(out.text).toContain("ok = true");
       expect(out.warnings).toEqual([]);
@@ -24,7 +24,7 @@ describe("ingestion adapter", () => {
     try {
       const path = join(dir, "blob.bin");
       await writeFile(path, Buffer.from([0xde, 0xad, 0xbe, 0xef]));
-      const out = ingestFile(path);
+      const out = await ingestFile(path);
       expect(out.text).toBe("");
       expect(out.metadata.extractor).toBe("unsupported");
       expect(out.warnings.some((w) => w.startsWith("extractor_unsupported_extension:"))).toBe(true);

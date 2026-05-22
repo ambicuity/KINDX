@@ -22,6 +22,10 @@ const TEXT_EXTENSIONS = new Set([
   ".dockerfile", ".makefile",
 ]);
 
+const IMAGE_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"
+]);
+
 function envToggle(name: string, fallback = true): boolean {
   const raw = String(process.env[name] ?? "").trim().toLowerCase();
   if (!raw) return fallback;
@@ -148,12 +152,72 @@ const MAX_DOC_BYTES = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 25 * 1024 * 1024;
 })();
 
-export function ingestFile(path: string): IngestionResult {
+async function ingestImage(path: string): Promise<IngestionResult> {
+  const warnings: string[] = [];
+  const bytes = statSync(path).size;
+
+  // Check image size limit (default 10MB)
+  const maxImageBytes = (() => {
+    const raw = parseInt(process.env.KINDX_MAX_IMAGE_SIZE_MB || "", 10);
+    const mb = Number.isFinite(raw) && raw > 0 ? raw : 10;
+    return mb * 1024 * 1024;
+  })();
+
+  if (bytes > maxImageBytes) {
+    warnings.push(`extractor_image_too_large:${bytes}>${maxImageBytes}`);
+    return {
+      text: "",
+      metadata: { format: "image", extractor: "vision_model_skipped_oversize", bytes },
+      warnings,
+    };
+  }
+
+  try {
+    const { getDefaultLLM } = await import("./inference.js");
+    const llm = getDefaultLLM();
+
+    if (!llm || typeof (llm as any).describeImage !== "function") {
+      warnings.push("extractor_failed:vision_model_unavailable");
+      return {
+        text: "",
+        metadata: { format: "image", extractor: "vision_model_unavailable", bytes },
+        warnings,
+      };
+    }
+
+    const description = await (llm as any).describeImage(path);
+
+    if (!description || description === "Image description unavailable") {
+      warnings.push("extractor_failed:vision_model_no_description");
+      return {
+        text: "",
+        metadata: { format: "image", extractor: "vision_model_failed", bytes },
+        warnings,
+      };
+    }
+
+    return {
+      text: description,
+      metadata: { format: "image", extractor: "vision_model", bytes },
+      warnings,
+    };
+  } catch (error) {
+    warnings.push(`extractor_failed:vision_model_error:${error instanceof Error ? error.message : String(error)}`);
+    return {
+      text: "",
+      metadata: { format: "image", extractor: "vision_model_error", bytes },
+      warnings,
+    };
+  }
+}
+
+export async function ingestFile(path: string): Promise<IngestionResult> {
   const ext = extname(path).toLowerCase();
   const bytes = statSync(path).size;
 
   if (ext === ".pdf") return ingestPdf(path);
   if (ext === ".docx") return ingestDocx(path);
+  if (IMAGE_EXTENSIONS.has(ext)) return ingestImage(path);
 
   if (TEXT_EXTENSIONS.has(ext) || ext === "") {
     if (bytes > MAX_DOC_BYTES) {
