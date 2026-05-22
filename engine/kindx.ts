@@ -53,6 +53,9 @@ import {
   updateDocument,
   deactivateDocument,
   getActiveDocumentPaths,
+  getDocumentVersions,
+  getDocumentAtTime,
+  findDocumentAtTime,
   cleanupOrphanedContent,
   deleteLLMCache,
   deleteInactiveDocuments,
@@ -2814,7 +2817,8 @@ function parseCLI() {
       refresh: { type: "boolean" },
       // Get options
       l: { type: "string" },  // max lines
-      from: { type: "string" },  // start line
+      from: { type: "string" },  // start line (get) or from-version (diff)
+      to: { type: "string" },    // to-version (diff)
       "max-bytes": { type: "string" },  // max bytes for multi-get
       "line-numbers": { type: "boolean" },  // add line numbers to output
       // Query options
@@ -2906,6 +2910,250 @@ function parseCLI() {
   };
 }
 
+// =============================================================================
+// Version history and diff commands
+// =============================================================================
+
+/**
+ * Resolve a filename/docid/virtual-path to {collectionName, path} for version queries.
+ * Returns null if the document cannot be found (after printing an error).
+ */
+function resolveDocumentForVersionQuery(
+  db: Database,
+  filename: string,
+): { collectionName: string; path: string; displayName: string } | null {
+  const found = findDocument(db, filename, { includeBody: false });
+  if ("error" in found) {
+    console.error(`Document not found: ${filename}`);
+    if (found.similarFiles.length > 0) {
+      console.error(`Similar files:`);
+      for (const s of found.similarFiles) {
+        console.error(`  ${s}`);
+      }
+    }
+    return null;
+  }
+  // Parse the virtual path to extract the relative path component.
+  const parsed = parseVirtualPath(found.filepath);
+  if (parsed) {
+    return {
+      collectionName: parsed.collectionName,
+      path: parsed.path,
+      displayName: found.displayPath,
+    };
+  }
+  // Fallback: use collectionName from findDocument + filepath.
+  return {
+    collectionName: found.collectionName,
+    path: found.filepath.replace(`kindx://${found.collectionName}/`, ''),
+    displayName: found.displayPath,
+  };
+}
+
+function showDocumentHistory(
+  filename: string,
+  opts: { format: OutputFormat; limit?: number },
+): void {
+  const db = getDb();
+  const resolved = resolveDocumentForVersionQuery(db, filename);
+  if (!resolved) { closeDb(); process.exit(1); }
+
+  const versions = getDocumentVersions(db, resolved.collectionName, resolved.path);
+  const limit = opts.limit ?? versions.length;
+  const shown = versions.slice(0, limit);
+
+  if (shown.length === 0) {
+    if (opts.format === "json") {
+      console.log("[]");
+    } else {
+      console.log(`No version history found for: ${resolved.displayName}`);
+    }
+    closeDb();
+    return;
+  }
+
+  if (opts.format === "json") {
+    const output = shown.map((v, i) => ({
+      version: i + 1,
+      timestamp: v.createdAt,
+      hash: v.hash.slice(0, 12),
+      title: v.title,
+    }));
+    console.log(JSON.stringify(output, null, 2));
+  } else if (opts.format === "csv") {
+    console.log("version,timestamp,hash,title");
+    for (let i = 0; i < shown.length; i++) {
+      const v = shown[i]!;
+      const escape = (s: string) => s.includes(",") || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
+      console.log(`${i + 1},${v.createdAt},${v.hash.slice(0, 12)},${escape(v.title)}`);
+    }
+  } else {
+    console.log(`${c.bold}Version history:${c.reset} ${resolved.displayName}\n`);
+    const maxVer = String(shown.length).length;
+    for (let i = 0; i < shown.length; i++) {
+      const v = shown[i]!;
+      const ver = String(i + 1).padStart(maxVer);
+      const date = new Date(v.createdAt);
+      const dateStr = date.toISOString().replace("T", " ").slice(0, 19);
+      const hashStr = v.hash.slice(0, 12);
+      const tag = i === 0 ? ` ${c.green}(current)${c.reset}` : "";
+      console.log(`  ${c.dim}v${ver}${c.reset}  ${c.cyan}${dateStr}${c.reset}  ${c.dim}${hashStr}${c.reset}  ${v.title}${tag}`);
+    }
+    console.log(`\n${c.dim}${shown.length} version(s)${c.reset}`);
+  }
+
+  closeDb();
+}
+
+function diffDocuments(
+  filename: string,
+  opts: { format: OutputFormat; fromVersion?: number; toVersion?: number },
+): void {
+  const db = getDb();
+  const resolved = resolveDocumentForVersionQuery(db, filename);
+  if (!resolved) { closeDb(); process.exit(1); }
+
+  const versions = getDocumentVersions(db, resolved.collectionName, resolved.path);
+  if (versions.length < 2) {
+    console.error(`Not enough versions to diff (found ${versions.length}).`);
+    closeDb();
+    process.exit(1);
+  }
+
+  // Map 1-based version numbers to version entries.
+  // v1 = current (index 0), v2 = previous (index 1), etc.
+  const fromIdx = (opts.fromVersion ?? 2) - 1; // default: v2 (previous)
+  const toIdx = (opts.toVersion ?? 1) - 1;     // default: v1 (current)
+
+  if (fromIdx < 0 || fromIdx >= versions.length) {
+    console.error(`Version ${opts.fromVersion ?? 2} out of range (1-${versions.length}).`);
+    closeDb();
+    process.exit(1);
+  }
+  if (toIdx < 0 || toIdx >= versions.length) {
+    console.error(`Version ${opts.toVersion ?? 1} out of range (1-${versions.length}).`);
+    closeDb();
+    process.exit(1);
+  }
+  if (fromIdx === toIdx) {
+    console.error("Cannot diff a version against itself.");
+    closeDb();
+    process.exit(1);
+  }
+
+  const fromVersion = versions[fromIdx]!;
+  const toVersion = versions[toIdx]!;
+
+  // Retrieve content bodies from the content-addressable store.
+  const fromBody = db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(fromVersion.hash) as { doc: string } | undefined;
+  const toBody = db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(toVersion.hash) as { doc: string } | undefined;
+
+  if (!fromBody || !toBody) {
+    console.error("Failed to retrieve document content for one or both versions.");
+    closeDb();
+    process.exit(1);
+  }
+
+  const fromLines = fromBody.doc.split("\n");
+  const toLines = toBody.doc.split("\n");
+
+  if (opts.format === "json") {
+    console.log(JSON.stringify({
+      document: resolved.displayName,
+      from: { version: fromIdx + 1, timestamp: fromVersion.createdAt, hash: fromVersion.hash.slice(0, 12) },
+      to: { version: toIdx + 1, timestamp: toVersion.createdAt, hash: toVersion.hash.slice(0, 12) },
+      fromBody: fromBody.doc,
+      toBody: toBody.doc,
+    }, null, 2));
+    closeDb();
+    return;
+  }
+
+  // Simple line-by-line unified diff.
+  const header = `${c.dim}--- a/${resolved.displayName} (v${fromIdx + 1}, ${fromVersion.hash.slice(0, 12)})${c.reset}`;
+  const header2 = `${c.dim}+++ b/${resolved.displayName} (v${toIdx + 1}, ${toVersion.hash.slice(0, 12)})${c.reset}`;
+  console.log(header);
+  console.log(header2);
+  console.log("");
+
+  const maxLines = Math.max(fromLines.length, toLines.length);
+  let hunks: { startA: number; startB: number; linesA: string[]; linesB: string[] }[] = [];
+  let currentHunk: { startA: number; startB: number; linesA: string[]; linesB: string[] } | null = null;
+
+  // Myers-like simplified diff: walk both arrays, emit removals and additions.
+  // For a production-quality diff you'd use a proper LCS algorithm; this
+  // implementation is sufficient for showing "what changed" in a CLI context.
+  const lcs = (a: string[], b: string[]): number[][] => {
+    const m = a.length;
+    const n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        dp[i]![j] = a[i - 1] === b[j - 1] ? dp[i - 1]![j - 1]! + 1 : Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+      }
+    }
+    return dp;
+  };
+
+  const diffLines: { type: " " | "-" | "+"; line: string; lineA?: number; lineB?: number }[] = [];
+  const buildDiff = (a: string[], b: string[]) => {
+    const dp = lcs(a, b);
+    let i = a.length, j = b.length;
+    const stack: { type: " " | "-" | "+"; line: string; lineA?: number; lineB?: number }[] = [];
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+        stack.push({ type: " ", line: a[i - 1]!, lineA: i, lineB: j });
+        i--; j--;
+      } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
+        stack.push({ type: "+", line: b[j - 1]!, lineB: j });
+        j--;
+      } else {
+        stack.push({ type: "-", line: a[i - 1]!, lineA: i });
+        i--;
+      }
+    }
+    while (stack.length > 0) diffLines.push(stack.pop()!);
+  };
+
+  buildDiff(fromLines, toLines);
+
+  // Collapse unchanged lines, showing context around changes.
+  const CONTEXT = 3;
+  const changedIndices = new Set<number>();
+  for (let idx = 0; idx < diffLines.length; idx++) {
+    if (diffLines[idx]!.type !== " ") {
+      for (let ctx = Math.max(0, idx - CONTEXT); ctx <= Math.min(diffLines.length - 1, idx + CONTEXT); ctx++) {
+        changedIndices.add(ctx);
+      }
+    }
+  }
+
+  let lastEmitted = -1;
+  for (let idx = 0; idx < diffLines.length; idx++) {
+    if (!changedIndices.has(idx)) continue;
+    if (lastEmitted !== -1 && idx - lastEmitted > 1) {
+      // Emit hunk separator
+      const skipped = idx - lastEmitted - 1;
+      console.log(`${c.dim}@@ ... (${skipped} unchanged lines) ... @@${c.reset}`);
+    }
+    lastEmitted = idx;
+    const d = diffLines[idx]!;
+    if (d.type === "-") {
+      console.log(`${c.red}-${c.reset} ${d.line}`);
+    } else if (d.type === "+") {
+      console.log(`${c.green}+${c.reset} ${d.line}`);
+    } else {
+      console.log(`  ${d.line}`);
+    }
+  }
+
+  const adds = diffLines.filter(d => d.type === "+").length;
+  const dels = diffLines.filter(d => d.type === "-").length;
+  console.log(`\n${c.dim}${adds} addition(s), ${dels} deletion(s)${c.reset}`);
+
+  closeDb();
+}
+
 function showSkill(): void {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const relativePath = pathJoin("capabilities", "kindx", "SKILL.md");
@@ -2962,6 +3210,8 @@ function showHelp(): void {
   console.log("  kindx vsearch <query>           - Vector similarity only");
   console.log("  kindx get <file>[:line] [--from <line>] [-l N] [--line-numbers]  - Show a single document from specific line, optional line slice");
   console.log("  kindx multi-get <pattern>       - Batch fetch via glob or comma-separated list");
+  console.log("  kindx history <file>            - Show document version history with timestamps");
+  console.log("  kindx diff <file> [--from v1] [--to v2]  - Diff two versions of a document");
   console.log("  kindx mcp                       - Start the MCP server (stdio transport for AI agents)");
   console.log("  kindx memory <subcommand>       - Store and retrieve scoped agent memories");
   console.log("  kindx pull [--refresh]          - Download/check the default local GGUF models");
@@ -3061,6 +3311,12 @@ function showHelp(): void {
   console.log("  -l <num>                   - Maximum lines per file");
   console.log("  --max-bytes <num>          - Skip files larger than N bytes (default 10240)");
   console.log("  --json/--csv/--md/--xml/--files - Same formats as search");
+  console.log("");
+  console.log("History/diff options:");
+  console.log("  -n <num>                   - Limit number of versions shown");
+  console.log("  --from <version>           - Source version for diff (default: v2, previous)");
+  console.log("  --to <version>             - Target version for diff (default: v1, current)");
+  console.log("  --json | --csv             - Output format");
   console.log("");
   console.log("Memory commands:");
   console.log("  kindx memory put --scope <scope> --key <k> --value <v> [--tag t ...] [--source s]");
@@ -3395,6 +3651,27 @@ if (isMain) {
       const fromLine = cli.values.from ? parseInt(cli.values.from as string, 10) : undefined;
       const maxLines = cli.values.l ? parseInt(cli.values.l as string, 10) : undefined;
       getDocument(cli.args[0], fromLine, maxLines, cli.opts.lineNumbers);
+      break;
+    }
+
+    case "history": {
+      if (!cli.args[0]) {
+        console.error("Usage: kindx history <filepath> [--json|--csv] [-n <limit>]");
+        process.exit(1);
+      }
+      const historyLimit = cli.opts.limit || undefined;
+      showDocumentHistory(cli.args[0], { format: cli.opts.format, limit: historyLimit });
+      break;
+    }
+
+    case "diff": {
+      if (!cli.args[0]) {
+        console.error("Usage: kindx diff <filepath> [--from <version>] [--to <version>] [--json]");
+        process.exit(1);
+      }
+      const fromVersion = cli.values.from ? parseInt(String(cli.values.from), 10) : undefined;
+      const toVersion = cli.values.to ? parseInt(String(cli.values.to), 10) : undefined;
+      diffDocuments(cli.args[0], { format: cli.opts.format, fromVersion, toVersion });
       break;
     }
 
