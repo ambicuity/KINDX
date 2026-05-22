@@ -327,7 +327,7 @@ Agents need to discover what a knowledge server can do programmatically. No comp
 
 **Action:** Create migration guides for users coming from Chroma, Qdrant, LanceDB, and LlamaIndex.
 
-**Evidence:** `engine/migrate.ts` has schema migration. `engine/migrate-openclaw.ts` has OpenClaw migration. `engine/migrate-chroma-idempotent.test.ts` has Chroma migration.
+**Evidence:** `engine/migrate.ts` has schema migration. `engine/migrate-openclaw.ts` has OpenClaw migration. `specs/migrate-chroma-idempotent.test.ts` has Chroma migration.
 
 **Impact:** Medium. Migration guides lower switching costs.
 
