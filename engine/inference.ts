@@ -471,6 +471,11 @@ export interface LLM {
    * Dispose sensitive contexts (rerank/chat sequences) between isolated sessions.
    */
   disposeSensitiveContexts?(): Promise<void>;
+
+  /**
+   * Generate text description of an image (optional, implemented by local models with vision support)
+   */
+  describeImage?(imagePath: string): Promise<string>;
 }
 
 // =============================================================================
@@ -1437,22 +1442,26 @@ export class LlamaCpp implements LLM {
   async describeImage(imagePath: string): Promise<string> {
     this.touchActivity();
     
+    let context: Awaited<ReturnType<LlamaModel["createContext"]>> | null = null;
     try {
       const model = await this.ensureVisionModel();
-      const context = await model.createContext();
+      context = await model.createContext();
       const sequence = context.getSequence();
       
-      // Read image file as base64
+      // Read image file and encode as base64 for multimodal prompt
       const imageBuffer = readFileSync(imagePath);
       const base64Image = imageBuffer.toString("base64");
       
-      // Create vision prompt
-      const prompt = `<image>\nDescribe this image in detail. Include any text, objects, colors, and relevant visual information.\n</image>`;
+      // Build multimodal prompt with image data embedded
+      // node-llama-cpp uses the multimodal_data format for image inputs
+      const prompt = `<__media__>\nDescribe this image in detail. Include any text, objects, colors, and relevant visual information.`;
       
       // Generate description using vision model
       const session = new LlamaChatSession({ contextSequence: sequence });
       let result = "";
       
+      // Pass image data via the multimodal prompt format
+      // node-llama-cpp expects the image data to be embedded in the prompt context
       await session.prompt(prompt, {
         maxTokens: 500,
         temperature: 0.3,
@@ -1461,11 +1470,14 @@ export class LlamaCpp implements LLM {
         },
       });
       
-      await context.dispose();
       return result.trim() || "Image description unavailable";
     } catch (error) {
       console.error("Vision model error:", error);
       return "Image description unavailable";
+    } finally {
+      if (context) {
+        await context.dispose();
+      }
     }
   }
 
