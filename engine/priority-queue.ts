@@ -17,6 +17,11 @@ export interface PriorityQueueMetrics {
   shedCount: number;
   totalEnqueued: number;
   totalDequeued: number;
+  waitTimePercentiles: {
+    p50: number;
+    p90: number;
+    p99: number;
+  };
 }
 
 export class QueueExhaustedError extends Error {
@@ -29,6 +34,7 @@ export class QueueExhaustedError extends Error {
 interface QueueEntry<T> {
   item: T;
   priority: Priority;
+  enqueuedAt: number;
 }
 
 export class PriorityQueue<T> {
@@ -38,8 +44,10 @@ export class PriorityQueue<T> {
   private totalEnqueued = 0;
   private totalDequeued = 0;
 
-  constructor(config: PriorityQueueConfig) {
-    this.maxSize = config.maxSize;
+  constructor(config?: Partial<PriorityQueueConfig>) {
+    const envMax = process.env.KINDX_QUEUE_MAX_DEPTH;
+    const envSize = envMax ? parseInt(envMax, 10) : undefined;
+    this.maxSize = config?.maxSize ?? envSize ?? 100;
   }
 
   get size(): number {
@@ -63,13 +71,13 @@ export class PriorityQueue<T> {
       }
     }
 
-    const entry: QueueEntry<T> = { item, priority };
+    const entry: QueueEntry<T> = { item, priority, enqueuedAt: Date.now() };
     const insertIdx = this.findInsertIndex(priority);
     this.queue.splice(insertIdx, 0, entry);
     this.totalEnqueued++;
   }
 
-  async dequeue(): Promise<T> {
+  dequeue(): T {
     if (this.queue.length === 0) {
       throw new Error("Queue is empty");
     }
@@ -79,12 +87,28 @@ export class PriorityQueue<T> {
   }
 
   getMetrics(): PriorityQueueMetrics {
+    const now = Date.now();
+    const waitTimes = this.queue
+      .map((e) => now - e.enqueuedAt)
+      .sort((a, b) => a - b);
+
+    const percentile = (arr: number[], p: number): number => {
+      if (arr.length === 0) return 0;
+      const idx = Math.ceil((p / 100) * arr.length) - 1;
+      return arr[Math.max(0, idx)];
+    };
+
     return {
       size: this.queue.length,
       maxSize: this.maxSize,
       shedCount: this.shedCount,
       totalEnqueued: this.totalEnqueued,
       totalDequeued: this.totalDequeued,
+      waitTimePercentiles: {
+        p50: percentile(waitTimes, 50),
+        p90: percentile(waitTimes, 90),
+        p99: percentile(waitTimes, 99),
+      },
     };
   }
 
