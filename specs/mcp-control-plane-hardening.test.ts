@@ -427,3 +427,59 @@ describe("control plane integration", () => {
     expect(quotaManager.check("session1", "query")).toBe(false);
   });
 });
+
+describe("control plane hardening integration", () => {
+  test("full request flow with all security checks", () => {
+    const rateLimiter = new SessionRateLimiter({ maxRequests: 10, windowMs: 60000 });
+    const quotaManager = new ToolQuotaManager({ defaultQuota: 100 });
+    const circuitBreaker = new CircuitBreaker({ failureThreshold: 5, resetTimeoutMs: 30000 });
+    const auditFn = vi.fn();
+
+    const resolved = resolveMcpServerControl("kindx", {
+      runtime: {
+        mcp_servers: {
+          kindx: {
+            enabled_tools: ["query", "get"],
+          },
+        },
+      },
+      project: null,
+      user: null,
+      trustedProject: true,
+      projectHash: "p",
+    });
+
+    // All checks pass
+    expect(rateLimiter.check("session1")).toBe(true);
+    expect(quotaManager.check("session1", "query")).toBe(true);
+    expect(circuitBreaker.allow()).toBe(true);
+    expect(isToolEnabledByPolicy(resolved, "query", { audit: auditFn })).toBe(true);
+    expect(auditFn).not.toHaveBeenCalled();
+
+    // Tool not in allowlist
+    expect(isToolEnabledByPolicy(resolved, "status", { audit: auditFn })).toBe(false);
+    expect(auditFn).toHaveBeenCalledWith({
+      action: "tool_denied",
+      scope: "kindx/status",
+      detail: "not in allowlist",
+    });
+  });
+
+  test("circuit breaker prevents cascade failures", () => {
+    const circuitBreaker = new CircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 1000 });
+
+    // Simulate LLM timeouts
+    circuitBreaker.recordFailure();
+    circuitBreaker.recordFailure();
+    expect(circuitBreaker.allow()).toBe(true);
+
+    circuitBreaker.recordFailure();
+    expect(circuitBreaker.allow()).toBe(false);
+  });
+
+  test("path traversal attack is blocked", () => {
+    const cache = new McpToolListCache(60_000);
+    expect(() => (cache as any).cachePath("../../../etc/passwd")).toThrow("invalid cache key");
+    expect(() => (cache as any).cachePath("..\\..\\windows\\system32")).toThrow("invalid cache key");
+  });
+});
