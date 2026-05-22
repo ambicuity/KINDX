@@ -81,6 +81,7 @@ type SearchResultItem = {
   score: number;
   context: string | null;
   snippet: string;
+  _index?: string;
 };
 
 type StatusResult = {
@@ -926,9 +927,12 @@ Intent-aware lex (C++ performance, not sports):
         maxSnippetLines: z.number().optional().describe(
           "Maximum lines per result snippet. Truncates to the most relevant excerpt. Reduces token usage for agents with limited context windows."
         ),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to query (cross-index federation). Omit to use current index."
+        ),
       },
     },
-    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections, maxSnippetLines }: any) => {
+    async ({ searches, limit, minScore, candidateLimit, maxRerankCandidates, rerankTimeoutMs, rerankQueueLimit, rerankConcurrency, rerankDropPolicy, vectorFanoutWorkers, routingProfile, collections, maxSnippetLines, indexes }: any) => {
       try {
       const totalStart = Date.now();
       const timings = newTimings();
@@ -963,51 +967,78 @@ Intent-aware lex (C++ performance, not sports):
         encryption_mode: store.getStatus().encryption.encrypted ? "encrypted" : "plaintext",
       }));
 
-      const results = await withLLMScope(
-        scopeKey,
-        () => raceWithTimeout(
-          (signal) => structuredSearchWithDiagnostics(store, subSearches, {
-            collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
-            limit,
-            minScore,
-            candidateLimit: profilePolicy.candidateLimit,
-            maxRerankCandidates,
-            rerankTimeoutMs,
-            rerankQueueLimit,
-            rerankConcurrency,
-            rerankDropPolicy,
-            vectorFanoutWorkers,
-            rerankLimit: profilePolicy.rerankLimit,
-            disableRerank: profile === "fast",
-            routingProfile: profile,
-            signal,
-            hooks: {
-              onExpand: (_original, _expanded, elapsedMs) => {
-                timings.expand_ms += elapsedMs;
-                pushSpan(timings, "expand", Date.now() - elapsedMs);
+      let results;
+      if (indexes && indexes.length > 0) {
+        const primaryQ = subSearches.find((s: any) => s.type === 'lex')?.query
+          || subSearches.find((s: any) => s.type === 'vec')?.query
+          || subSearches[0]?.query || "";
+        const { federatedQuery } = await import("./repository.js");
+        const fedResults = federatedQuery(indexes, primaryQ, { limit });
+
+        results = {
+          results: fedResults.matches.map(m => ({
+            docid: m.docid,
+            displayPath: m.file,
+            title: m.title || "",
+            score: m.score,
+            context: m.context || "",
+            bestChunk: m.snippet || "",
+            _index: m._index,
+          })),
+          diagnostics: {
+            degradedMode: fedResults.indexes_skipped.length > 0,
+            fallbackReasons: fedResults.indexes_skipped.length > 0
+              ? [`skipped indexes: ${fedResults.indexes_skipped.join(", ")}`]
+              : [],
+          },
+        };
+      } else {
+        results = await withLLMScope(
+          scopeKey,
+          () => raceWithTimeout(
+            (signal) => structuredSearchWithDiagnostics(store, subSearches, {
+              collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
+              limit,
+              minScore,
+              candidateLimit: profilePolicy.candidateLimit,
+              maxRerankCandidates,
+              rerankTimeoutMs,
+              rerankQueueLimit,
+              rerankConcurrency,
+              rerankDropPolicy,
+              vectorFanoutWorkers,
+              rerankLimit: profilePolicy.rerankLimit,
+              disableRerank: profile === "fast",
+              routingProfile: profile,
+              signal,
+              hooks: {
+                onExpand: (_original, _expanded, elapsedMs) => {
+                  timings.expand_ms += elapsedMs;
+                  pushSpan(timings, "expand", Date.now() - elapsedMs);
+                },
+                onEmbedDone: (elapsedMs) => {
+                  timings.embed_ms += elapsedMs;
+                  pushSpan(timings, "embed", Date.now() - elapsedMs);
+                },
+                onRetrievalDone: (elapsedMs) => {
+                  timings.retrieval_ms = elapsedMs;
+                  pushSpan(timings, "retrieve", Date.now() - elapsedMs);
+                },
+                onRerankInitDone: (elapsedMs) => {
+                  timings.rerank_init_ms += elapsedMs;
+                  pushSpan(timings, "rerank_init", Date.now() - elapsedMs);
+                },
+                onRerankDone: (elapsedMs) => {
+                  timings.rerank_ms += elapsedMs;
+                  pushSpan(timings, "rerank", Date.now() - elapsedMs);
+                },
               },
-              onEmbedDone: (elapsedMs) => {
-                timings.embed_ms += elapsedMs;
-                pushSpan(timings, "embed", Date.now() - elapsedMs);
-              },
-              onRetrievalDone: (elapsedMs) => {
-                timings.retrieval_ms = elapsedMs;
-                pushSpan(timings, "retrieve", Date.now() - elapsedMs);
-              },
-              onRerankInitDone: (elapsedMs) => {
-                timings.rerank_init_ms += elapsedMs;
-                pushSpan(timings, "rerank_init", Date.now() - elapsedMs);
-              },
-              onRerankDone: (elapsedMs) => {
-                timings.rerank_ms += elapsedMs;
-                pushSpan(timings, "rerank", Date.now() - elapsedMs);
-              },
-            },
-          }),
-          resolveTimeoutByProfile(timeoutMs, profile),
-          "query_timeout"
-        )
-      );
+            }),
+            resolveTimeoutByProfile(timeoutMs, profile),
+            "query_timeout"
+          )
+        );
+      }
       timings.total_ms = Date.now() - totalStart;
       pushSpan(timings, "total", totalStart);
 
@@ -1027,6 +1058,7 @@ Intent-aware lex (C++ performance, not sports):
           }
         }
         return {
+          _index: (r as any)._index || undefined,
           docid: `#${r.docid}`,
           file: r.displayPath,
           title: r.title,
@@ -1055,7 +1087,7 @@ Intent-aware lex (C++ performance, not sports):
         dedupe_join_hits: false,
         replay_artifact: null,
         replay_artifact_path: null,
-        diagnostics: results.diagnostics,
+        diagnostics: results.diagnostics as any,
       };
       metadata.replay_artifact = await writeReplayArtifact({
         requestId: stableHash({
@@ -1136,9 +1168,12 @@ Intent-aware lex (C++ performance, not sports):
         fromLine: z.number().optional().describe("Start from this line number (1-indexed)"),
         maxLines: z.number().optional().describe("Maximum number of lines to return"),
         lineNumbers: z.boolean().optional().default(false).describe("Add line numbers to output (format: 'N: content')"),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to search for the document. Omit to use current index."
+        ),
       },
     },
-    async ({ file, fromLine, maxLines, lineNumbers }: any) => {
+    async ({ file, fromLine, maxLines, lineNumbers, indexes }: any) => {
       try {
       // Support :line suffix in `file` (e.g. "foo.md:120") when fromLine isn't provided
       let parsedFromLine = fromLine;
@@ -1149,7 +1184,7 @@ Intent-aware lex (C++ performance, not sports):
         lookup = lookup.slice(0, -colonMatch[0].length);
       }
 
-      const result = store.findDocument(lookup, { includeBody: false });
+      let result = store.findDocument(lookup, { includeBody: false });
 
       if (!("error" in result)) {
         const { filterAllowedCollections } = await import("./rbac.js");
@@ -1161,6 +1196,19 @@ Intent-aware lex (C++ performance, not sports):
               content: [{ type: "text", text: `RBAC denied: access to collection '${result.collectionName}' forbidden.` }],
               isError: true,
             };
+          }
+        }
+      }
+
+      // If not found in current index, try named indexes
+      if ("error" in result && indexes && indexes.length > 0) {
+        const { createStoreForIndex } = await import("./repository.js");
+        for (const idxName of indexes) {
+          const idxStore = createStoreForIndex(idxName);
+          const idxDoc = idxStore.findDocument(lookup, { includeBody: true });
+          if (idxDoc && !("error" in idxDoc)) {
+            result = idxDoc as any;
+            break;
           }
         }
       }
@@ -1234,11 +1282,32 @@ Intent-aware lex (C++ performance, not sports):
         maxLines: z.number().optional().describe("Maximum lines per file"),
         maxBytes: z.number().optional().default(10240).describe("Skip files larger than this (default: 10240 = 10KB)"),
         lineNumbers: z.boolean().optional().default(false).describe("Add line numbers to output (format: 'N: content')"),
+        indexes: z.array(z.string()).optional().describe(
+          "Named indexes to search for documents. Omit to use current index."
+        ),
       },
     },
-    async ({ pattern, maxLines, maxBytes, lineNumbers }: any) => {
+    async ({ pattern, maxLines, maxBytes, lineNumbers, indexes }: any) => {
       try {
       const { docs, errors } = store.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
+
+      // Cross-index federation: also search named indexes
+      if (indexes && indexes.length > 0) {
+        const seenFiles = new Set(docs.map((d: any) => d.doc?.displayPath));
+        const { createStoreForIndex } = await import("./repository.js");
+        for (const idxName of indexes) {
+          const idxStore = createStoreForIndex(idxName);
+          const idxResult = idxStore.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
+          for (const d of idxResult.docs) {
+            const path = d.doc?.displayPath;
+            if (path && !seenFiles.has(path)) {
+              seenFiles.add(path);
+              docs.push(d);
+            }
+          }
+          errors.push(...idxResult.errors);
+        }
+      }
 
       if (docs.length === 0 && errors.length === 0) {
         return {
@@ -2435,10 +2504,10 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             return;
           }
           // Single-tenant → admin identity
-          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*", allowedIndexes: ["*"] };
         } else {
           // No auth configured — admin identity (open access, local-only deployments)
-          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*" };
+          requestIdentity = { tenantId: "__default", role: "admin", allowedCollections: "*", allowedIndexes: ["*"] };
         }
       }
 
