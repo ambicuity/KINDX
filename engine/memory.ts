@@ -16,7 +16,19 @@ const SINGLE_CARDINALITY_KEYS = new Set([
   "card_holder_name",
 ]);
 
+const LIFECYCLE_EVERY_N_OPS = Number(process.env.KINDX_MEMORY_LIFECYCLE_INTERVAL) || 50;
+let _lifecycleOpsSinceLastRun = 0;
+
 let _memoryVectorPersistWarningEmitted = false;
+
+export function maybeRunLifecycleJobs(db: Database, scope: string): void {
+  _lifecycleOpsSinceLastRun += 1;
+  if (_lifecycleOpsSinceLastRun < LIFECYCLE_EVERY_N_OPS) return;
+  _lifecycleOpsSinceLastRun = 0;
+  if (Math.random() > 0.01) return;
+  purgeExpiredMemories(db, scope);
+  consolidateMemories(db, scope);
+}
 
 export type MemoryRecord = {
   id: number;
@@ -780,7 +792,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   `).get(scope, key, value) as { id: number; source: string | null; appeared_count: number } | undefined;
 
   if (exact) {
-    return withTransaction(db, () => {
+    const result = withTransaction(db, () => {
       const mergedSource = mergeSource(exact.source, source);
       const now = nowIso();
       const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
@@ -801,6 +813,8 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(exact.id);
       return toMemoryRecord(row);
     });
+    maybeRunLifecycleJobs(db, scope);
+    return result;
   }
 
   let vector = input.precomputedVector;
@@ -823,7 +837,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       }
 
       if (best) {
-        return withTransaction(db, () => {
+        const result = withTransaction(db, () => {
           const newId = insertNewMemory(db, {
             scope,
             key,
@@ -845,6 +859,8 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
           const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
           return toMemoryRecord(row);
         });
+        maybeRunLifecycleJobs(db, scope);
+        return result;
       }
     }
   }
@@ -863,7 +879,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     }
 
     if (crossBest) {
-      return withTransaction(db, () => {
+      const result = withTransaction(db, () => {
         const newId = insertNewMemory(db, {
           scope, key, value, source, confidence, searchText, tags, vector,
         });
@@ -876,6 +892,8 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
         const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
         return toMemoryRecord(row);
       });
+      maybeRunLifecycleJobs(db, scope);
+      return result;
     }
   }
 
@@ -890,7 +908,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
 
     if (old) {
       vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
-      return withTransaction(db, () => {
+      const result = withTransaction(db, () => {
         const newId = insertNewMemory(db, {
           scope,
           key,
@@ -911,6 +929,8 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
         const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
         return toMemoryRecord(row);
       });
+      maybeRunLifecycleJobs(db, scope);
+      return result;
     }
   }
 
@@ -918,7 +938,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
   const expiresAt = computeExpiresAt(input.ttl);
   const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
-  return withTransaction(db, () => {
+  const result = withTransaction(db, () => {
     const newId = insertNewMemory(db, {
       scope,
       key,
@@ -935,6 +955,8 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
     return toMemoryRecord(row);
   });
+  maybeRunLifecycleJobs(db, scope);
+  return result;
 }
 
 export function textSearchMemory(db: Database, scopeInput: string, queryInput: string, limit = 20): MemorySearchResult[] {
@@ -1156,7 +1178,7 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
  */
 export function deleteMemory(db: Database, scopeInput: string, memoryId: number): boolean {
   const scope = normalizeScope(scopeInput);
-  return withTransaction(db, () => {
+  const result = withTransaction(db, () => {
     // Verify the memory belongs to this scope before deleting
     const exists = db.prepare(
       `SELECT id FROM memories WHERE id = ? AND scope = ?`
@@ -1179,6 +1201,8 @@ export function deleteMemory(db: Database, scopeInput: string, memoryId: number)
     const run = db.prepare(`DELETE FROM memories WHERE id = ? AND scope = ?`).run(memoryId, scope);
     return Number(run.changes) > 0;
   });
+  if (result) maybeRunLifecycleJobs(db, scope);
+  return result;
 }
 
 /**

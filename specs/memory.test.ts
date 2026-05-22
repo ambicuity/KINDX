@@ -7,6 +7,7 @@ import {
   textSearchMemory,
   semanticSearchMemory,
   purgeExpiredMemories,
+  consolidateMemories,
   getMemoryHistory,
   getMemoryStats,
   markMemoryAccessed,
@@ -634,5 +635,56 @@ describe("memory subsystem", () => {
 
     const embeddings = db.prepare(`SELECT * FROM memory_embeddings WHERE memory_id = ?`).all(mem1.id);
     expect(embeddings.length).toBe(0);
+  });
+
+  test("maybeRunLifecycleJobs purges expired memories when triggered", () => {
+    const db = createMemoryDb();
+
+    const expiredIso = new Date(Date.now() - 60_000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1, 0, datetime('now'), datetime('now'), ?, ?, 60)
+    `).run("s1", "k:expired", "v", "k:expired v", expiredIso);
+
+    const before = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = 's1'`).get() as { cnt: number };
+    expect(before.cnt).toBe(1);
+
+    purgeExpiredMemories(db, "s1");
+
+    const after = db.prepare(`SELECT COUNT(*) AS cnt FROM memories WHERE scope = 's1'`).get() as { cnt: number };
+    expect(after.cnt).toBe(0);
+  });
+
+  test("consolidateMemories merges near-duplicate memories", async () => {
+    const db = createMemoryDb();
+
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim",
+      precomputedVector: [1, 0],
+    });
+    await upsertMemory(db, {
+      scope: "s1",
+      key: "prefs:editor",
+      value: "vim editor",
+      disableSemanticDedup: true,
+      precomputedVector: [0.99, 0.14],
+    });
+
+    const before = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(before.cnt).toBe(2);
+
+    consolidateMemories(db, "s1", 0.9);
+
+    const after = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = 's1' AND superseded_by IS NULL
+    `).get() as { cnt: number };
+    expect(after.cnt).toBe(1);
   });
 });
