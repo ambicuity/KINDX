@@ -47,6 +47,24 @@ export function initializeCoreSchema(db: Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(hash)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_documents_path ON documents(path, active)`);
 
+  // Document versions - tracks historical snapshots of document content
+  // Populated automatically when insertDocument/updateDocument detect a content hash change.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS document_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL,
+      collection TEXT NOT NULL,
+      path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (hash) REFERENCES content(hash) ON DELETE CASCADE
+    )
+  `);
+
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_versions_doc_id ON document_versions(document_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_versions_coll_path ON document_versions(collection, path, created_at)`);
+
   // Document Link Graph - tracks internal cross-references
   db.exec(`
     CREATE TABLE IF NOT EXISTS document_links (

@@ -83,6 +83,9 @@ export function initializeAuditSchema(db: Database): void {
   db.exec(
     `CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_hash)`,
   );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_audit_log_scope ON audit_log(scope)`,
+  );
 }
 
 /**
@@ -133,6 +136,8 @@ export function queryAuditLog(
     action?: AuditAction;
     tenantHash?: string;
     since?: string;
+    until?: string;
+    scope?: string;
     limit?: number;
   },
 ): AuditEntry[] {
@@ -150,6 +155,14 @@ export function queryAuditLog(
   if (filters?.since) {
     conditions.push("timestamp >= ?");
     params.push(filters.since);
+  }
+  if (filters?.until) {
+    conditions.push("timestamp <= ?");
+    params.push(filters.until);
+  }
+  if (filters?.scope) {
+    conditions.push("scope = ?");
+    params.push(filters.scope);
   }
 
   const where =

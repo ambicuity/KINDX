@@ -136,6 +136,8 @@ export function insertContent(db: Database, hash: string, content: string, creat
 
 /**
  * Insert a new document into the documents table.
+ * When an existing document's content changes (hash differs), the previous
+ * version is preserved in document_versions before the update.
  */
 export function insertDocument(
   db: Database,
@@ -146,6 +148,19 @@ export function insertDocument(
   createdAt: string,
   modifiedAt: string
 ): void {
+  // Snapshot the current record (if any) before the upsert.
+  const existing = db.prepare(
+    `SELECT id, title, hash, created_at FROM documents WHERE collection = ? AND path = ?`
+  ).get(collectionName, path) as { id: number; title: string; hash: string; created_at: string } | undefined;
+
+  if (existing && existing.hash !== hash) {
+    // Content changed — archive the previous version.
+    db.prepare(`
+      INSERT INTO document_versions (document_id, collection, path, title, hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(existing.id, collectionName, path, existing.title, existing.hash, existing.created_at);
+  }
+
   db.prepare(`
     INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active)
     VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -243,6 +258,7 @@ export function updateDocumentTitle(
 /**
  * Update an existing document's hash, title, and modified_at timestamp.
  * Used when content changes but the file path stays the same.
+ * When the content hash changes, the previous version is preserved in document_versions.
  */
 export function updateDocument(
   db: Database,
@@ -251,6 +267,19 @@ export function updateDocument(
   hash: string,
   modifiedAt: string
 ): void {
+  // Snapshot the current record before the update.
+  const existing = db.prepare(
+    `SELECT id, collection, path, title, hash, created_at FROM documents WHERE id = ?`
+  ).get(documentId) as { id: number; collection: string; path: string; title: string; hash: string; created_at: string } | undefined;
+
+  if (existing && existing.hash !== hash) {
+    // Content changed — archive the previous version.
+    db.prepare(`
+      INSERT INTO document_versions (document_id, collection, path, title, hash, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(existing.id, existing.collection, existing.path, existing.title, existing.hash, existing.created_at);
+  }
+
   db.prepare(`UPDATE documents SET title = ?, hash = ?, modified_at = ? WHERE id = ?`)
     .run(title, hash, modifiedAt, documentId);
 }
@@ -279,4 +308,115 @@ export function getActiveDocumentPaths(db: Database, collectionName: string): st
     SELECT path FROM documents WHERE collection = ? AND active = 1
   `).all(collectionName) as { path: string }[];
   return rows.map(r => r.path);
+}
+
+// =============================================================================
+// Document version history
+// =============================================================================
+
+/**
+ * Get all version history for a document, newest first.
+ * Includes both archived versions and the current active version
+ * (the active version is returned as the final entry in the result set,
+ * with created_at = documents.modified_at for consistency).
+ */
+export function getDocumentVersions(
+  db: Database,
+  collectionName: string,
+  path: string
+): { versionId: number; title: string; hash: string; createdAt: string }[] {
+  // Archived versions from document_versions (newest first).
+  const archived = db.prepare(`
+    SELECT id AS versionId, title, hash, created_at AS createdAt
+    FROM document_versions
+    WHERE collection = ? AND path = ?
+    ORDER BY created_at DESC
+  `).all(collectionName, path) as { versionId: number; title: string; hash: string; createdAt: string }[];
+
+  // Current active version (if it exists).
+  const current = db.prepare(`
+    SELECT id, title, hash, modified_at AS createdAt
+    FROM documents
+    WHERE collection = ? AND path = ? AND active = 1
+  `).get(collectionName, path) as { id: number; title: string; hash: string; createdAt: string } | undefined;
+
+  const result: { versionId: number; title: string; hash: string; createdAt: string }[] = [];
+  if (current) {
+    result.push({ versionId: current.id, title: current.title, hash: current.hash, createdAt: current.createdAt });
+  }
+  // Prepend archived versions (already DESC) before the current version.
+  result.push(...archived);
+
+  // De-duplicate by hash — keep the first occurrence (most recent).
+  const seen = new Set<string>();
+  return result.filter(r => {
+    if (seen.has(r.hash)) return false;
+    seen.add(r.hash);
+    return true;
+  });
+}
+
+/**
+ * Get document content as it existed at a specific ISO timestamp.
+ * Finds the most recent version whose created_at <= timestamp,
+ * or falls back to the current active document if no version precedes the timestamp.
+ */
+export function getDocumentAtTime(
+  db: Database,
+  collectionName: string,
+  path: string,
+  timestamp: string
+): { title: string; hash: string; body: string; createdAt: string } | null {
+  // 1. Try the archived versions (most recent before or at timestamp).
+  const version = db.prepare(`
+    SELECT title, hash, created_at AS createdAt
+    FROM document_versions
+    WHERE collection = ? AND path = ? AND created_at <= ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(collectionName, path, timestamp) as { title: string; hash: string; createdAt: string } | undefined;
+
+  if (version) {
+    const body = db.prepare(`SELECT doc FROM content WHERE hash = ?`).get(version.hash) as { doc: string } | undefined;
+    if (body) return { title: version.title, hash: version.hash, body: body.doc, createdAt: version.createdAt };
+  }
+
+  // 2. Fall back to the current active document if its created_at <= timestamp.
+  const current = db.prepare(`
+    SELECT d.title, d.hash, d.created_at AS createdAt, c.doc AS body
+    FROM documents d
+    JOIN content c ON c.hash = d.hash
+    WHERE d.collection = ? AND d.path = ? AND d.active = 1 AND d.created_at <= ?
+  `).get(collectionName, path, timestamp) as { title: string; hash: string; body: string; createdAt: string } | undefined;
+
+  return current ?? null;
+}
+
+/**
+ * Find document metadata (without body) at a point in time.
+ * Same logic as getDocumentAtTime but does not fetch the content body.
+ */
+export function findDocumentAtTime(
+  db: Database,
+  collectionName: string,
+  path: string,
+  timestamp: string
+): { title: string; hash: string; createdAt: string } | null {
+  const version = db.prepare(`
+    SELECT title, hash, created_at AS createdAt
+    FROM document_versions
+    WHERE collection = ? AND path = ? AND created_at <= ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(collectionName, path, timestamp) as { title: string; hash: string; createdAt: string } | undefined;
+
+  if (version) return version;
+
+  const current = db.prepare(`
+    SELECT title, hash, created_at AS createdAt
+    FROM documents
+    WHERE collection = ? AND path = ? AND active = 1 AND created_at <= ?
+  `).get(collectionName, path, timestamp) as { title: string; hash: string; createdAt: string } | undefined;
+
+  return current ?? null;
 }
