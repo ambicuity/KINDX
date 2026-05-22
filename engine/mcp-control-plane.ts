@@ -10,7 +10,12 @@ export type RateLimiterConfig = {
   windowMs: number;
 };
 
-export class SessionRateLimiter {
+/**
+ * Fixed-window rate limiter. Counts requests per session within discrete
+ * time windows that reset at a fixed boundary. Not a sliding window —
+ * the counter resets to zero when the window expires.
+ */
+export class FixedWindowRateLimiter {
   private readonly windows = new Map<string, { count: number; resetAt: number }>();
   private readonly maxRequests: number;
   private readonly windowMs: number;
@@ -25,6 +30,7 @@ export class SessionRateLimiter {
     const window = this.windows.get(sessionId);
 
     if (!window || now >= window.resetAt) {
+      this.pruneExpired(now);
       this.windows.set(sessionId, { count: 1, resetAt: now + this.windowMs });
       return true;
     }
@@ -40,7 +46,18 @@ export class SessionRateLimiter {
   reset(sessionId: string): void {
     this.windows.delete(sessionId);
   }
+
+  private pruneExpired(now: number): void {
+    for (const [key, entry] of this.windows) {
+      if (now >= entry.resetAt) {
+        this.windows.delete(key);
+      }
+    }
+  }
 }
+
+/** @deprecated Use {@link FixedWindowRateLimiter} instead. */
+export const SessionRateLimiter = FixedWindowRateLimiter;
 
 export type McpServerControlConfig = {
   enabled_tools?: string[];

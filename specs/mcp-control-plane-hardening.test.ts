@@ -1,5 +1,5 @@
-import { describe, expect, test, vi } from "vitest";
-import { McpToolListCache, SessionRateLimiter, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { FixedWindowRateLimiter, McpToolListCache, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -225,32 +225,50 @@ describe("pickServerConfig config resolution logging", () => {
   });
 });
 
-describe("SessionRateLimiter", () => {
+describe("FixedWindowRateLimiter", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("allows requests under limit", () => {
-    const limiter = new SessionRateLimiter({ maxRequests: 10, windowMs: 1000 });
+    const limiter = new FixedWindowRateLimiter({ maxRequests: 10, windowMs: 1000 });
     expect(limiter.check("session1")).toBe(true);
     expect(limiter.check("session1")).toBe(true);
   });
 
   test("blocks requests over limit", () => {
-    const limiter = new SessionRateLimiter({ maxRequests: 2, windowMs: 1000 });
+    const limiter = new FixedWindowRateLimiter({ maxRequests: 2, windowMs: 1000 });
     expect(limiter.check("session1")).toBe(true);
     expect(limiter.check("session1")).toBe(true);
     expect(limiter.check("session1")).toBe(false);
   });
 
   test("tracks sessions independently", () => {
-    const limiter = new SessionRateLimiter({ maxRequests: 1, windowMs: 1000 });
+    const limiter = new FixedWindowRateLimiter({ maxRequests: 1, windowMs: 1000 });
     expect(limiter.check("session1")).toBe(true);
     expect(limiter.check("session2")).toBe(true);
     expect(limiter.check("session1")).toBe(false);
   });
 
-  test("resets after window expires", async () => {
-    const limiter = new SessionRateLimiter({ maxRequests: 1, windowMs: 100 });
+  test("resets after window expires", () => {
+    const limiter = new FixedWindowRateLimiter({ maxRequests: 1, windowMs: 100 });
     expect(limiter.check("session1")).toBe(true);
     expect(limiter.check("session1")).toBe(false);
-    await new Promise(resolve => setTimeout(resolve, 150));
+    vi.advanceTimersByTime(150);
     expect(limiter.check("session1")).toBe(true);
+  });
+
+  test("prunes expired entries on window reset", () => {
+    const limiter = new FixedWindowRateLimiter({ maxRequests: 1, windowMs: 100 });
+    limiter.check("session1");
+    limiter.check("session2");
+    vi.advanceTimersByTime(150);
+    limiter.check("session1");
+    const size = (limiter as any).windows.size;
+    expect(size).toBe(1);
   });
 });
