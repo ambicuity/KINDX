@@ -63,6 +63,7 @@ import {
 } from "./session.js";
 import { getShardHealthSummary } from "./sharding.js";
 import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary, purgeOldAuditEntries } from "./audit.js";
+import { collectBody as collectBodyShared, BodyTooLargeError as BodyTooLargeErrorShared } from "./http/body.js";
 import { getDocumentVersions } from "./repository/content.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
@@ -2821,38 +2822,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     return Number.isFinite(raw) && raw > 0 ? raw : 16 * 1024 * 1024;
   })();
 
-  class BodyTooLargeError extends Error {
-    readonly limitBytes: number;
-    constructor(limitBytes: number) {
-      super(`request body exceeds ${limitBytes} bytes`);
-      this.name = "BodyTooLargeError";
-      this.limitBytes = limitBytes;
-    }
-  }
-
   function parseTimeout(raw: string | undefined, fallbackMs: number): number {
     const v = parseInt(raw || "", 10);
     return Number.isFinite(v) && v >= 0 ? v : fallbackMs;
-  }
-
-  async function collectBody(req: IncomingMessage): Promise<string> {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for await (const chunk of req) {
-      const buf = chunk as Buffer;
-      total += buf.length;
-      if (total > HTTP_MAX_BODY_BYTES) {
-        // Stop reading further chunks but do NOT destroy the socket here —
-        // the outer catch needs to write a 413 response. Pause the stream so
-        // the rest of the body is back-pressured rather than buffered. The
-        // catch handler will write the 413 + Connection: close header and
-        // end the response, after which the kernel closes the socket.
-        try { req.pause(); } catch { /* noop */ }
-        throw new BodyTooLargeError(HTTP_MAX_BODY_BYTES);
-      }
-      chunks.push(buf);
-    }
-    return Buffer.concat(chunks).toString();
   }
 
   function accountAndWorkspace(headers: Record<string, string>, scope?: MemoryScopeContext): {
@@ -3110,7 +3082,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       // REST endpoint: POST /query (alias: /search) — structured search without MCP protocol
       if ((pathname === "/query" || pathname === "/search") && nodeReq.method === "POST") {
         await withConcurrencyPolicy(requestIdentity, async () => {
-          const rawBody = await collectBody(nodeReq);
+          const rawBody = await collectBodyShared(nodeReq, HTTP_MAX_BODY_BYTES);
           const params = JSON.parse(rawBody);
 
         // RBAC: enforce query permission
@@ -3248,7 +3220,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       // -----------------------------------------------------------------------
       if (pathname === "/query/stream" && nodeReq.method === "POST") {
         await withConcurrencyPolicy(requestIdentity, async () => {
-          const rawBody = await collectBody(nodeReq);
+          const rawBody = await collectBodyShared(nodeReq, HTTP_MAX_BODY_BYTES);
           const params = JSON.parse(rawBody);
 
           // RBAC: enforce query permission
@@ -3432,7 +3404,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           return;
         }
 
-        const rawBody = await collectBody(nodeReq);
+        const rawBody = await collectBodyShared(nodeReq, HTTP_MAX_BODY_BYTES);
         const body = JSON.parse(rawBody);
         const label = describeRequest(body);
         const url = `http://localhost:${port}${pathname}`;
@@ -3798,7 +3770,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         }
 
         const url = `http://localhost:${port}${pathname}`;
-        const rawBody = nodeReq.method !== "GET" && nodeReq.method !== "HEAD" ? await collectBody(nodeReq) : undefined;
+        const rawBody = nodeReq.method !== "GET" && nodeReq.method !== "HEAD" ? await collectBodyShared(nodeReq, HTTP_MAX_BODY_BYTES) : undefined;
         const request = new Request(url, { method: nodeReq.method || "GET", headers, ...(rawBody ? { body: rawBody } : {}) });
         const response = await requestScopeContext.run(
           existingSession.context,
@@ -3820,7 +3792,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         recordHttpMetrics(429);
         return;
       }
-      if (err instanceof BodyTooLargeError) {
+      if (err instanceof BodyTooLargeErrorShared) {
         // Tier-0-7: cap on request size — return 413 then drop the connection
         // so the (possibly multi-GB) remaining body is not drained.
         try {
