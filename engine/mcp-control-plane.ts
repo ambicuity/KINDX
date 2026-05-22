@@ -614,6 +614,9 @@ export class McpToolListCache {
   }
 
   private cachePath(key: string): string {
+    if (/[\/\\]/.test(key) || /\.\./.test(key)) {
+      throw new Error("invalid cache key: path traversal detected");
+    }
     return resolve(this.cacheDir(), `${key}.json`);
   }
 }
