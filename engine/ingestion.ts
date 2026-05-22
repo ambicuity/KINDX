@@ -241,6 +241,83 @@ function ingestCsv(path: string): IngestionResult {
   }
 }
 
+function extractJsonSchema(data: any): Record<string, string> {
+  const schema: Record<string, string> = {};
+
+  const flattened = flattenJson(data);
+  if (flattened.length > 0 && typeof flattened[0] === "object" && flattened[0] !== null) {
+    for (const [key, value] of Object.entries(flattened[0])) {
+      schema[key] = typeof value;
+    }
+  }
+
+  return schema;
+}
+
+function flattenJson(data: any): any[] {
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  if (typeof data === "object" && data !== null) {
+    const keys = Object.keys(data);
+    const firstArrayKey = keys.find(key => Array.isArray(data[key]));
+
+    if (firstArrayKey) {
+      return data[firstArrayKey];
+    }
+
+    return [data];
+  }
+
+  return [data];
+}
+
+function ingestJson(path: string): IngestionResult {
+  const warnings: string[] = [];
+  const bytes = statSync(path).size;
+
+  try {
+    const content = readFileSync(path, "utf-8");
+    const data = JSON.parse(content);
+
+    const schema = extractJsonSchema(data);
+    const schemaDesc = Object.entries(schema)
+      .map(([key, type]) => `${key}: ${type}`)
+      .join(", ");
+
+    const items = flattenJson(data);
+
+    const maxItemsPerChunk = 50;
+    const chunks: string[] = [];
+
+    for (let i = 0; i < items.length; i += maxItemsPerChunk) {
+      const chunkItems = items.slice(i, i + maxItemsPerChunk);
+      const chunkContent = [
+        `Schema: ${schemaDesc}`,
+        `Items ${i + 1}-${i + chunkItems.length}:`,
+        ...chunkItems.map(item => JSON.stringify(item))
+      ].join("\n");
+      chunks.push(chunkContent);
+    }
+
+    const text = chunks.join("\n\n---\n\n");
+
+    return {
+      text,
+      metadata: { format: "json", extractor: "json_parser", bytes },
+      warnings,
+    };
+  } catch (error) {
+    warnings.push(`extractor_failed:json_error:${error instanceof Error ? error.message : String(error)}`);
+    return {
+      text: "",
+      metadata: { format: "json", extractor: "json_parser_error", bytes },
+      warnings,
+    };
+  }
+}
+
 async function ingestImage(path: string): Promise<IngestionResult> {
   const warnings: string[] = [];
   const bytes = statSync(path).size;
@@ -308,6 +385,7 @@ export async function ingestFile(path: string): Promise<IngestionResult> {
   if (ext === ".docx") return ingestDocx(path);
   if (IMAGE_EXTENSIONS.has(ext)) return ingestImage(path);
   if (ext === ".csv") return ingestCsv(path);
+  if (ext === ".json") return ingestJson(path);
 
   if (TEXT_EXTENSIONS.has(ext) || ext === "") {
     if (bytes > MAX_DOC_BYTES) {

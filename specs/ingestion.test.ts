@@ -50,6 +50,80 @@ describe("ingestion adapter", () => {
     }
   });
 
+  test("ingests JSON array of objects with schema-aware chunking", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "sample.json");
+      const json = JSON.stringify([
+        { name: "Alice", age: 30, city: "NYC" },
+        { name: "Bob", age: 25, city: "LA" },
+      ]);
+      await writeFile(path, json);
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("json");
+      expect(out.metadata.extractor).toBe("json_parser");
+      expect(out.text).toContain("Schema: name: string, age: number, city: string");
+      expect(out.text).toContain("Items 1-2:");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ingests JSON single object by flattening to array", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "single.json");
+      const json = JSON.stringify({ key: "value", count: 42 });
+      await writeFile(path, json);
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("json");
+      expect(out.metadata.extractor).toBe("json_parser");
+      expect(out.text).toContain("Schema: key: string, count: number");
+      expect(out.text).toContain("Items 1-1:");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ingests JSON object with array value by extracting array", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "nested.json");
+      const json = JSON.stringify({
+        users: [
+          { id: 1, name: "Alice" },
+          { id: 2, name: "Bob" },
+        ],
+      });
+      await writeFile(path, json);
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("json");
+      expect(out.metadata.extractor).toBe("json_parser");
+      expect(out.text).toContain("Schema: id: number, name: string");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("handles invalid JSON gracefully", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "bad.json");
+      await writeFile(path, "{invalid json");
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("json");
+      expect(out.metadata.extractor).toBe("json_parser_error");
+      expect(out.text).toBe("");
+      expect(out.warnings.length).toBe(1);
+      expect(out.warnings[0]).toMatch(/^extractor_failed:json_error:/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("marks unsupported extensions with deterministic warning", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
     try {
