@@ -3304,7 +3304,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             nodeRes.end(JSON.stringify({
               jsonrpc: "2.0",
               error: { code: -32005, message: "Rate limit exceeded for initialize requests" },
-              id: body?.id ?? null,
+              id: (body as Record<string, unknown>)?.id ?? null,
             }));
             recordHttpMetrics(429);
             logger.warn(`429 Rate limit exceeded for initialize requests from ip=${clientIp}`);
