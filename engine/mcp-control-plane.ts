@@ -5,6 +5,181 @@ import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
+export type CircuitBreakerConfig = {
+  failureThreshold: number;
+  resetTimeoutMs: number;
+};
+
+export class CircuitBreaker {
+  private _state: "closed" | "open" | "half-open" = "closed";
+  private failures = 0;
+  private lastFailureAt = 0;
+  private readonly failureThreshold: number;
+  private readonly resetTimeoutMs: number;
+
+  constructor(config: CircuitBreakerConfig) {
+    this.failureThreshold = config.failureThreshold;
+    this.resetTimeoutMs = config.resetTimeoutMs;
+  }
+
+  get state(): "closed" | "open" | "half-open" {
+    if (this._state === "open") {
+      const elapsed = Date.now() - this.lastFailureAt;
+      if (elapsed >= this.resetTimeoutMs) {
+        this._state = "half-open";
+      }
+    }
+    return this._state;
+  }
+
+  allow(): boolean {
+    const currentState = this.state;
+    if (currentState === "closed") return true;
+    if (currentState === "half-open") return true;
+    return false;
+  }
+
+  recordSuccess(): void {
+    this.failures = 0;
+    this._state = "closed";
+  }
+
+  recordFailure(): void {
+    this.failures++;
+    this.lastFailureAt = Date.now();
+    if (this.failures >= this.failureThreshold) {
+      this._state = "open";
+    }
+  }
+
+  reset(): void {
+    this.failures = 0;
+    this._state = "closed";
+    this.lastFailureAt = 0;
+  }
+}
+
+export type RateLimiterConfig = {
+  maxRequests: number;
+  windowMs: number;
+};
+
+/**
+ * Fixed-window rate limiter. Counts requests per session within discrete
+ * time windows that reset at a fixed boundary. Not a sliding window —
+ * the counter resets to zero when the window expires.
+ */
+export class FixedWindowRateLimiter {
+  private readonly windows = new Map<string, { count: number; resetAt: number }>();
+  private readonly maxRequests: number;
+  private readonly windowMs: number;
+
+  constructor(config: RateLimiterConfig) {
+    this.maxRequests = config.maxRequests;
+    this.windowMs = config.windowMs;
+  }
+
+  check(sessionId: string): boolean {
+    const now = Date.now();
+    const window = this.windows.get(sessionId);
+
+    if (!window || now >= window.resetAt) {
+      this.pruneExpired(now);
+      this.windows.set(sessionId, { count: 1, resetAt: now + this.windowMs });
+      return true;
+    }
+
+    if (window.count >= this.maxRequests) {
+      return false;
+    }
+
+    window.count++;
+    return true;
+  }
+
+  reset(sessionId: string): void {
+    this.windows.delete(sessionId);
+  }
+
+  private pruneExpired(now: number): void {
+    for (const [key, entry] of this.windows) {
+      if (now >= entry.resetAt) {
+        this.windows.delete(key);
+      }
+    }
+  }
+}
+
+/** @deprecated Use {@link FixedWindowRateLimiter} instead. */
+export const SessionRateLimiter = FixedWindowRateLimiter;
+
+export type ToolQuotaConfig = {
+  defaultQuota: number;
+  toolQuotas?: Record<string, number>;
+  resetIntervalMs?: number;
+};
+
+/**
+ * Per-tool request quota manager. Tracks usage per session per tool
+ * and enforces configurable limits with periodic resets.
+ */
+export class ToolQuotaManager {
+  private readonly usage = new Map<string, { count: number; resetAt: number }>();
+  private readonly defaultQuota: number;
+  private readonly toolQuotas: Record<string, number>;
+  private readonly resetIntervalMs: number;
+
+  constructor(config: ToolQuotaConfig) {
+    this.defaultQuota = config.defaultQuota;
+    this.toolQuotas = config.toolQuotas ?? {};
+    this.resetIntervalMs = config.resetIntervalMs ?? 3_600_000; // 1 hour default
+  }
+
+  get size(): number {
+    return this.usage.size;
+  }
+
+  check(sessionId: string, toolName: string): boolean {
+    const key = `${sessionId}:${toolName}`;
+    const now = Date.now();
+    const quota = this.toolQuotas[toolName] ?? this.defaultQuota;
+    const entry = this.usage.get(key);
+
+    if (!entry || now >= entry.resetAt) {
+      this.pruneExpired(now);
+      this.usage.set(key, { count: 1, resetAt: now + this.resetIntervalMs });
+      return true;
+    }
+
+    if (entry.count >= quota) {
+      return false;
+    }
+
+    entry.count++;
+    return true;
+  }
+
+  reset(sessionId: string, toolName?: string): void {
+    if (toolName) {
+      this.usage.delete(`${sessionId}:${toolName}`);
+    } else {
+      for (const key of this.usage.keys()) {
+        if (key.startsWith(`${sessionId}:`)) {
+          this.usage.delete(key);
+        }
+      }
+    }
+  }
+
+  private pruneExpired(now: number): void {
+    for (const [key, entry] of this.usage) {
+      if (now >= entry.resetAt) {
+        this.usage.delete(key);
+      }
+    }
+  }
+}
+
 export type McpServerControlConfig = {
   enabled_tools?: string[];
   disabled_tools?: string[];
@@ -174,16 +349,35 @@ export function loadMcpControlPlaneConfig(cwd?: string): {
   return { runtime, project, user, trustedProject, projectHash };
 }
 
+function logConfigResolved(id: string, tier: string): void {
+  process.stderr.write(JSON.stringify({
+    event: "config_resolved",
+    server: id,
+    tier,
+    timestamp: new Date().toISOString(),
+  }) + "\n");
+}
+
 function pickServerConfig(
   all: { runtime: McpControlPlaneConfig | null; project: McpControlPlaneConfig | null; user: McpControlPlaneConfig | null },
   id: string
 ): { source: ResolvedMcpServerControl["source"]; cfg: McpServerControlConfig } {
   const fromRuntime = all.runtime?.mcp_servers?.[id];
-  if (fromRuntime) return { source: "runtime", cfg: fromRuntime };
+  if (fromRuntime) {
+    logConfigResolved(id, "runtime");
+    return { source: "runtime", cfg: fromRuntime };
+  }
   const fromProject = all.project?.mcp_servers?.[id];
-  if (fromProject) return { source: "project", cfg: fromProject };
+  if (fromProject) {
+    logConfigResolved(id, "project");
+    return { source: "project", cfg: fromProject };
+  }
   const fromUser = all.user?.mcp_servers?.[id];
-  if (fromUser) return { source: "user", cfg: fromUser };
+  if (fromUser) {
+    logConfigResolved(id, "user");
+    return { source: "user", cfg: fromUser };
+  }
+  logConfigResolved(id, "defaults");
   return { source: "defaults", cfg: {} };
 }
 
@@ -240,18 +434,40 @@ export function buildResolvedHttpHeaders(control: ResolvedMcpServerControl): Rec
   return out;
 }
 
-export function isToolEnabledByPolicy(control: ResolvedMcpServerControl, toolName: string): boolean {
-  if (control.project_scoped && !control.trusted_project) return false;
-
-  // Explicit deny always wins.
-  if (control.disabled_tools.includes(toolName)) return false;
-
-  // If enabled_tools is set, treat it as an allowlist.
-  if (Array.isArray(control.enabled_tools)) {
-    return control.enabled_tools.includes(toolName);
+export function isToolEnabledByPolicy(
+  control: ResolvedMcpServerControl,
+  toolName: string,
+  options?: { audit?: (entry: { action: string; scope: string; detail: string }) => void },
+): boolean {
+  if (control.project_scoped && !control.trusted_project) {
+    options?.audit?.({
+      action: "tool_denied",
+      scope: `${control.id}/${toolName}`,
+      detail: "project_scoped=true but trusted_project=false",
+    });
+    return false;
   }
 
-  // No explicit allowlist configured: allow by default.
+  if (control.disabled_tools.includes(toolName)) {
+    options?.audit?.({
+      action: "tool_denied",
+      scope: `${control.id}/${toolName}`,
+      detail: "explicitly disabled",
+    });
+    return false;
+  }
+
+  if (Array.isArray(control.enabled_tools)) {
+    if (!control.enabled_tools.includes(toolName)) {
+      options?.audit?.({
+        action: "tool_denied",
+        scope: `${control.id}/${toolName}`,
+        detail: "not in allowlist",
+      });
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -614,6 +830,9 @@ export class McpToolListCache {
   }
 
   private cachePath(key: string): string {
+    if (/[\/\\]/.test(key) || /\.\./.test(key)) {
+      throw new Error("invalid cache key: path traversal detected");
+    }
     return resolve(this.cacheDir(), `${key}.json`);
   }
 }
