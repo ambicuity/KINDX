@@ -12,6 +12,7 @@
  */
 
 import type { Store } from "./repository.js";
+import { buildOperationalStatus } from "./diagnostics.js";
 
 // =============================================================================
 // Types
@@ -101,6 +102,7 @@ export function buildCapabilityManifest(
 
   try {
     const status = store.getStatus();
+    const ops = buildOperationalStatus(store.db, store.dbPath, status.hasVectorIndex);
     manifest.collections = status.collections.map((c) => ({
       name: c.name,
       documents: c.documents,
@@ -111,7 +113,7 @@ export function buildCapabilityManifest(
         available: status.hasVectorIndex,
         state: status.ann?.state ?? "unknown",
       },
-      modelsReady: false,
+      modelsReady: ops.models_ready,
       encryption: {
         enabled: status.encryption?.encrypted ?? false,
         keyConfigured: status.encryption?.keyConfigured ?? false,
