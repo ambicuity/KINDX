@@ -213,8 +213,8 @@ describe("RBAC", () => {
         role: "viewer",
         allowedCollections: ["docs"],
       };
-      expect(() => rbac.enforce(id, "query", "docs")).not.toThrow();
-      expect(() => rbac.enforce(id, "query", "secret")).toThrow(rbac.RBACDeniedError);
+      expect(() => rbac.enforce(id, "query", undefined, "docs")).not.toThrow();
+      expect(() => rbac.enforce(id, "query", undefined, "secret")).toThrow(rbac.RBACDeniedError);
     });
 
     it("enforce throws RBACDeniedError on operation violation", () => {

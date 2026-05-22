@@ -220,8 +220,8 @@ describe("RBAC", () => {
         role: "viewer",
         allowedCollections: ["docs"],
       };
-      expect(() => rbac.enforce(id, "query", "docs")).not.toThrow();
-      expect(() => rbac.enforce(id, "query", "secret")).toThrow(rbac.RBACDeniedError);
+      expect(() => rbac.enforce(id, "query", undefined, "docs")).not.toThrow();
+      expect(() => rbac.enforce(id, "query", undefined, "secret")).toThrow(rbac.RBACDeniedError);
     });
 
     it("enforce throws RBACDeniedError on operation violation", () => {
@@ -295,6 +295,107 @@ describe("RBAC", () => {
       } finally {
         stderrSpy.mockRestore();
       }
+    });
+  });
+
+  describe("Index scoping", () => {
+    it("createTenant accepts allowedIndexes", () => {
+      const { tenant } = rbac.createTenant("bot", "Bot", "viewer", ["docs"], ["alpha"]);
+      expect(tenant.allowedIndexes).toEqual(["alpha"]);
+    });
+
+    it("createTenant defaults allowedIndexes to ['*'] for backward compat", () => {
+      const { tenant } = rbac.createTenant("bot", "Bot", "viewer", ["docs"]);
+      expect(tenant.allowedIndexes).toEqual(["*"]);
+    });
+
+    it("admin gets wildcard allowedIndexes", () => {
+      const { tenant } = rbac.createTenant("admin-bot", "Admin", "admin", [], []);
+      expect(tenant.allowedIndexes).toEqual(["*"]);
+    });
+
+    it("enforce rejects tenant for unpermitted index", () => {
+      const identity: rbac.ResolvedIdentity = {
+        tenantId: "bot",
+        role: "viewer",
+        allowedCollections: ["docs"],
+        allowedIndexes: ["alpha"],
+      };
+      expect(() => rbac.enforce(identity, "query", "beta"))
+        .toThrow("does not have access to index 'beta'");
+    });
+
+    it("enforce allows tenant for permitted index", () => {
+      const identity: rbac.ResolvedIdentity = {
+        tenantId: "bot",
+        role: "viewer",
+        allowedCollections: ["docs"],
+        allowedIndexes: ["alpha", "gamma"],
+      };
+      expect(() => rbac.enforce(identity, "query", "alpha")).not.toThrow();
+    });
+
+    it("enforce allows tenant without indexName param (backward compat)", () => {
+      const identity: rbac.ResolvedIdentity = {
+        tenantId: "bot",
+        role: "viewer",
+        allowedCollections: ["docs"],
+        allowedIndexes: ["alpha"],
+      };
+      expect(() => rbac.enforce(identity, "query")).not.toThrow();
+    });
+
+    it("wildcard allowedIndexes grants access to any index", () => {
+      const identity: rbac.ResolvedIdentity = {
+        tenantId: "bot",
+        role: "viewer",
+        allowedCollections: ["*"],
+        allowedIndexes: "*",
+      };
+      expect(() => rbac.enforce(identity, "query", "any-index")).not.toThrow();
+    });
+
+    it("resolveTokenToIdentity populates allowedIndexes", () => {
+      rbac.createTenant("bot", "Bot", "viewer", ["docs"], ["alpha", "beta"]);
+      const t = rbac.getTenant("bot");
+      expect(t).not.toBeNull();
+      expect(t!.allowedIndexes).toEqual(["alpha", "beta"]);
+    });
+
+    it("grantIndexes adds indexes to tenant", () => {
+      rbac.createTenant("bot", "Bot", "viewer", ["docs"], []);
+      expect(rbac.grantIndexes("bot", ["alpha", "beta"])).toBe(true);
+      const t = rbac.getTenant("bot");
+      expect(t!.allowedIndexes).toContain("alpha");
+      expect(t!.allowedIndexes).toContain("beta");
+    });
+
+    it("revokeIndexes removes indexes from tenant", () => {
+      rbac.createTenant("bot", "Bot", "viewer", ["docs"], ["alpha", "beta"]);
+      expect(rbac.revokeIndexes("bot", ["alpha"])).toBe(true);
+      const t = rbac.getTenant("bot");
+      expect(t!.allowedIndexes).toEqual(["beta"]);
+    });
+
+    it("grantIndexes with wildcard returns true (no-op)", () => {
+      rbac.createTenant("bot", "Bot", "viewer", ["docs"], ["*"]);
+      expect(rbac.grantIndexes("bot", ["alpha"])).toBe(true);
+      const t = rbac.getTenant("bot");
+      expect(t!.allowedIndexes).toEqual(["*"]);
+    });
+
+    it("new RBAC operations are permitted by correct roles", () => {
+      const adminIdentity: rbac.ResolvedIdentity = { tenantId: "a", role: "admin", allowedCollections: "*", allowedIndexes: "*" };
+      const editorIdentity: rbac.ResolvedIdentity = { tenantId: "e", role: "editor", allowedCollections: "*", allowedIndexes: "*" };
+      const viewerIdentity: rbac.ResolvedIdentity = { tenantId: "v", role: "viewer", allowedCollections: "*", allowedIndexes: "*" };
+
+      expect(() => rbac.enforce(adminIdentity, "index_list")).not.toThrow();
+      expect(() => rbac.enforce(editorIdentity, "index_list")).not.toThrow();
+      expect(() => rbac.enforce(viewerIdentity, "index_list")).not.toThrow();
+
+      expect(() => rbac.enforce(adminIdentity, "index_create")).not.toThrow();
+      expect(() => rbac.enforce(editorIdentity, "index_create")).toThrow();
+      expect(() => rbac.enforce(viewerIdentity, "index_create")).toThrow();
     });
   });
 
