@@ -1297,6 +1297,22 @@ export class LlamaCpp implements LLM {
   }
 
   async generate(prompt: string, options: GenerateOptions = {}): Promise<GenerateResult | null> {
+    // Sanitize prompt input
+    const maxPromptLength = (() => {
+      const raw = parseInt(process.env.KINDX_MAX_PROMPT_LENGTH || "", 10);
+      return Number.isFinite(raw) && raw > 0 ? raw : 32768;
+    })();
+    if (prompt.length > maxPromptLength) {
+      process.stderr.write(
+        `[inference] prompt truncated from ${prompt.length} to ${maxPromptLength} chars\n`
+      );
+      prompt = prompt.slice(0, maxPromptLength);
+    }
+    // Strip null bytes that could cause LLM inference issues
+    if (prompt.includes("\x00")) {
+      prompt = prompt.replaceAll("\x00", "");
+    }
+
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
