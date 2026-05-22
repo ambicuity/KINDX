@@ -35,6 +35,8 @@ export type MemoryRecord = {
   searchText: string | null;
   /** ISO-8601 expiration timestamp. NULL means never expires. */
   expiresAt: string | null;
+  /** TTL in seconds. When set, expires_at is refreshed on access. */
+  ttlSeconds: number | null;
 };
 
 export type MemorySearchResult = {
@@ -265,6 +267,7 @@ function toMemoryRecord(row: any): MemoryRecord {
     supersededAt: row.superseded_at ?? null,
     searchText: row.search_text ?? null,
     expiresAt: row.expires_at ?? null,
+    ttlSeconds: row.ttl_seconds == null ? null : Number(row.ttl_seconds),
   };
 }
 
@@ -338,7 +341,12 @@ function incrementCounters(db: Database, ids: number[]): void {
     SET appeared_count = appeared_count + 1,
         accessed_count = accessed_count + 1,
         last_appeared_at = ?,
-        last_accessed_at = ?
+        last_accessed_at = ?,
+        expires_at = CASE
+          WHEN ttl_seconds IS NOT NULL
+          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          ELSE expires_at
+        END
     WHERE id IN (${placeholders})
   `).run(now, now, ...ids);
 }
@@ -399,6 +407,7 @@ function insertNewMemory(db: Database, params: {
   tags: string[];
   vector?: number[] | Float32Array;
   expiresAt?: string | null;
+  ttlSeconds?: number | null;
 }): number {
   const now = nowIso();
   const run = db.prepare(`
@@ -406,8 +415,8 @@ function insertNewMemory(db: Database, params: {
       scope, key, value, confidence, source,
       appeared_count, accessed_count,
       created_at, last_appeared_at, last_accessed_at,
-      search_text, expires_at
-    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?, ?)
+      search_text, expires_at, ttl_seconds
+    ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, NULL, ?, ?, ?)
   `).run(
     params.scope,
     params.key,
@@ -418,6 +427,7 @@ function insertNewMemory(db: Database, params: {
     now,
     params.searchText,
     params.expiresAt ?? null,
+    params.ttlSeconds ?? null,
   );
   const memoryId = Number(run.lastInsertRowid);
   ensureTags(db, memoryId, params.tags);
@@ -506,6 +516,11 @@ export function initializeMemorySchema(db: Database): void {
   const colNames = new Set((db.prepare(`PRAGMA table_info(memories)`).all() as { name: string }[]).map(c => c.name));
   if (!colNames.has("expires_at")) {
     db.exec(`ALTER TABLE memories ADD COLUMN expires_at TEXT`);
+  }
+
+  // Migration: add ttl_seconds column for TTL refresh (backward-compatible)
+  if (!colNames.has("ttl_seconds")) {
+    db.exec(`ALTER TABLE memories ADD COLUMN ttl_seconds INTEGER`);
   }
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_memories_scope_key_active ON memories(scope, key, superseded_by)`);
@@ -681,15 +696,19 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
     return withTransaction(db, () => {
       const mergedSource = mergeSource(exact.source, source);
       const now = nowIso();
+      const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
       db.prepare(`
         UPDATE memories
         SET source = ?,
             confidence = ?,
             appeared_count = ?,
             last_appeared_at = ?,
-            search_text = ?
+            search_text = ?,
+            expires_at = CASE WHEN ? IS NOT NULL THEN datetime('now', '+' || ? || ' seconds') ELSE expires_at END,
+            ttl_seconds = CASE WHEN ? IS NOT NULL THEN ? ELSE ttl_seconds END
         WHERE id = ?
-      `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText, exact.id);
+      `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText,
+        ttlSeconds, ttlSeconds, ttlSeconds, ttlSeconds, exact.id);
       ensureTags(db, Number(exact.id), tags);
 
       const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(exact.id);
@@ -779,6 +798,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
   // 4) New insert
   vector = vector ?? await computeMemoryVector(searchText, input.precomputedVector);
   const expiresAt = computeExpiresAt(input.ttl);
+  const ttlSeconds = input.ttl && Number.isFinite(input.ttl) && input.ttl > 0 ? Math.floor(input.ttl) : null;
   return withTransaction(db, () => {
     const newId = insertNewMemory(db, {
       scope,
@@ -790,6 +810,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
       tags,
       vector,
       expiresAt,
+      ttlSeconds,
     });
 
     const row = db.prepare(`SELECT * FROM memories WHERE id = ?`).get(newId);
@@ -998,7 +1019,12 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
   const run = db.prepare(`
     UPDATE memories
     SET accessed_count = accessed_count + 1,
-        last_accessed_at = ?
+        last_accessed_at = ?,
+        expires_at = CASE
+          WHEN ttl_seconds IS NOT NULL
+          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          ELSE expires_at
+        END
     WHERE id = ? AND scope = ?
   `).run(nowIso(), memoryId, scope);
   return Number(run.changes) > 0;

@@ -451,4 +451,60 @@ describe("memory subsystem", () => {
     const bias = computeFeedbackBias(db, "s1", [memId]);
     expect(bias.get(memId)).toBe(1.0);
   });
+
+  test("TTL refreshed on textSearchMemory access", async () => {
+    const db = createMemoryDb();
+
+    const ttlSeconds = 3600;
+    const futureExpiry = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, ?)
+    `).run("s1", "test:key", "searchable", "test:key searchable", futureExpiry, ttlSeconds);
+
+    await new Promise(r => setTimeout(r, 50));
+
+    textSearchMemory(db, "s1", "searchable", 5);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE scope = 's1' AND key = 'test:key'`).get() as { expires_at: string };
+    const afterTime = new Date(after.expires_at).getTime();
+    expect(afterTime).toBeGreaterThan(new Date(futureExpiry).getTime());
+  });
+
+  test("TTL not refreshed when ttl_seconds is NULL", async () => {
+    const db = createMemoryDb();
+
+    const futureExpiry = new Date(Date.now() + 3600_000).toISOString();
+    db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, NULL)
+    `).run("s1", "test:key", "searchable", "test:key searchable", futureExpiry);
+
+    textSearchMemory(db, "s1", "searchable", 5);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE scope = 's1' AND key = 'test:key'`).get() as { expires_at: string };
+    expect(after.expires_at).toBe(futureExpiry);
+  });
+
+  test("markMemoryAccessed refreshes TTL when ttl_seconds is set", async () => {
+    const db = createMemoryDb();
+
+    const ttlSeconds = 3600;
+    const futureExpiry = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const insert = db.prepare(`
+      INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count,
+        created_at, last_appeared_at, search_text, expires_at, ttl_seconds)
+      VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?, ?, ?)
+    `).run("s1", "test:key", "value", "test:key value", futureExpiry, ttlSeconds);
+    const memId = Number(insert.lastInsertRowid);
+
+    await new Promise(r => setTimeout(r, 50));
+    markMemoryAccessed(db, "s1", memId);
+
+    const after = db.prepare(`SELECT expires_at FROM memories WHERE id = ?`).get(memId) as { expires_at: string };
+    const afterTime = new Date(after.expires_at).getTime();
+    expect(afterTime).toBeGreaterThan(new Date(futureExpiry).getTime());
+  });
 });
