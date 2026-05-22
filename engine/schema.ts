@@ -201,12 +201,38 @@ export function initializeCoreSchema(db: Database): void {
   `);
   setCapability.run("ann", "centroid-v1", now);
   setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
-  setCapability.run("extractors", "native-text+pdf-docx-adapter-v1", now);
+  setCapability.run("extractors", "native-text+pdf-docx-adapter-v1+vision-model+csv-json", now);
 
   // Stamp schema version so future startups skip the v0 migration window.
   if (currentVersion < KINDX_SCHEMA_VERSION) {
     setUserVersion(db, KINDX_SCHEMA_VERSION);
   }
+}
+
+export function storeDocumentSchema(
+  db: Database,
+  collection: string,
+  path: string,
+  schema: Record<string, string>
+): void {
+  const schemaJson = JSON.stringify(schema);
+  const now = new Date().toISOString();
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS document_schemas (
+      collection TEXT NOT NULL,
+      path TEXT NOT NULL,
+      schema_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (collection, path)
+    )
+  `);
+
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO document_schemas (collection, path, schema_json, updated_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  stmt.run(collection, path, schemaJson, now);
 }
 
 /**
