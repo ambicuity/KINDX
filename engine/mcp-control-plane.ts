@@ -5,6 +5,43 @@ import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
+export type RateLimiterConfig = {
+  maxRequests: number;
+  windowMs: number;
+};
+
+export class SessionRateLimiter {
+  private readonly windows = new Map<string, { count: number; resetAt: number }>();
+  private readonly maxRequests: number;
+  private readonly windowMs: number;
+
+  constructor(config: RateLimiterConfig) {
+    this.maxRequests = config.maxRequests;
+    this.windowMs = config.windowMs;
+  }
+
+  check(sessionId: string): boolean {
+    const now = Date.now();
+    const window = this.windows.get(sessionId);
+
+    if (!window || now >= window.resetAt) {
+      this.windows.set(sessionId, { count: 1, resetAt: now + this.windowMs });
+      return true;
+    }
+
+    if (window.count >= this.maxRequests) {
+      return false;
+    }
+
+    window.count++;
+    return true;
+  }
+
+  reset(sessionId: string): void {
+    this.windows.delete(sessionId);
+  }
+}
+
 export type McpServerControlConfig = {
   enabled_tools?: string[];
   disabled_tools?: string[];

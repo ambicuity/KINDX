@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { McpToolListCache, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { McpToolListCache, SessionRateLimiter, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -222,5 +222,35 @@ describe("pickServerConfig config resolution logging", () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+describe("SessionRateLimiter", () => {
+  test("allows requests under limit", () => {
+    const limiter = new SessionRateLimiter({ maxRequests: 10, windowMs: 1000 });
+    expect(limiter.check("session1")).toBe(true);
+    expect(limiter.check("session1")).toBe(true);
+  });
+
+  test("blocks requests over limit", () => {
+    const limiter = new SessionRateLimiter({ maxRequests: 2, windowMs: 1000 });
+    expect(limiter.check("session1")).toBe(true);
+    expect(limiter.check("session1")).toBe(true);
+    expect(limiter.check("session1")).toBe(false);
+  });
+
+  test("tracks sessions independently", () => {
+    const limiter = new SessionRateLimiter({ maxRequests: 1, windowMs: 1000 });
+    expect(limiter.check("session1")).toBe(true);
+    expect(limiter.check("session2")).toBe(true);
+    expect(limiter.check("session1")).toBe(false);
+  });
+
+  test("resets after window expires", async () => {
+    const limiter = new SessionRateLimiter({ maxRequests: 1, windowMs: 100 });
+    expect(limiter.check("session1")).toBe(true);
+    expect(limiter.check("session1")).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(limiter.check("session1")).toBe(true);
   });
 });
