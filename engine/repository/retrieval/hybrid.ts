@@ -7,7 +7,9 @@ import type {
   ExpandedQuery,
   RankedResult,
   HybridQueryExplain,
+  HybridQueryResult,
 } from "../types.js";
+export type { HybridQueryResult } from "../types.js";
 import {
   reciprocalRankFusion,
   buildRrfTrace,
@@ -30,6 +32,38 @@ import {
   STRONG_SIGNAL_MIN_SCORE,
   STRONG_SIGNAL_MIN_GAP,
 } from "../../repository.js";
+
+function detectContentType(body: string, filepath: string): 'text' | 'image' | 'csv' | 'json' {
+  const ext = filepath.split('.').pop()?.toLowerCase() || '';
+
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif'].includes(ext)) {
+    return 'image';
+  }
+  if (ext === 'csv') return 'csv';
+  if (ext === 'json') return 'json';
+
+  if (body.includes('Schema:') && body.includes('Rows ')) return 'csv';
+  if (body.includes('Schema:') && body.includes('Items ')) return 'json';
+
+  return 'text';
+}
+
+function extractSchemaFromBody(body: string): Record<string, string> | undefined {
+  const schemaMatch = body.match(/Schema:\s*([^\n]+)/);
+  if (!schemaMatch) return undefined;
+
+  const schemaStr = schemaMatch[1] || "";
+  const schema: Record<string, string> = {};
+
+  for (const pair of schemaStr.split(",")) {
+    const [key, type] = pair.split(":").map(s => s.trim());
+    if (key && type) {
+      schema[key] = type;
+    }
+  }
+
+  return Object.keys(schema).length > 0 ? schema : undefined;
+}
 
 /**
  * Optional progress hooks for search orchestration.
@@ -120,19 +154,6 @@ export interface HybridQueryOptions {
   explain?: boolean;        // include backend/RRF/rerank score traces
   hooks?: SearchHooks;
   signal?: AbortSignal;
-}
-
-export interface HybridQueryResult {
-  file: string;             // internal filepath (kindx://collection/path)
-  displayPath: string;
-  title: string;
-  body: string;             // full document body (for snippet extraction)
-  bestChunk: string;        // best chunk text
-  bestChunkPos: number;     // char offset of best chunk in body
-  score: number;            // blended score (full precision)
-  context: string | null;   // user-set context
-  docid: string;            // content hash prefix (6 chars)
-  explain?: HybridQueryExplain;
 }
 
 /**
@@ -375,6 +396,8 @@ export async function hybridQuery(
       blendedScore,
     } : undefined;
 
+    const contentType = detectContentType(candidate?.body || "", r.file);
+
     return {
       file: r.file,
       displayPath: candidate?.displayPath || "",
@@ -385,6 +408,12 @@ export async function hybridQuery(
       score: blendedScore,
       context: store.getContextForFile(r.file),
       docid: docidMap.get(r.file) || "",
+      contentType,
+      sourceMetadata: {
+        originalFile: r.file,
+        imageDescription: contentType === 'image',
+        schemaInfo: contentType === 'csv' || contentType === 'json' ? extractSchemaFromBody(candidate?.body || "") : undefined,
+      },
       ...(explainData ? { explain: explainData } : {}),
     };
   }).sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));

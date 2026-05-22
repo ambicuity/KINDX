@@ -84,6 +84,25 @@ export type HybridQueryExplain = {
   blendedScore: number;
 };
 
+export type HybridQueryResult = {
+  file: string;
+  displayPath: string;
+  title: string;
+  body: string;
+  bestChunk: string;
+  bestChunkPos: number;
+  score: number;
+  context: string | null;
+  docid: string;
+  contentType?: 'text' | 'image' | 'csv' | 'json';
+  sourceMetadata?: {
+    originalFile?: string;
+    imageDescription?: boolean;
+    schemaInfo?: Record<string, string>;
+  };
+  explain?: HybridQueryExplain;
+};
+
 /**
  * Error result when document is not found
  */
