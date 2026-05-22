@@ -427,6 +427,13 @@ function insertNewMemory(db: Database, params: {
   ttlSeconds?: number | null;
 }): number {
   const now = nowIso();
+
+  // Eviction: enforce scope limits before inserting
+  const maxMemories = getScopeMemoryLimit(db, params.scope);
+  if (maxMemories !== null) {
+    evictIfNeeded(db, params.scope, maxMemories - 1);
+  }
+
   const run = db.prepare(`
     INSERT INTO memories (
       scope, key, value, confidence, source,
@@ -671,6 +678,69 @@ export function getFeedbackForScope(db: Database, scope: string): FeedbackSummar
     neutral: Number(r.neutral),
     total: Number(r.total),
   }));
+}
+
+export function initializeMemoryScopeConfigSchema(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_scope_config (
+      scope TEXT PRIMARY KEY,
+      max_memories INTEGER,
+      eviction_policy TEXT NOT NULL DEFAULT 'lru',
+      updated_at TEXT NOT NULL
+    )
+  `);
+}
+
+export function setScopeMemoryLimit(db: Database, scope: string, maxMemories: number): void {
+  const normalizedScope = normalizeScope(scope);
+  const now = nowIso();
+  db.prepare(`
+    INSERT OR REPLACE INTO memory_scope_config (scope, max_memories, eviction_policy, updated_at)
+    VALUES (?, ?, 'lru', ?)
+  `).run(normalizedScope, maxMemories, now);
+}
+
+export function getScopeMemoryLimit(db: Database, scope: string): number | null {
+  const normalizedScope = normalizeScope(scope);
+  try {
+    const row = db.prepare(
+      `SELECT max_memories FROM memory_scope_config WHERE scope = ?`
+    ).get(normalizedScope) as { max_memories: number } | undefined;
+    if (row && Number(row.max_memories) > 0) return Number(row.max_memories);
+  } catch {
+    // Table may not exist yet
+  }
+
+  const envLimit = Number(process.env.KINDX_MEMORY_MAX_PER_SCOPE);
+  return Number.isFinite(envLimit) && envLimit > 0 ? Math.floor(envLimit) : null;
+}
+
+export function evictIfNeeded(db: Database, scope: string, maxMemories: number): number {
+  const normalizedScope = normalizeScope(scope);
+  const active = db.prepare(`
+    SELECT COUNT(*) AS cnt FROM memories
+    WHERE scope = ? AND superseded_by IS NULL
+      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  `).get(normalizedScope) as { cnt: number };
+
+  const count = Number(active.cnt);
+  if (count <= maxMemories) return 0;
+
+  const toEvict = count - maxMemories;
+  const oldest = db.prepare(`
+    SELECT id FROM memories
+    WHERE scope = ? AND superseded_by IS NULL
+      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    ORDER BY last_accessed_at ASC NULLS FIRST
+    LIMIT ?
+  `).all(normalizedScope, toEvict) as { id: number }[];
+
+  let evicted = 0;
+  for (const row of oldest) {
+    const deleted = deleteMemory(db, normalizedScope, Number(row.id));
+    if (deleted) evicted++;
+  }
+  return evicted;
 }
 
 async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<number[] | undefined> {

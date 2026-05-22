@@ -16,6 +16,7 @@ import {
   recordFeedback,
   getFeedbackForScope,
   computeFeedbackBias,
+  evictIfNeeded,
 } from "../engine/memory.js";
 
 const openDbs: Database[] = [];
@@ -586,5 +587,52 @@ describe("memory subsystem", () => {
     const after = db.prepare(`SELECT expires_at FROM memories WHERE id = ?`).get(memId) as { expires_at: string };
     const afterTime = new Date(after.expires_at).getTime();
     expect(afterTime).toBeGreaterThan(new Date(futureExpiry).getTime());
+  });
+
+  test("evictIfNeeded returns 0 when under limit", async () => {
+    const db = createMemoryDb();
+    await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", precomputedVector: [1, 0] });
+
+    const evicted = evictIfNeeded(db, "s1", 10);
+    expect(evicted).toBe(0);
+  });
+
+  test("eviction removes oldest accessed memory when scope exceeds cap", async () => {
+    const db = createMemoryDb();
+
+    const mem1 = await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", precomputedVector: [1, 0] });
+    const mem2 = await upsertMemory(db, { scope: "s1", key: "k:b", value: "v2", precomputedVector: [0, 1] });
+    const mem3 = await upsertMemory(db, { scope: "s1", key: "k:c", value: "v3", precomputedVector: [1, 1] });
+
+    // Mark mem1 and mem2 as accessed (they get last_accessed_at updated)
+    markMemoryAccessed(db, "s1", mem1.id);
+    markMemoryAccessed(db, "s1", mem2.id);
+    // mem3 never accessed (last_accessed_at is NULL) — should be evicted first
+
+    // Cap at 2: should evict mem3
+    const evicted = evictIfNeeded(db, "s1", 2);
+    expect(evicted).toBe(1);
+
+    const remaining = db.prepare(
+      `SELECT id FROM memories WHERE scope = 's1' AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`
+    ).all() as { id: number }[];
+    const remainingIds = remaining.map(r => r.id);
+    expect(remainingIds).toContain(mem1.id);
+    expect(remainingIds).toContain(mem2.id);
+    expect(remainingIds).not.toContain(mem3.id);
+  });
+
+  test("eviction cleans up tags and embeddings", async () => {
+    const db = createMemoryDb();
+    const mem1 = await upsertMemory(db, { scope: "s1", key: "k:a", value: "v1", tags: ["t1"], precomputedVector: [1, 0] });
+
+    const evicted = evictIfNeeded(db, "s1", 0);
+    expect(evicted).toBe(1);
+
+    const tags = db.prepare(`SELECT * FROM memory_tags WHERE memory_id = ?`).all(mem1.id);
+    expect(tags.length).toBe(0);
+
+    const embeddings = db.prepare(`SELECT * FROM memory_embeddings WHERE memory_id = ?`).all(mem1.id);
+    expect(embeddings.length).toBe(0);
   });
 });
