@@ -1,8 +1,17 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi, beforeEach } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ingestFile } from "../engine/ingestion.js";
+
+// Create a shared mock instance
+const mockDescribeImage = vi.fn().mockResolvedValue("A test image description");
+const mockLLMInstance = { describeImage: mockDescribeImage };
+
+// Mock inference module for image tests
+vi.mock("../engine/inference.js", () => ({
+  getDefaultLLM: vi.fn(() => mockLLMInstance),
+}));
 
 describe("ingestion adapter", () => {
   test("ingests UTF-8 text/code natively", async () => {
@@ -135,6 +144,74 @@ describe("ingestion adapter", () => {
       expect(out.warnings.some((w) => w.startsWith("extractor_unsupported_extension:"))).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ingests PNG files using vision model", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "test.png");
+      // Write minimal PNG header (8 bytes) + some data
+      await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]));
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("image");
+      expect(out.metadata.extractor).toBe("vision_model");
+      expect(out.text).toBe("A test image description");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ingests JPG files using vision model", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "test.jpg");
+      // Write minimal JPEG header (FF D8 FF)
+      await writeFile(path, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00]));
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("image");
+      expect(out.metadata.extractor).toBe("vision_model");
+      expect(out.text).toBe("A test image description");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("handles vision model returning no description", async () => {
+    mockDescribeImage.mockResolvedValue("Image description unavailable");
+
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "nodescription.png");
+      await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("image");
+      expect(out.metadata.extractor).toBe("vision_model_failed");
+      expect(out.text).toBe("");
+      expect(out.warnings).toContain("extractor_failed:vision_model_no_description");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      mockDescribeImage.mockResolvedValue("A test image description");
+    }
+  });
+
+  test("handles vision model throwing error", async () => {
+    mockDescribeImage.mockRejectedValue(new Error("Model crashed"));
+
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "error.png");
+      await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("image");
+      expect(out.metadata.extractor).toBe("vision_model_error");
+      expect(out.text).toBe("");
+      expect(out.warnings[0]).toMatch(/^extractor_failed:vision_model_error:/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      mockDescribeImage.mockResolvedValue("A test image description");
     }
   });
 });
