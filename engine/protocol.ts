@@ -969,11 +969,19 @@ Intent-aware lex (C++ performance, not sports):
 
       let results;
       if (indexes && indexes.length > 0) {
+        const identity = requestIdentityScope.getStore();
         const primaryQ = subSearches.find((s: any) => s.type === 'lex')?.query
           || subSearches.find((s: any) => s.type === 'vec')?.query
           || subSearches[0]?.query || "";
         const { federatedQuery } = await import("./repository.js");
-        const fedResults = federatedQuery(indexes, primaryQ, { limit });
+        const { enforce } = await import("./rbac.js");
+        // RBAC filter: only query indexes the identity has access to
+        const authorizedIndexes = indexes.filter((idx: string) => {
+          if (!identity) return true;
+          try { enforce(identity, "query", idx); return true; }
+          catch { return false; }
+        });
+        const fedResults = federatedQuery(authorizedIndexes, primaryQ, { limit });
 
         results = {
           results: fedResults.matches.map(m => ({
@@ -1203,13 +1211,20 @@ Intent-aware lex (C++ performance, not sports):
       // If not found in current index, try named indexes
       if ("error" in result && indexes && indexes.length > 0) {
         const { createStoreForIndex } = await import("./repository.js");
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
         for (const idxName of indexes) {
-          const idxStore = createStoreForIndex(idxName);
-          const idxDoc = idxStore.findDocument(lookup, { includeBody: true });
-          if (idxDoc && !("error" in idxDoc)) {
-            result = idxDoc as any;
-            break;
-          }
+          try {
+            if (identity) enforce(identity, "get", idxName);
+            const idxStore = createStoreForIndex(idxName);
+            try {
+              const idxDoc = idxStore.findDocument(lookup, { includeBody: true });
+              if (idxDoc && !("error" in idxDoc)) {
+                result = idxDoc as any;
+                break;
+              }
+            } finally { idxStore.close(); }
+          } catch { continue; }
         }
       }
 
@@ -1295,17 +1310,24 @@ Intent-aware lex (C++ performance, not sports):
       if (indexes && indexes.length > 0) {
         const seenFiles = new Set(docs.map((d: any) => d.doc?.displayPath));
         const { createStoreForIndex } = await import("./repository.js");
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
         for (const idxName of indexes) {
-          const idxStore = createStoreForIndex(idxName);
-          const idxResult = idxStore.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
-          for (const d of idxResult.docs) {
-            const path = d.doc?.displayPath;
-            if (path && !seenFiles.has(path)) {
-              seenFiles.add(path);
-              docs.push(d);
-            }
-          }
-          errors.push(...idxResult.errors);
+          try {
+            if (identity) enforce(identity, "multi_get", idxName);
+            const idxStore = createStoreForIndex(idxName);
+            try {
+              const idxResult = idxStore.findDocuments(pattern, { includeBody: true, maxBytes: maxBytes || DEFAULT_MULTI_GET_MAX_BYTES });
+              for (const d of idxResult.docs) {
+                const path = d.doc?.displayPath;
+                if (path && !seenFiles.has(path)) {
+                  seenFiles.add(path);
+                  docs.push(d);
+                }
+              }
+              errors.push(...idxResult.errors);
+            } finally { idxStore.close(); }
+          } catch { continue; }
         }
       }
 
@@ -1791,6 +1813,9 @@ Intent-aware lex (C++ performance, not sports):
     },
     async () => {
       try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_list");
         const { ensureDefaultIndexRegistered, listIndexes, getDefaultIndexName } = await import("./index-manager.js");
         ensureDefaultIndexRegistered();
         const indexes = listIndexes();
@@ -1832,6 +1857,9 @@ Intent-aware lex (C++ performance, not sports):
     },
     async ({ name, description }: any) => {
       try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_create");
         const { registerIndex } = await import("./index-manager.js");
         const { getDefaultDbPath } = await import("./repository/paths.js");
         const { openDatabase } = await import("./runtime.js");
@@ -1872,6 +1900,9 @@ Intent-aware lex (C++ performance, not sports):
     },
     async ({ name, force }: any) => {
       try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_delete");
         if (!force) {
           return {
             content: [{ type: "text", text: `Deletion of index '${name}' requires force=true to confirm.` }],
@@ -1926,6 +1957,9 @@ Intent-aware lex (C++ performance, not sports):
     },
     async ({ collection, from_index, to_index }: any) => {
       try {
+        const { enforce } = await import("./rbac.js");
+        const identity = requestIdentityScope.getStore();
+        if (identity) enforce(identity, "index_migrate");
         const { getDefaultDbPath } = await import("./repository/paths.js");
         const { openDatabase } = await import("./runtime.js");
         const srcDbPath = getDefaultDbPath(from_index);

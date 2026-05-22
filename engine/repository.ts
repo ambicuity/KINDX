@@ -518,16 +518,20 @@ function runIndexQuery(
   limit: number = 10,
 ): { matches: Array<{ docid: string; displayPath: string; title?: string; score: number; context?: string; snippet?: string }> } {
   const store = createStoreForIndex(indexName);
-  const ftsMatches = store.searchFTS(queryText, limit * 2);
-  const matches = ftsMatches.slice(0, limit).map(m => ({
-    docid: m.docid,
-    displayPath: m.displayPath,
-    title: m.title || "",
-    score: m.score,
-    context: m.context || "",
-    snippet: m.body || "",
-  }));
-  return { matches };
+  try {
+    const ftsMatches = store.searchFTS(queryText, limit * 2);
+    const matches = ftsMatches.slice(0, limit).map(m => ({
+      docid: m.docid,
+      displayPath: m.displayPath,
+      title: m.title || "",
+      score: m.score,
+      context: m.context || "",
+      snippet: m.body || "",
+    }));
+    return { matches };
+  } finally {
+    store.close();
+  }
 }
 
 export function federatedQuery(
