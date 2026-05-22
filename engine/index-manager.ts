@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import YAML from "yaml";
 import { atomicWriteFile } from "./utils/atomic-write.js";
+import { quietWarn, errString } from "./utils/quiet-warn.js";
 
 export interface IndexEntry {
   created_at: string;
@@ -66,7 +67,8 @@ export function loadRegistry(): IndexRegistry {
     _cachedRegistry = registry;
     _lastRegistryMtime = stat.mtimeMs;
     return registry;
-  } catch {
+  } catch (e) {
+    quietWarn("index_manager.load_registry_failed", { err: errString(e) });
     return defaultRegistry();
   }
 }
@@ -76,7 +78,7 @@ export function saveRegistry(registry: IndexRegistry): void {
     version: registry.version,
     default: registry.default,
     indexes: registry.indexes,
-  });
+  }, { indent: 2, lineWidth: 0 });
   atomicWriteFile(getRegistryPath(), content);
   const stat = statSync(getRegistryPath());
   _cachedRegistry = registry;
@@ -89,8 +91,9 @@ export function getDefaultIndexName(): string {
 
 export function ensureDefaultIndexRegistered(): void {
   const registry = loadRegistry();
-  if (!registry.indexes["index"]) {
-    registry.indexes["index"] = {
+  const defaultName = registry.default;
+  if (!registry.indexes[defaultName]) {
+    registry.indexes[defaultName] = {
       created_at: new Date().toISOString(),
       description: "Default index",
     };
