@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { buildHnswIndex, searchHnsw, persistHnswIndex } from "../engine/sharding.js";
 import type { HnswIndex, HnswNode } from "../engine/sharding.js";
+import { openDatabase, loadSqliteVec } from "../engine/runtime.js";
+import type { Database } from "../engine/runtime.js";
 
 describe("HNSW Index", () => {
   it("should build HNSW index from vectors", () => {
@@ -102,5 +104,81 @@ describe("HNSW Index", () => {
     const query = new Float32Array([1, 0, 0]);
     const results = searchHnsw(index, query, 2);
     expect(results).toHaveLength(0);
+  });
+
+  it("should persist and round-trip HNSW index through real SQLite", () => {
+    const db: Database = openDatabase(":memory:");
+    try {
+      loadSqliteVec(db);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ann_hnsw_nodes (
+          id INTEGER PRIMARY KEY,
+          level INTEGER NOT NULL,
+          neighbor_ids TEXT NOT NULL,
+          vector_id TEXT NOT NULL
+        )
+      `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ann_hnsw_edges (
+          node_id INTEGER NOT NULL,
+          neighbor_id INTEGER NOT NULL,
+          level INTEGER NOT NULL,
+          PRIMARY KEY (node_id, neighbor_id, level)
+        )
+      `);
+
+      const vectors = [
+        new Float32Array([1, 0, 0]),
+        new Float32Array([0, 1, 0]),
+        new Float32Array([0, 0, 1]),
+        new Float32Array([0.7, 0.7, 0]),
+      ];
+      const index = buildHnswIndex(vectors, 3, { M: 2, ef: 4 });
+      const hashSeqs = ["doc1_0", "doc1_1", "doc1_2", "doc1_3"];
+
+      persistHnswIndex(db, index, hashSeqs);
+
+      const persistedNodes = db.prepare(`SELECT id, level, neighbor_ids, vector_id FROM ann_hnsw_nodes ORDER BY id`).all() as Array<{
+        id: number;
+        level: number;
+        neighbor_ids: string;
+        vector_id: string;
+      }>;
+      expect(persistedNodes).toHaveLength(index.nodes.length);
+      for (let i = 0; i < index.nodes.length; i++) {
+        expect(persistedNodes[i].id).toBe(index.nodes[i].id);
+        expect(persistedNodes[i].level).toBe(index.nodes[i].level);
+        expect(JSON.parse(persistedNodes[i].neighbor_ids)).toEqual(index.nodes[i].neighbors);
+        expect(persistedNodes[i].vector_id).toBe(hashSeqs[i]);
+      }
+
+      const persistedEdges = db.prepare(`SELECT node_id, neighbor_id, level FROM ann_hnsw_edges`).all() as Array<{
+        node_id: number;
+        neighbor_id: number;
+        level: number;
+      }>;
+      expect(persistedEdges.length).toBeGreaterThan(0);
+
+      const reconstructedNodes: HnswNode[] = persistedNodes.map((row) => ({
+        id: row.id,
+        neighbors: JSON.parse(row.neighbor_ids) as number[],
+        level: row.level,
+      }));
+      const reconstructedIndex: HnswIndex = {
+        nodes: reconstructedNodes,
+        vectors: index.vectors,
+        dimensions: 3,
+        entryPoint: 0,
+        M: 2,
+        ef: 4,
+      };
+
+      const query = new Float32Array([0.9, 0.1, 0]);
+      const results = searchHnsw(reconstructedIndex, query, 2);
+      expect(results).toHaveLength(2);
+      expect(results[0].id).toBe(0);
+    } finally {
+      db.close();
+    }
   });
 });

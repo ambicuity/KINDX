@@ -1321,7 +1321,7 @@ export function buildHnswIndex(
   }
 
   for (let i = 1; i < vectors.length; i++) {
-    const level = Math.floor(-Math.log(Math.random()) * (1 / Math.log(M)));
+    const level = Math.floor(-Math.log(Math.max(0.0001, Math.random())) * (1 / Math.log(M)));
     const node: HnswNode = { id: i, neighbors: [], level };
 
     const nearest = findNearest(nodes, vectors, vectors[i]!, Math.min(M, i));
@@ -1397,6 +1397,10 @@ export function persistHnswIndex(
   }
 }
 
+// NOTE: This is a flat greedy BFS from the entry point — not a full hierarchical
+// HNSW search that descends level-by-level.  It treats all neighbors as a single
+// layer, which is sufficient for our IVF+HNSW hybrid but trades some recall for
+// implementation simplicity.
 export function searchHnsw(
   index: HnswIndex,
   query: Float32Array,
