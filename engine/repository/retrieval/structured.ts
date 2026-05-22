@@ -18,6 +18,7 @@ import {
 } from "./rrf.js";
 import { chunkDocument } from "../chunking.js";
 import { withTimeout } from "./document-lookup.js";
+import { detectContentType, extractSchemaFromBody } from "./hybrid.js";
 import { validateLexQuery, validateSemanticQuery } from "../fts.js";
 import { getMainDatabasePath } from "../vec.js";
 import {
@@ -636,6 +637,12 @@ export async function structuredSearchWithDiagnostics(
       score: blendedScore,
       context: store.getContextForFile(r.file),
       docid: docidMap.get(r.file) || "",
+      contentType: detectContentType(candidate?.body || "", r.file),
+      sourceMetadata: {
+        originalFile: r.file,
+        imageDescription: (candidate?.body || "").startsWith("Image description"),
+        schemaInfo: extractSchemaFromBody(candidate?.body || ""),
+      },
       ...(explainData ? { explain: explainData } : {}),
     };
   }).sort((a, b) => (b.score - a.score) || a.file.localeCompare(b.file));

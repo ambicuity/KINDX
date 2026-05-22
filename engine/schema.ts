@@ -58,7 +58,7 @@ export function initializeCoreSchema(db: Database): void {
       title TEXT NOT NULL,
       hash TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      FOREIGN KEY (hash) REFERENCES content(hash) ON DELETE CASCADE
+      FOREIGN KEY (hash) REFERENCES content(hash) ON DELETE NO ACTION
     )
   `);
 

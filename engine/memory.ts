@@ -25,7 +25,6 @@ export function maybeRunLifecycleJobs(db: Database, scope: string): void {
   _lifecycleOpsSinceLastRun += 1;
   if (_lifecycleOpsSinceLastRun < LIFECYCLE_EVERY_N_OPS) return;
   _lifecycleOpsSinceLastRun = 0;
-  if (Math.random() > 0.01) return;
   purgeExpiredMemories(db, scope);
   consolidateMemories(db, scope);
 }
@@ -747,7 +746,7 @@ export function evictIfNeeded(db: Database, scope: string, maxMemories: number):
     SELECT id FROM memories
     WHERE scope = ? AND superseded_by IS NULL
       AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    ORDER BY last_accessed_at ASC NULLS FIRST
+    ORDER BY last_accessed_at ASC NULLS LAST
     LIMIT ?
   `).all(normalizedScope, toEvict) as { id: number }[];
 

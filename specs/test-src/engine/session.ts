@@ -228,53 +228,43 @@ export class KindxSession {
  *   SessionRegistry.get(sessionId)
  *   SessionRegistry.delete(sessionId)
  */
-export const SessionRegistry = {
-  _sessions: new Map<string, KindxSession>(),
+export const SessionRegistry = (() => {
+  const sessions = new Map<string, KindxSession>();
 
-  /**
-   * Create and register a new session.
-   * If a session with the same ID already exists, it is replaced.
-   */
-  create(sessionId: string, scopeContext: SessionScopeContext = {}): KindxSession {
-    const existing = this._sessions.get(sessionId);
-    if (existing) {
-      existing.dispose();
-    }
-    // Use a KindxSession that reports the caller's sessionId (not a new generated one)
-    const session = new _KindxSessionWithId(sessionId, scopeContext);
-    this._sessions.set(sessionId, session);
-    return session;
-  },
+  return {
+    create(sessionId: string, scopeContext: SessionScopeContext = {}): KindxSession {
+      const existing = sessions.get(sessionId);
+      if (existing) {
+        existing.dispose();
+      }
+      const session = new _KindxSessionWithId(sessionId, scopeContext);
+      sessions.set(sessionId, session);
+      return session;
+    },
 
-  /**
-   * Get an existing session by ID.
-   * Returns null if the session does not exist.
-   */
-  get(sessionId: string): KindxSession | null {
-    return this._sessions.get(sessionId) ?? null;
-  },
+    get(sessionId: string): KindxSession | null {
+      return sessions.get(sessionId) ?? null;
+    },
 
-  /**
-   * Remove a session from the registry (does NOT call dispose).
-   * Use session.dispose() to fully clean up and then remove.
-   */
-  delete(sessionId: string): void {
-    this._sessions.delete(sessionId);
-  },
+    delete(sessionId: string): void {
+      sessions.delete(sessionId);
+    },
 
-  /** Active session count. */
-  get size(): number {
-    return this._sessions.size;
-  },
+    get size(): number {
+      return sessions.size;
+    },
 
-  /** Dispose all sessions (call on server shutdown). */
-  async disposeAll(): Promise<void> {
-    for (const session of this._sessions.values()) {
-      session.dispose();
-    }
-    this._sessions.clear();
-  },
-};
+    async disposeAll(): Promise<void> {
+      for (const session of sessions.values()) {
+        session.dispose();
+      }
+      sessions.clear();
+    },
+
+    startReaper(): void { /* no-op in test mock */ },
+    stopReaper(): void { /* no-op in test mock */ },
+  };
+})();
 
 // =============================================================================
 // Utility

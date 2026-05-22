@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 
 export class ModelIntegrityError extends Error {
@@ -39,7 +39,12 @@ export async function writeModelChecksum(modelPath: string): Promise<void> {
   writeFileSync(checksumPath, hash + "\n", "utf-8");
 }
 
-async function computeFileHash(filePath: string): Promise<string> {
-  const content = await fs.readFile(filePath);
-  return createHash("sha256").update(content).digest("hex");
+function computeFileHash(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (data) => hash.update(data));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
 }

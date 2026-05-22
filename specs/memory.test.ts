@@ -608,9 +608,9 @@ describe("memory subsystem", () => {
     // Mark mem1 and mem2 as accessed (they get last_accessed_at updated)
     markMemoryAccessed(db, "s1", mem1.id);
     markMemoryAccessed(db, "s1", mem2.id);
-    // mem3 never accessed (last_accessed_at is NULL) — should be evicted first
+    // mem3 never accessed (last_accessed_at is NULL) — evicted last with NULLS LAST
 
-    // Cap at 2: should evict mem3
+    // Cap at 2: should evict mem1 (oldest accessed)
     const evicted = evictIfNeeded(db, "s1", 2);
     expect(evicted).toBe(1);
 
@@ -618,9 +618,9 @@ describe("memory subsystem", () => {
       `SELECT id FROM memories WHERE scope = 's1' AND superseded_by IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))`
     ).all() as { id: number }[];
     const remainingIds = remaining.map(r => r.id);
-    expect(remainingIds).toContain(mem1.id);
+    expect(remainingIds).not.toContain(mem1.id);
     expect(remainingIds).toContain(mem2.id);
-    expect(remainingIds).not.toContain(mem3.id);
+    expect(remainingIds).toContain(mem3.id);
   });
 
   test("eviction cleans up tags and embeddings", async () => {

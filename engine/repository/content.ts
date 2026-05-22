@@ -29,6 +29,7 @@ export function cleanupOrphanedContent(db: Database): number {
   const result = db.prepare(`
     DELETE FROM content
     WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
+      AND hash NOT IN (SELECT DISTINCT hash FROM document_versions)
   `).run();
   return result.changes;
 }

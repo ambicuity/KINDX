@@ -9,6 +9,7 @@ import { createHash } from "crypto";
 import type { Database } from "../runtime.js";
 import { ingestFile } from "../ingestion.js";
 import { extractInternalLinks } from "../link-extractor.js";
+import { storeDocumentSchema } from "../schema.js";
 import {
   extractTitle,
   findActiveDocument,
@@ -81,6 +82,23 @@ export async function indexSingleFile(
         extractedAt: now,
       });
       upsertDocumentLinks(db, collectionName, path, links);
+
+      // Store schema for CSV/JSON files
+      if (ingested.metadata.format === "csv" || ingested.metadata.format === "json") {
+        try {
+          const schemaMatch = ingested.text.match(/Schema:\s*([^\n]+)/);
+          if (schemaMatch && schemaMatch[1]) {
+            const schema: Record<string, string> = {};
+            for (const pair of schemaMatch[1].split(",")) {
+              const [key, type] = pair.split(":").map(s => s.trim());
+              if (key && type) schema[key] = type;
+            }
+            if (Object.keys(schema).length > 0) {
+              storeDocumentSchema(db, collectionName, path, schema);
+            }
+          }
+        } catch { /* schema storage is best-effort */ }
+      }
 
       db.exec("COMMIT");
       return "embedded"; // Properly enqueued for BM25 and embedding

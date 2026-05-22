@@ -62,7 +62,8 @@ import {
   type SessionScopeContext,
 } from "./session.js";
 import { getShardHealthSummary } from "./sharding.js";
-import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary } from "./audit.js";
+import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary, purgeOldAuditEntries } from "./audit.js";
+import { getDocumentVersions } from "./repository/content.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
   CircuitBreaker,
@@ -160,6 +161,9 @@ const KINDX_MCP_TOOL_NAMES = [
   "multi_get",
   "memory_put",
   "memory_search",
+  "document_history",
+  "document_diff",
+  "audit_log",
 ] as const;
 
 type QueryTimings = {
@@ -542,10 +546,14 @@ function stableHash(value: unknown): string {
 function raceWithTimeout<T>(
   promiseOrFn: Promise<T> | ((signal: AbortSignal) => Promise<T>),
   timeoutMs: number,
-  code: string
+  code: string,
+  sessionSignal?: AbortSignal
 ): Promise<T> {
   const ac = new AbortController();
-  const getPromise = () => typeof promiseOrFn === "function" ? promiseOrFn(ac.signal) : promiseOrFn;
+  const signals = [ac.signal];
+  if (sessionSignal && !sessionSignal.aborted) signals.push(sessionSignal);
+  const composed = signals.length > 1 ? AbortSignal.any(signals) : ac.signal;
+  const getPromise = () => typeof promiseOrFn === "function" ? promiseOrFn(composed) : promiseOrFn;
   if (timeoutMs <= 0) return getPromise();
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -728,7 +736,9 @@ function createMcpServer(
     def: any,
     handler: any,
   ): void => {
-    if (mcpControl && !isToolEnabledByPolicy(mcpControl, name)) {
+    if (mcpControl && !isToolEnabledByPolicy(mcpControl, name, {
+      audit: (entry) => { try { recordAudit(store.db, { ...entry, action: entry.action as any }); } catch {} }
+    })) {
       return;
     }
     
@@ -2037,14 +2047,17 @@ Intent-aware lex (C++ performance, not sports):
           };
         }
 
-        dstDb.exec(`ATTACH DATABASE '${srcDbPath}' AS src`);
+        dstDb.prepare(`ATTACH DATABASE ? AS src`).run(srcDbPath);
         dstDb.prepare(`INSERT OR IGNORE INTO main.content SELECT * FROM src.content WHERE collection = ?`).run(collection);
         dstDb.prepare(`INSERT OR IGNORE INTO main.documents SELECT * FROM src.documents WHERE collection = ?`).run(collection);
         dstDb.prepare(
           `INSERT OR IGNORE INTO main.content_vectors SELECT cv.* FROM src.content_vectors cv WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = cv.hash AND c.collection = ?)`
         ).run(collection);
         dstDb.prepare(
-          `INSERT OR IGNORE INTO main.documents_fts SELECT * FROM src.documents_fts WHERE docid IN (SELECT docid FROM src.documents WHERE collection = ?)`
+          `INSERT OR IGNORE INTO main.document_links SELECT dl.* FROM src.document_links dl WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = dl.hash AND c.collection = ?)`
+        ).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.document_ingest SELECT di.* FROM src.document_ingest di WHERE EXISTS (SELECT 1 FROM src.documents d WHERE d.docid = di.docid AND d.collection = ?)`
         ).run(collection);
         dstDb.prepare(`DETACH DATABASE src`).run();
 
@@ -2099,6 +2112,19 @@ Intent-aware lex (C++ performance, not sports):
         };
       }
 
+      // Validate result IDs exist in scope
+      const validIds = new Set(
+        (store.db.prepare(`SELECT id FROM memories WHERE scope = ?`).all(resolved.scope) as any[])
+          .map(r => r.id)
+      );
+      const invalidIds = results.map((r: any) => r.id).filter((id: number) => !validIds.has(id));
+      if (invalidIds.length > 0) {
+        return {
+          content: [{ type: "text", text: `Invalid result IDs: ${invalidIds.join(", ")}` }],
+          isError: true,
+        };
+      }
+
       const recorded = recordFeedback(store.db, resolved.scope, query, results, source);
       recordAudit(store.db, {
         action: "memory_feedback",
@@ -2110,6 +2136,144 @@ Intent-aware lex (C++ performance, not sports):
         content: [{ type: "text", text: `recorded ${recorded} feedback entries in scope '${resolved.scope}'` }],
         structuredContent: { scope: resolved.scope, recorded },
       };
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: document_history
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "document_history",
+    {
+      title: "Document History",
+      description: "Show version history of a document with timestamps and hashes.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        file: z.string().describe("File path, docid, or virtual path (kindx://collection/path)"),
+        limit: z.number().int().positive().optional().describe("Max versions to return"),
+      },
+    },
+    async ({ file, limit }: any) => {
+      try {
+        const found = store.findDocument(file, { includeBody: false });
+        if ("error" in found) {
+          return {
+            content: [{ type: "text", text: `Document not found: ${file}` }],
+            isError: true,
+          };
+        }
+        const versions = getDocumentVersions(store.db, found.collectionName, found.filepath);
+        const limited = limit ? versions.slice(0, limit) : versions;
+        return {
+          content: [{ type: "text", text: JSON.stringify(limited, null, 2) }],
+          structuredContent: { versions: limited, total: versions.length },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `document_history_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: document_diff
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "document_diff",
+    {
+      title: "Document Diff",
+      description: "Show what changed between two versions of a document.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        file: z.string().describe("File path, docid, or virtual path"),
+        from: z.number().int().positive().optional().describe("From version number (1-based, default: 2 = previous)"),
+        to: z.number().int().positive().optional().describe("To version number (1-based, default: 1 = current)"),
+      },
+    },
+    async ({ file, from, to }: any) => {
+      try {
+        const found = store.findDocument(file, { includeBody: false });
+        if ("error" in found) {
+          return {
+            content: [{ type: "text", text: `Document not found: ${file}` }],
+            isError: true,
+          };
+        }
+        const versions = getDocumentVersions(store.db, found.collectionName, found.filepath);
+        if (versions.length < 2) {
+          return {
+            content: [{ type: "text", text: "Document has fewer than 2 versions, cannot diff." }],
+            isError: true,
+          };
+        }
+        const fromIdx = (from ? from - 1 : 1);
+        const toIdx = (to ? to - 1 : 0);
+        if (fromIdx < 0 || fromIdx >= versions.length || toIdx < 0 || toIdx >= versions.length) {
+          return {
+            content: [{ type: "text", text: `Invalid version numbers. Document has ${versions.length} versions (1-based).` }],
+            isError: true,
+          };
+        }
+        const fromVer = versions[fromIdx];
+        const toVer = versions[toIdx];
+        const fromBody = store.db.prepare(`SELECT content FROM content WHERE hash = ?`).get(fromVer.hash) as any;
+        const toBody = store.db.prepare(`SELECT content FROM content WHERE hash = ?`).get(toVer.hash) as any;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              from: { version: fromIdx + 1, hash: fromVer.hash, createdAt: fromVer.createdAt },
+              to: { version: toIdx + 1, hash: toVer.hash, createdAt: toVer.createdAt },
+              fromContent: fromBody?.content || null,
+              toContent: toBody?.content || null,
+            }, null, 2)
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `document_diff_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: audit_log
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "audit_log",
+    {
+      title: "Audit Log",
+      description: "Query the audit log for security and operations events.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        action: z.string().optional().describe("Filter by action type (e.g. query, auth_failure, tool_denied)"),
+        since: z.string().optional().describe("ISO timestamp start (e.g. 2026-01-01T00:00:00Z)"),
+        until: z.string().optional().describe("ISO timestamp end"),
+        limit: z.number().int().positive().optional().describe("Max entries (default 100, max 1000)"),
+      },
+    },
+    async ({ action, since, until, limit }: any) => {
+      try {
+        const entries = queryAuditLog(store.db, {
+          action,
+          since,
+          until,
+          limit: limit || 100,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+          structuredContent: { entries, count: entries.length },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `audit_log_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
     }
   );
 
@@ -3357,7 +3521,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         if (body?.method === "tools/call") {
           const toolName = typeof body?.params?.name === "string" ? body.params.name : "";
-          if (!toolName || !isToolEnabledByPolicy(mcpControl, toolName)) {
+          if (!toolName || !isToolEnabledByPolicy(mcpControl, toolName, {
+            audit: (entry) => { try { recordAudit(store.db, { ...entry, action: entry.action as any }); } catch {} }
+          })) {
             nodeRes.writeHead(403, { "Content-Type": "application/json" });
             nodeRes.end(JSON.stringify({
               jsonrpc: "2.0",
@@ -3732,6 +3898,21 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     });
     // Start idle session reaper for HTTP transport
     SessionRegistry.startReaper();
+    // Warn if running in zero-auth mode
+    if (!process.env.KINDX_MCP_TOKEN && !process.env.KINDX_TENANTS_CONFIG) {
+      process.stderr.write(
+        '[KINDX] WARNING: No KINDX_MCP_TOKEN or tenants.yml configured. ' +
+        'Running in zero-auth mode (loopback only). ' +
+        'Set KINDX_MCP_TOKEN for production deployments.\n'
+      );
+    }
+    // Purge old audit log entries on startup
+    try {
+      const purged = purgeOldAuditEntries(store.db);
+      if (purged > 0) {
+        process.stderr.write(`[KINDX] Purged ${purged} old audit entries\n`);
+      }
+    } catch { /* audit purge must never fail startup */ }
   } catch (err) {
     emitStartupEvent("mcp_startup_failure", {
       phase: "binding",

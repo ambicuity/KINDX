@@ -566,6 +566,48 @@ export class RemoteLLM implements LLM {
     }
   }
 
+  async describeImage(imagePath: string): Promise<string> {
+    const { readFileSync, existsSync } = await import("node:fs");
+    const { extname } = await import("node:path");
+
+    if (!existsSync(imagePath)) {
+      return "Image description unavailable: file not found";
+    }
+
+    const imageBuffer = readFileSync(imagePath);
+    const base64Image = imageBuffer.toString("base64");
+    const ext = extname(imagePath).slice(1).toLowerCase();
+    const mimeType = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+
+    const model = process.env.KINDX_OPENAI_VISION_MODEL || this.generateModel;
+
+    try {
+      const res = await fetchWithTimeout(`${getBaseUrl()}/chat/completions`, {
+        method: "POST",
+        headers: getHeaders(),
+        timeoutMs: REMOTE_LLM_TIMEOUT_MS,
+        body: JSON.stringify({
+          model,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: "Describe this image in detail. Include any text, objects, colors, and relevant visual information." },
+              { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Image}` } }
+            ]
+          }],
+          max_tokens: 500,
+          temperature: 0.3,
+        }),
+      });
+
+      const data = await res.json() as any;
+      return data.choices?.[0]?.message?.content?.trim() || "Image description unavailable";
+    } catch (err) {
+      console.warn("Remote vision description failed:", err);
+      return "Image description unavailable";
+    }
+  }
+
   async dispose(): Promise<void> {
     // Native fetch requires no active disposal/teardown in Node
   }
