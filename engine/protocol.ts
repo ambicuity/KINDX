@@ -1778,6 +1778,201 @@ Intent-aware lex (C++ performance, not sports):
     }
   );
 
+  // ---------------------------------------------------------------------------
+  // Tool: index_list
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_list",
+    {
+      title: "List Indexes",
+      description: "List all named indexes. Returns index name, description, creation date, and whether it is the default.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const { ensureDefaultIndexRegistered, listIndexes, getDefaultIndexName } = await import("./index-manager.js");
+        ensureDefaultIndexRegistered();
+        const indexes = listIndexes();
+        const defaultName = getDefaultIndexName();
+
+        return {
+          content: [{ type: "text", text: `${indexes.length} index(es) found. Default: ${defaultName}` }],
+          structuredContent: {
+            indexes: indexes.map(i => ({
+              name: i.name,
+              description: i.description || null,
+              created_at: i.created_at,
+              is_default: i.name === defaultName,
+            })),
+          },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_list_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_create
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_create",
+    {
+      title: "Create Index",
+      description: "Create a new named index with its own SQLite database. Admin only.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        name: z.string().describe("Index name (lowercase, 2-64 chars, alphanumeric + hyphens)"),
+        description: z.string().optional().describe("Human-readable description"),
+      },
+    },
+    async ({ name, description }: any) => {
+      try {
+        const { registerIndex } = await import("./index-manager.js");
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { openDatabase } = await import("./runtime.js");
+        const { initializeDatabase } = await import("./repository/store-init.js");
+
+        const entry = registerIndex(name, description);
+        const dbPath = getDefaultDbPath(name);
+        const db = openDatabase(dbPath);
+        initializeDatabase(db);
+        db.close();
+
+        return {
+          content: [{ type: "text", text: `Created index '${name}' at ${dbPath}` }],
+          structuredContent: { name, db_path: dbPath, created_at: entry.created_at },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_create_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_delete
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_delete",
+    {
+      title: "Delete Index",
+      description: "Permanently delete a named index and all its data. Admin only. Requires force=true to confirm.",
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: true },
+      inputSchema: {
+        name: z.string().describe("Index name to delete"),
+        force: z.boolean().default(false).describe("Must be true to confirm deletion"),
+      },
+    },
+    async ({ name, force }: any) => {
+      try {
+        if (!force) {
+          return {
+            content: [{ type: "text", text: `Deletion of index '${name}' requires force=true to confirm.` }],
+            isError: true,
+          };
+        }
+
+        const { unregisterIndex, getDefaultIndexName } = await import("./index-manager.js");
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { existsSync, unlinkSync } = await import("node:fs");
+
+        if (name === getDefaultIndexName()) {
+          return {
+            content: [{ type: "text", text: `Cannot delete the default index '${name}'.` }],
+            isError: true,
+          };
+        }
+
+        unregisterIndex(name);
+        const dbPath = getDefaultDbPath(name);
+        for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+          try { if (existsSync(p)) unlinkSync(p); } catch {}
+        }
+
+        return {
+          content: [{ type: "text", text: `Deleted index '${name}'.` }],
+          structuredContent: { deleted: true, name },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_delete_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: index_migrate
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "index_migrate",
+    {
+      title: "Migrate Collection",
+      description: "Copy a collection and its data from one index to another. Admin only.",
+      annotations: { readOnlyHint: false, openWorldHint: false },
+      inputSchema: {
+        collection: z.string().describe("Collection name to migrate"),
+        from_index: z.string().describe("Source index name"),
+        to_index: z.string().describe("Destination index name"),
+      },
+    },
+    async ({ collection, from_index, to_index }: any) => {
+      try {
+        const { getDefaultDbPath } = await import("./repository/paths.js");
+        const { openDatabase } = await import("./runtime.js");
+        const srcDbPath = getDefaultDbPath(from_index);
+        const dstDbPath = getDefaultDbPath(to_index);
+
+        const srcDb = openDatabase(srcDbPath);
+        const dstDb = openDatabase(dstDbPath);
+
+        const count = (srcDb.prepare(
+          `SELECT COUNT(*) as c FROM content WHERE collection = ?`
+        ).get(collection) as any)?.c || 0;
+
+        if (count === 0) {
+          srcDb.close();
+          dstDb.close();
+          return {
+            content: [{ type: "text", text: `Collection '${collection}' is empty in source index '${from_index}'.` }],
+          };
+        }
+
+        dstDb.exec(`ATTACH DATABASE '${srcDbPath}' AS src`);
+        dstDb.prepare(`INSERT OR IGNORE INTO main.content SELECT * FROM src.content WHERE collection = ?`).run(collection);
+        dstDb.prepare(`INSERT OR IGNORE INTO main.documents SELECT * FROM src.documents WHERE collection = ?`).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.content_vectors SELECT cv.* FROM src.content_vectors cv WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = cv.hash AND c.collection = ?)`
+        ).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.documents_fts SELECT * FROM src.documents_fts WHERE docid IN (SELECT docid FROM src.documents WHERE collection = ?)`
+        ).run(collection);
+        dstDb.prepare(`DETACH DATABASE src`).run();
+
+        srcDb.close();
+        dstDb.close();
+
+        return {
+          content: [{ type: "text", text: `Migrated ${count} documents from '${from_index}' to '${to_index}' collection '${collection}'.` }],
+          structuredContent: { collection, from_index, to_index, documents_migrated: count },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `index_migrate_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   return server;
 }
 
