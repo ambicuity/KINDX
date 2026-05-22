@@ -214,6 +214,11 @@ const DEFAULT_EMBED_MODEL = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embedd
 const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-Q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = process.env.KINDX_GENERATE_MODEL ?? "hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
 
+// Vision model for image understanding
+// Override via KINDX_VISION_MODEL env var
+const DEFAULT_VISION_MODEL = process.env.KINDX_VISION_MODEL ?? 
+  "hf:llava-hf/llava-1.5-7b-GGUF/llava-1.5-7b-Q4_K_M.gguf";
+
 // Alternative generation models for query expansion:
 // LiquidAI LFM2 - hybrid architecture optimized for edge/on-device inference
 // Use these as base for fine-tuning with configs/sft_lfm2.yaml
@@ -476,6 +481,7 @@ export type LlamaCppConfig = {
   embedModel?: string;
   generateModel?: string;
   rerankModel?: string;
+  visionModel?: string;
   modelCacheDir?: string;
   /**
    * Context size used for query expansion generation contexts.
@@ -617,10 +623,12 @@ export class LlamaCpp implements LLM {
   private generateModel: LlamaModel | null = null;
   private rerankModel: LlamaModel | null = null;
   private rerankContexts: Awaited<ReturnType<LlamaModel["createRankingContext"]>>[] = [];
+  private visionModel: LlamaModel | null = null;
 
   private embedModelUri: string;
   private generateModelUri: string;
   private rerankModelUri: string;
+  private visionModelUri: string;
   private modelCacheDir: string;
   private rerankContextSize: number;
   private expandContextSize: number;
@@ -633,6 +641,7 @@ export class LlamaCpp implements LLM {
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
   private generateModelLoadPromise: Promise<LlamaModel> | null = null;
   private rerankModelLoadPromise: Promise<LlamaModel> | null = null;
+  private visionModelLoadPromise: Promise<LlamaModel> | null = null;
 
   // Inactivity timer for auto-unloading models
   private inactivityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -648,6 +657,7 @@ export class LlamaCpp implements LLM {
     this.embedModelUri = config.embedModel || DEFAULT_EMBED_MODEL;
     this.generateModelUri = config.generateModel || DEFAULT_GENERATE_MODEL;
     this.rerankModelUri = config.rerankModel || DEFAULT_RERANK_MODEL;
+    this.visionModelUri = config.visionModel || DEFAULT_VISION_MODEL;
     this.modelCacheDir = config.modelCacheDir || MODEL_CACHE_DIR;
     this.expandContextSize = resolveExpandContextSize(config.expandContextSize);
     this.rerankContextSize = resolveRerankContextSize(config.rerankContextSize);
@@ -737,10 +747,15 @@ export class LlamaCpp implements LLM {
         await this.rerankModel.dispose();
         this.rerankModel = null;
       }
+      if (this.visionModel) {
+        await this.visionModel.dispose();
+        this.visionModel = null;
+      }
       // Reset load promises so models can be reloaded later
       this.embedModelLoadPromise = null;
       this.generateModelLoadPromise = null;
       this.rerankModelLoadPromise = null;
+      this.visionModelLoadPromise = null;
     }
 
     // Note: We keep llama instance alive - it's lightweight
@@ -815,10 +830,15 @@ export class LlamaCpp implements LLM {
       await this.rerankModel.dispose();
       this.rerankModel = null;
     }
+    if (this.visionModel) {
+      await this.visionModel.dispose();
+      this.visionModel = null;
+    }
     this.embedModelLoadPromise = null;
     this.embedContextsCreatePromise = null;
     this.generateModelLoadPromise = null;
     this.rerankModelLoadPromise = null;
+    this.visionModelLoadPromise = null;
 
     if (this.llama) {
       const disposePromise = this.llama.dispose();
@@ -1060,6 +1080,38 @@ export class LlamaCpp implements LLM {
       throw new Error("Generate model not loaded");
     }
     return this.generateModel;
+  }
+
+  /**
+   * Load vision model (lazy) - for image understanding
+   */
+  private async ensureVisionModel(): Promise<LlamaModel> {
+    if (this.visionModel) {
+      return this.visionModel;
+    }
+    if (this.visionModelLoadPromise) {
+      return await this.visionModelLoadPromise;
+    }
+
+    this.visionModelLoadPromise = (async () => {
+      const llama = await this.ensureLlama();
+      const modelPath = await this.resolveModel(this.visionModelUri);
+      const model = await llama.loadModel({ modelPath });
+      this.visionModel = model;
+      this.touchActivity();
+      return model;
+    })();
+
+    try {
+      await this.visionModelLoadPromise;
+    } finally {
+      this.visionModelLoadPromise = null;
+    }
+    this.touchActivity();
+    if (!this.visionModel) {
+      throw new Error("Vision model not loaded");
+    }
+    return this.visionModel;
   }
 
   /**
@@ -1374,6 +1426,46 @@ export class LlamaCpp implements LLM {
     } finally {
       // Dispose context (which disposes dependent sequences/sessions per lifecycle rules)
       await context.dispose();
+    }
+  }
+
+  /**
+   * Generate text description of an image using the vision model
+   * @param imagePath Path to the image file
+   * @returns Text description of the image
+   */
+  async describeImage(imagePath: string): Promise<string> {
+    this.touchActivity();
+    
+    try {
+      const model = await this.ensureVisionModel();
+      const context = await model.createContext();
+      const sequence = context.getSequence();
+      
+      // Read image file as base64
+      const imageBuffer = readFileSync(imagePath);
+      const base64Image = imageBuffer.toString("base64");
+      
+      // Create vision prompt
+      const prompt = `<image>\nDescribe this image in detail. Include any text, objects, colors, and relevant visual information.\n</image>`;
+      
+      // Generate description using vision model
+      const session = new LlamaChatSession({ contextSequence: sequence });
+      let result = "";
+      
+      await session.prompt(prompt, {
+        maxTokens: 500,
+        temperature: 0.3,
+        onTextChunk: (text) => {
+          result += text;
+        },
+      });
+      
+      await context.dispose();
+      return result.trim() || "Image description unavailable";
+    } catch (error) {
+      console.error("Vision model error:", error);
+      return "Image description unavailable";
     }
   }
 
@@ -1723,12 +1815,14 @@ export class LlamaCpp implements LLM {
       this.embedModel = null;
       this.generateModel = null;
       this.rerankModel = null;
+      this.visionModel = null;
       this.llama = null;
 
       this.embedModelLoadPromise = null;
       this.embedContextsCreatePromise = null;
       this.generateModelLoadPromise = null;
       this.rerankModelLoadPromise = null;
+      this.visionModelLoadPromise = null;
     })();
 
     try {
