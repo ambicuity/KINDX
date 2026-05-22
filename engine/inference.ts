@@ -15,6 +15,8 @@ import {
   type Token as LlamaToken,
 } from "node-llama-cpp";
 import { RemoteLLM } from "./remote-llm.js";
+import { RetryableLLM } from "./retryable-llm.js";
+export { RetryableLLM } from "./retryable-llm.js";
 import { Spinner, renderProgressBar, formatBytes, cursor, progress as termProgress, c } from "./utils/ui.js";
 import { createHash } from "crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -23,6 +25,7 @@ import * as os from "node:os";
 import { resolve, join } from "path";
 import { homedir } from "node:os";
 import type { ModelUsage } from "./ai-usage.js";
+import { verifyModelIntegrity, writeModelChecksum } from "./model-integrity.js";
 
 // Re-export ModelUsage so consumers of inference.ts can access it without
 // importing ai-usage.ts directly.
@@ -387,6 +390,7 @@ export async function pullModels(
         writeFileSync(etagPath, remoteEtag + "\n", "utf-8");
       }
     }
+    await writeModelChecksum(path);
     results.push({ model, path, sizeBytes, refreshed });
   }
   return results;
@@ -876,6 +880,8 @@ export class LlamaCpp implements LLM {
     if (started) {
       process.stderr.write(" - Done.\n");
     }
+
+    await verifyModelIntegrity(path);
     
     return path;
   }
@@ -1975,7 +1981,8 @@ export function getDefaultLLM(): LLM {
       defaultLLM = new RemoteLLM();
     } else {
       const embedModel = process.env.KINDX_EMBED_MODEL;
-      defaultLLM = new LlamaCpp(embedModel ? { embedModel } : {});
+      const inner = new LlamaCpp(embedModel ? { embedModel } : {});
+      defaultLLM = new RetryableLLM(inner);
     }
   }
   return defaultLLM;

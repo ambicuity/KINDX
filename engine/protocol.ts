@@ -42,7 +42,8 @@ import type {
   StructuredSearchDiagnostics,
 } from "./repository.js";
 import { getCollection, getGlobalContext, getDefaultCollectionNames } from "./catalogs.js";
-import { disposeDefaultLLM, disposeSensitiveContexts, withLLMScope } from "./inference.js";
+import { disposeDefaultLLM, disposeSensitiveContexts, getDefaultLLM, withLLMScope } from "./inference.js";
+import { HealthChecker } from "./health-checker.js";
 import {
   upsertMemory,
   semanticSearchMemory,
@@ -2799,6 +2800,38 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         return;
       }
 
+      if (pathname === "/ready" && nodeReq.method === "GET") {
+        const status = store.getStatus();
+        const ops = buildOperationalStatus(store.db, store.dbPath, status.hasVectorIndex);
+        const checker = new HealthChecker({
+          getModelsStatus: () => ({
+            embed: ops.models_ready,
+            rerank: ops.models_ready,
+            generate: ops.models_ready,
+          }),
+          getGpuStatus: () => ({
+            available: ops.models_ready,
+            vramFree: 0,
+          }),
+          getAnnStatus: () => ({
+            mode: status.ann.mode,
+            state: status.ann.state,
+          }),
+          getDatabaseStatus: () => ({
+            accessible: ops.db_integrity === "ok",
+          }),
+        });
+
+        const readiness = await checker.checkReadiness();
+        const statusCode = readiness.status === "ready" ? 200 : 503;
+        const body = JSON.stringify(readiness);
+        nodeRes.writeHead(statusCode, { "Content-Type": "application/json" });
+        nodeRes.end(body);
+        recordHttpMetrics(statusCode);
+        logger.info(`GET /ready (${Date.now() - reqStart}ms) ${readiness.status}`);
+        return;
+      }
+
       if (pathname === "/metrics" && nodeReq.method === "GET") {
         const throughput = getRerankThroughputSnapshot(undefined);
         // LLM pool metrics for concurrency observability
@@ -2837,7 +2870,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       //  2. Multi-tenant: tenants.yml exists. Each bearer token resolves to a
       //     tenant with role + collection ACL. Unknown tokens are rejected.
       //
-      // /health and /metrics are intentionally unauthenticated for monitoring.
+      // /health, /ready, and /metrics are intentionally unauthenticated for monitoring.
       // -----------------------------------------------------------------------
       let requestIdentity: import("./rbac.js").ResolvedIdentity | null = null;
       {

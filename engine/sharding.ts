@@ -374,6 +374,20 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
     INSERT OR REPLACE INTO ann_state (id, version, dimensions, vector_count, centroid_count, built_at)
     VALUES (1, 1, ?, ?, ?, ?)
   `).run(dimensions, vectorCount, centroidCount, builtAt);
+
+  if (vectorCount > 10000) {
+    try {
+      const hnswIndex = buildHnswIndex(
+        vectors.map((v) => v.embedding),
+        dimensions,
+        { M: 16, ef: 200 }
+      );
+      persistHnswIndex(db, hnswIndex, vectors.map((v) => v.hash_seq));
+    } catch {
+      // HNSW build is best-effort; IVF centroids remain the fallback.
+    }
+  }
+
   return { centroidCount, vectorCount };
 }
 
@@ -455,6 +469,23 @@ function ensureShardSchema(db: Database, dimensions: number): void {
   if (!hasAnnVec?.name) {
     db.exec(`CREATE VIRTUAL TABLE ann_centroids_vec USING vec0(centroid_id TEXT PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ann_hnsw_nodes (
+      id INTEGER PRIMARY KEY,
+      level INTEGER NOT NULL,
+      neighbor_ids TEXT NOT NULL,
+      vector_id TEXT NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ann_hnsw_edges (
+      node_id INTEGER NOT NULL,
+      neighbor_id INTEGER NOT NULL,
+      level INTEGER NOT NULL,
+      PRIMARY KEY (node_id, neighbor_id, level)
+    )
+  `);
 }
 
 function getShardedCollections(): CollectionShardConfig[] {
@@ -1126,54 +1157,107 @@ export function searchShardedVectorsWithDiagnostics(
       let usedAnn = false;
       if (annEnabled) {
         try {
-          const annState = sdb.prepare(`
-            SELECT version, dimensions, vector_count, centroid_count
-            FROM ann_state
-            WHERE id = 1
-          `).get() as { version?: number; dimensions?: number; vector_count?: number; centroid_count?: number } | undefined;
-          const hasCentroids = sdb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ann_centroids_vec'`).get() as { name?: string } | undefined;
-          if (annState?.version === 1 && hasCentroids?.name) {
-            const currentCount = (sdb.prepare(`SELECT COUNT(*) AS c FROM vectors_vec`).get() as { c: number }).c;
-            if (currentCount !== Number(annState.vector_count || 0)) {
-              warnings.push(`ann_stale:${collection}:${i}`);
-            } else {
-              const nearestCentroids = sdb.prepare(`
-                SELECT centroid_id, distance
-                FROM ann_centroids_vec
-                WHERE embedding MATCH ? AND k = ?
-              `).all(embedding, probeCount) as Array<{ centroid_id: string; distance: number }>;
-              if (nearestCentroids.length > 0) {
-                const centroidIds = nearestCentroids.map((c) => Number(c.centroid_id)).filter((n) => Number.isFinite(n));
-                const centroidPlaceholders = centroidIds.map(() => "?").join(",");
-                if (centroidIds.length > 0) {
-                  const candidates = sdb.prepare(`
-                    SELECT hash_seq
-                    FROM ann_assignments
-                    WHERE centroid_id IN (${centroidPlaceholders})
-                    LIMIT ?
-                  `).all(...centroidIds, shortlistPerShard) as Array<{ hash_seq: string }>;
-                  const candidateIds = candidates.map((c) => c.hash_seq).filter(Boolean);
-                  if (candidateIds.length > 0) {
-                    const inClause = candidateIds.map(() => "?").join(",");
-                    const candidateRows = sdb.prepare(`
-                      SELECT hash_seq, vec_distance_cosine(embedding, ?) as distance
-                      FROM vectors_vec
-                      WHERE hash_seq IN (${inClause})
-                    `).all(embedding, ...candidateIds) as Array<{ hash_seq: string; distance: number }>;
-                    const approx = candidateRows
-                      .sort((a, b) => (a.distance - b.distance) || a.hash_seq.localeCompare(b.hash_seq))
-                      .slice(0, perShardK);
-                    matches.push(...approx);
-                    usedAnn = true;
+          const hasHnswNodes = sdb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ann_hnsw_nodes'`).get() as { name?: string } | undefined;
+          if (hasHnswNodes?.name) {
+            const nodeRows = sdb.prepare(`SELECT id, level, neighbor_ids, vector_id FROM ann_hnsw_nodes`).all() as Array<{ id: number; level: number; neighbor_ids: string; vector_id: string }>;
+            if (nodeRows.length > 0) {
+              const hashSeqs = nodeRows.map((r) => r.vector_id);
+              const vecPlaceholders = hashSeqs.map(() => "?").join(",");
+              const vecRows = sdb.prepare(`SELECT hash_seq, embedding FROM vectors_vec WHERE hash_seq IN (${vecPlaceholders})`).all(...hashSeqs) as Array<{ hash_seq: string; embedding: Buffer }>;
+              const vecMap = new Map<string, Float32Array>();
+              for (const r of vecRows) vecMap.set(r.hash_seq, copyFloat32(r.embedding));
+
+              const idToIdx = new Map<number, number>();
+              const hnswVectors: Float32Array[] = [];
+              for (let n = 0; n < nodeRows.length; n++) {
+                const row = nodeRows[n]!;
+                idToIdx.set(row.id, n);
+                const vec = vecMap.get(row.vector_id);
+                hnswVectors.push(vec ?? new Float32Array(embedding.length));
+              }
+
+              const hnswNodes: HnswNode[] = nodeRows.map((row) => ({
+                id: idToIdx.get(row.id) ?? row.id,
+                neighbors: (JSON.parse(row.neighbor_ids) as number[]).map((nid) => idToIdx.get(nid) ?? nid),
+                level: row.level,
+              }));
+
+              const hnswIndex: HnswIndex = {
+                nodes: hnswNodes,
+                vectors: hnswVectors,
+                dimensions: embedding.length,
+                entryPoint: 0,
+                M: 16,
+                ef: 200,
+              };
+
+              const hnswResults = searchHnsw(hnswIndex, embedding, perShardK);
+              const resultHashSeqs = hnswResults.map((r) => {
+                const origNode = nodeRows[r.id];
+                return { hash_seq: origNode?.vector_id ?? "", distance: r.distance };
+              }).filter((r) => r.hash_seq);
+
+              if (resultHashSeqs.length > 0) {
+                matches.push(...resultHashSeqs);
+                usedAnn = true;
+              }
+            }
+          }
+        } catch {
+          warnings.push(`ann_hnsw_failed:${collection}:${i}`);
+        }
+
+        if (!usedAnn) {
+          try {
+            const annState = sdb.prepare(`
+              SELECT version, dimensions, vector_count, centroid_count
+              FROM ann_state
+              WHERE id = 1
+            `).get() as { version?: number; dimensions?: number; vector_count?: number; centroid_count?: number } | undefined;
+            const hasCentroids = sdb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='ann_centroids_vec'`).get() as { name?: string } | undefined;
+            if (annState?.version === 1 && hasCentroids?.name) {
+              const currentCount = (sdb.prepare(`SELECT COUNT(*) AS c FROM vectors_vec`).get() as { c: number }).c;
+              if (currentCount !== Number(annState.vector_count || 0)) {
+                warnings.push(`ann_stale:${collection}:${i}`);
+              } else {
+                const nearestCentroids = sdb.prepare(`
+                  SELECT centroid_id, distance
+                  FROM ann_centroids_vec
+                  WHERE embedding MATCH ? AND k = ?
+                `).all(embedding, probeCount) as Array<{ centroid_id: string; distance: number }>;
+                if (nearestCentroids.length > 0) {
+                  const centroidIds = nearestCentroids.map((c) => Number(c.centroid_id)).filter((n) => Number.isFinite(n));
+                  const centroidPlaceholders = centroidIds.map(() => "?").join(",");
+                  if (centroidIds.length > 0) {
+                    const candidates = sdb.prepare(`
+                      SELECT hash_seq
+                      FROM ann_assignments
+                      WHERE centroid_id IN (${centroidPlaceholders})
+                      LIMIT ?
+                    `).all(...centroidIds, shortlistPerShard) as Array<{ hash_seq: string }>;
+                    const candidateIds = candidates.map((c) => c.hash_seq).filter(Boolean);
+                    if (candidateIds.length > 0) {
+                      const inClause = candidateIds.map(() => "?").join(",");
+                      const candidateRows = sdb.prepare(`
+                        SELECT hash_seq, vec_distance_cosine(embedding, ?) as distance
+                        FROM vectors_vec
+                        WHERE hash_seq IN (${inClause})
+                      `).all(embedding, ...candidateIds) as Array<{ hash_seq: string; distance: number }>;
+                      const approx = candidateRows
+                        .sort((a, b) => (a.distance - b.distance) || a.hash_seq.localeCompare(b.hash_seq))
+                        .slice(0, perShardK);
+                      matches.push(...approx);
+                      usedAnn = true;
+                    }
                   }
                 }
               }
+            } else {
+              warnings.push(`ann_missing:${collection}:${i}`);
             }
-          } else {
-            warnings.push(`ann_missing:${collection}:${i}`);
+          } catch {
+            warnings.push(`ann_failed:${collection}:${i}`);
           }
-        } catch {
-          warnings.push(`ann_failed:${collection}:${i}`);
         }
       }
       if (!usedAnn) {
@@ -1202,4 +1286,172 @@ export function searchShardedVectors(
   perShardK: number
 ): Array<{ hash_seq: string; distance: number }> {
   return searchShardedVectorsWithDiagnostics(dbPath, collection, shardCount, embedding, perShardK).matches;
+}
+
+export interface HnswNode {
+  id: number;
+  neighbors: number[];
+  level: number;
+}
+
+export interface HnswIndex {
+  nodes: HnswNode[];
+  vectors: Float32Array[];
+  dimensions: number;
+  entryPoint: number;
+  M: number;
+  ef: number;
+}
+
+export interface HnswSearchResult {
+  id: number;
+  distance: number;
+}
+
+export function buildHnswIndex(
+  vectors: Float32Array[],
+  dimensions: number,
+  config: { M: number; ef: number }
+): HnswIndex {
+  const nodes: HnswNode[] = [];
+  const M = config.M;
+
+  if (vectors.length > 0) {
+    nodes.push({ id: 0, neighbors: [], level: 0 });
+  }
+
+  for (let i = 1; i < vectors.length; i++) {
+    const level = Math.floor(-Math.log(Math.max(0.0001, Math.random())) * (1 / Math.log(M)));
+    const node: HnswNode = { id: i, neighbors: [], level };
+
+    const nearest = findNearest(nodes, vectors, vectors[i]!, Math.min(M, i));
+
+    for (const neighborId of nearest) {
+      node.neighbors.push(neighborId);
+      nodes[neighborId]!.neighbors.push(i);
+
+      if (nodes[neighborId]!.neighbors.length > M * 2) {
+        const pruned = findNearest(
+          nodes,
+          vectors,
+          vectors[neighborId]!,
+          M * 2,
+          nodes[neighborId]!.neighbors
+        );
+        nodes[neighborId]!.neighbors = pruned;
+      }
+    }
+
+    nodes.push(node);
+  }
+
+  return {
+    nodes,
+    vectors,
+    dimensions,
+    entryPoint: 0,
+    M,
+    ef: config.ef,
+  };
+}
+
+export function persistHnswIndex(
+  db: Database,
+  index: HnswIndex,
+  hashSeqs: string[]
+): void {
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM ann_hnsw_nodes");
+    db.exec("DELETE FROM ann_hnsw_edges");
+
+    const insertNode = db.prepare(
+      `INSERT OR REPLACE INTO ann_hnsw_nodes (id, level, neighbor_ids, vector_id) VALUES (?, ?, ?, ?)`
+    );
+    const insertEdge = db.prepare(
+      `INSERT OR REPLACE INTO ann_hnsw_edges (node_id, neighbor_id, level) VALUES (?, ?, ?)`
+    );
+
+    for (const node of index.nodes) {
+      insertNode.run(
+        node.id,
+        node.level,
+        JSON.stringify(node.neighbors),
+        hashSeqs[node.id] || ""
+      );
+      for (const neighborId of node.neighbors) {
+        const neighborLevel = index.nodes[neighborId]?.level ?? 0;
+        const edgeLevel = Math.min(node.level, neighborLevel);
+        insertEdge.run(node.id, neighborId, edgeLevel);
+      }
+    }
+
+    db.exec("COMMIT");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback failure
+    }
+    throw err;
+  }
+}
+
+// NOTE: This is a flat greedy BFS from the entry point — not a full hierarchical
+// HNSW search that descends level-by-level.  It treats all neighbors as a single
+// layer, which is sufficient for our IVF+HNSW hybrid but trades some recall for
+// implementation simplicity.
+export function searchHnsw(
+  index: HnswIndex,
+  query: Float32Array,
+  k: number
+): HnswSearchResult[] {
+  const { nodes, vectors, entryPoint, ef } = index;
+
+  if (nodes.length === 0) return [];
+
+  const visited = new Set<number>();
+  const candidates: Array<{ id: number; distance: number }> = [];
+
+  const searchAtLevel = (startId: number) => {
+    const queue = [{ id: startId, distance: cosineDistance(query, vectors[startId]!) }];
+    visited.add(startId);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      candidates.push(current);
+
+      if (candidates.length >= ef) break;
+
+      for (const neighborId of nodes[current.id]!.neighbors) {
+        if (visited.has(neighborId)) continue;
+        visited.add(neighborId);
+
+        const distance = cosineDistance(query, vectors[neighborId]!);
+        queue.push({ id: neighborId, distance });
+        queue.sort((a, b) => a.distance - b.distance);
+      }
+    }
+  };
+
+  searchAtLevel(entryPoint);
+
+  candidates.sort((a, b) => a.distance - b.distance);
+  return candidates.slice(0, k).map((c) => ({ id: c.id, distance: c.distance }));
+}
+
+function findNearest(
+  nodes: HnswNode[],
+  vectors: Float32Array[],
+  query: Float32Array,
+  k: number,
+  candidates?: number[]
+): number[] {
+  const ids = candidates ?? nodes.map((_, i) => i);
+  const distances = ids.map((id) => ({
+    id,
+    distance: cosineDistance(query, vectors[id]!),
+  }));
+  distances.sort((a, b) => a.distance - b.distance);
+  return distances.slice(0, k).map((d) => d.id);
 }
