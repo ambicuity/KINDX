@@ -61,8 +61,8 @@ import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary } fr
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
   CircuitBreaker,
+  FixedWindowRateLimiter,
   McpToolListCache,
-  SessionRateLimiter,
   ToolQuotaManager,
   applyToolPolicy,
   buildResolvedHttpHeaders,
@@ -1857,7 +1857,8 @@ export type HttpServerHandle = {
   url: string;
   stop: () => Promise<void>;
   controlPlane: {
-    rateLimiter: InstanceType<typeof SessionRateLimiter>;
+    rateLimiter: InstanceType<typeof FixedWindowRateLimiter>;
+    initRateLimiter: InstanceType<typeof FixedWindowRateLimiter>;
     quotaManager: InstanceType<typeof ToolQuotaManager>;
     circuitBreaker: InstanceType<typeof CircuitBreaker>;
   };
@@ -1941,9 +1942,14 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     resetTimeoutMs: parseEnvInt(process.env.KINDX_CIRCUIT_BREAKER_RESET_MS, 30000),
   };
 
-  const rateLimiter = new SessionRateLimiter(DEFAULT_RATE_LIMITER_CONFIG);
+  const rateLimiter = new FixedWindowRateLimiter(DEFAULT_RATE_LIMITER_CONFIG);
   const quotaManager = new ToolQuotaManager(DEFAULT_QUOTA_CONFIG);
   const circuitBreaker = new CircuitBreaker(DEFAULT_CIRCUIT_BREAKER_CONFIG);
+  // IP-based rate limiter for initialize requests to prevent session creation spam
+  const initRateLimiter = new FixedWindowRateLimiter({
+    maxRequests: parseEnvInt(process.env.KINDX_INIT_RATE_LIMIT_MAX, 100),
+    windowMs: parseEnvInt(process.env.KINDX_INIT_RATE_LIMIT_WINDOW_MS, 60000),
+  });
   const queryTimeoutMs = parseQueryTimeoutMs();
   const dedupeMode = getDedupeMode();
   const inFlightBySession = new Map<string, Map<string, Promise<{ results: SearchResultItem[]; metadata: QueryMetadata }>>>();
@@ -2799,6 +2805,28 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       }
 
       if (pathname === "/mcp" && nodeReq.method === "POST") {
+        // Circuit breaker gate — reject requests when breaker is open
+        if (!circuitBreaker.allow()) {
+          nodeRes.writeHead(503, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32004, message: "Service unavailable: circuit breaker open" },
+            id: null,
+          }));
+          recordHttpMetrics(503);
+          logger.warn("503 Circuit breaker open, rejecting /mcp request");
+          // Audit log circuit breaker open event
+          try {
+            recordAudit(store.db, {
+              action: "circuit_open",
+              scope: "mcp",
+              detail: "circuit breaker open, rejecting request",
+              success: false,
+            });
+          } catch { /* audit logging must never fail the request */ }
+          return;
+        }
+
         const rawBody = await collectBody(nodeReq);
         const body = JSON.parse(rawBody);
         const label = describeRequest(body);
@@ -2828,6 +2856,28 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           transport = existingSession.transport;
           activeContext = existingSession.context;
         } else if (isInitializeRequest(body)) {
+          // IP-based rate limiting for initialize requests to prevent session creation spam
+          const clientIp = nodeReq.socket.remoteAddress || "unknown";
+          if (!initRateLimiter.check(clientIp)) {
+            nodeRes.writeHead(429, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32005, message: "Rate limit exceeded for initialize requests" },
+              id: body?.id ?? null,
+            }));
+            recordHttpMetrics(429);
+            logger.warn(`429 Rate limit exceeded for initialize requests from ip=${clientIp}`);
+            // Audit log rate limit event for initialize
+            try {
+              recordAudit(store.db, {
+                action: "rate_limited",
+                scope: `init:${clientIp}`,
+                detail: `rate limit exceeded for initialize requests from ip=${clientIp}`,
+                success: false,
+              });
+            } catch { /* audit logging must never fail the request */ }
+            return;
+          }
           const initialContext = extractScopeContextFromInitialize(body);
           transport = await createSession(initialContext);
           activeContext = initialContext;
@@ -2839,6 +2889,28 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             id: body?.id ?? null,
           }));
           recordHttpMetrics(400);
+          return;
+        }
+
+        // Session-based rate limiting — skip for initialize (no session yet)
+        if (sessionId && !rateLimiter.check(sessionId)) {
+          nodeRes.writeHead(429, { "Content-Type": "application/json" });
+          nodeRes.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32005, message: "Rate limit exceeded for this session" },
+            id: body?.id ?? null,
+          }));
+          recordHttpMetrics(429);
+          logger.warn(`429 Rate limit exceeded for session=${sessionId}`);
+          // Audit log rate limit event
+          try {
+            recordAudit(store.db, {
+              action: "rate_limited",
+              scope: sessionId,
+              detail: `rate limit exceeded for session=${sessionId}`,
+              success: false,
+            });
+          } catch { /* audit logging must never fail the request */ }
           return;
         }
 
@@ -2855,6 +2927,31 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               id: body?.id ?? null,
             }));
             recordHttpMetrics(403);
+            return;
+          }
+
+          // Per-session tool quota enforcement
+          if (sessionId && !quotaManager.check(sessionId, toolName)) {
+            nodeRes.writeHead(429, { "Content-Type": "application/json" });
+            nodeRes.end(JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32006,
+                message: `Tool quota exceeded for '${toolName}' in this session`,
+              },
+              id: body?.id ?? null,
+            }));
+            recordHttpMetrics(429);
+            logger.warn(`429 Tool quota exceeded: session=${sessionId} tool=${toolName}`);
+            // Audit log quota exceeded event
+            try {
+              recordAudit(store.db, {
+                action: "quota_exceeded",
+                scope: `${sessionId}/${toolName}`,
+                detail: `tool quota exceeded for '${toolName}' in session=${sessionId}`,
+                success: false,
+              });
+            } catch { /* audit logging must never fail the request */ }
             return;
           }
 
@@ -3048,6 +3145,13 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           }
         }
 
+        // Record circuit breaker state based on response
+        if (buffered.status >= 500) {
+          circuitBreaker.recordFailure();
+        } else {
+          circuitBreaker.recordSuccess();
+        }
+
         nodeRes.writeHead(buffered.status, buffered.headers);
         nodeRes.end(buffered.body);
         recordHttpMetrics(buffered.status);
@@ -3126,6 +3230,10 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       const code = (err as any)?.code as string | undefined;
       const message = err instanceof Error ? err.message : "Internal Server Error";
       const status = code === "query_timeout" ? 408 : 500;
+      // Record circuit breaker failure on unhandled errors
+      if (status >= 500) {
+        circuitBreaker.recordFailure();
+      }
       nodeRes.writeHead(status, { "Content-Type": "application/json" });
       nodeRes.end(JSON.stringify({
         error: message,
@@ -3222,7 +3330,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
   });
 
   logger.info(`KINDX MCP server listening on ${url}`);
-  return { httpServer, port: actualPort, host: boundHost, url, stop, controlPlane: { rateLimiter, quotaManager, circuitBreaker } };
+  return { httpServer, port: actualPort, host: boundHost, url, stop, controlPlane: { rateLimiter, initRateLimiter, quotaManager, circuitBreaker } };
 }
 
 // Run if this is the main module
