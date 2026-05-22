@@ -179,11 +179,41 @@ function pickServerConfig(
   id: string
 ): { source: ResolvedMcpServerControl["source"]; cfg: McpServerControlConfig } {
   const fromRuntime = all.runtime?.mcp_servers?.[id];
-  if (fromRuntime) return { source: "runtime", cfg: fromRuntime };
+  if (fromRuntime) {
+    process.stderr.write(JSON.stringify({
+      event: "config_resolved",
+      server: id,
+      tier: "runtime",
+      timestamp: new Date().toISOString(),
+    }) + "\n");
+    return { source: "runtime", cfg: fromRuntime };
+  }
   const fromProject = all.project?.mcp_servers?.[id];
-  if (fromProject) return { source: "project", cfg: fromProject };
+  if (fromProject) {
+    process.stderr.write(JSON.stringify({
+      event: "config_resolved",
+      server: id,
+      tier: "project",
+      timestamp: new Date().toISOString(),
+    }) + "\n");
+    return { source: "project", cfg: fromProject };
+  }
   const fromUser = all.user?.mcp_servers?.[id];
-  if (fromUser) return { source: "user", cfg: fromUser };
+  if (fromUser) {
+    process.stderr.write(JSON.stringify({
+      event: "config_resolved",
+      server: id,
+      tier: "user",
+      timestamp: new Date().toISOString(),
+    }) + "\n");
+    return { source: "user", cfg: fromUser };
+  }
+  process.stderr.write(JSON.stringify({
+    event: "config_resolved",
+    server: id,
+    tier: "defaults",
+    timestamp: new Date().toISOString(),
+  }) + "\n");
   return { source: "defaults", cfg: {} };
 }
 

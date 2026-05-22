@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { McpToolListCache, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { McpToolListCache, isToolEnabledByPolicy, loadMcpControlPlaneConfig, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -126,5 +126,21 @@ describe("isToolEnabledByPolicy audit logging", () => {
       scope: "kindx/query",
       detail: expect.stringContaining("trusted_project=false"),
     });
+  });
+});
+
+describe("pickServerConfig config resolution logging", () => {
+  test("pickServerConfig logs which tier was used", () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const loaded = loadMcpControlPlaneConfig();
+      const resolved = resolveMcpServerControl("kindx", loaded);
+      // Default case should log "defaults" tier
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining("config_resolved")
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
