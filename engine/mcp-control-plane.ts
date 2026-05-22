@@ -59,6 +59,60 @@ export class FixedWindowRateLimiter {
 /** @deprecated Use {@link FixedWindowRateLimiter} instead. */
 export const SessionRateLimiter = FixedWindowRateLimiter;
 
+export type ToolQuotaConfig = {
+  defaultQuota: number;
+  toolQuotas?: Record<string, number>;
+  resetIntervalMs?: number;
+};
+
+/**
+ * Per-tool request quota manager. Tracks usage per session per tool
+ * and enforces configurable limits with periodic resets.
+ */
+export class ToolQuotaManager {
+  private readonly usage = new Map<string, { count: number; resetAt: number }>();
+  private readonly defaultQuota: number;
+  private readonly toolQuotas: Record<string, number>;
+  private readonly resetIntervalMs: number;
+
+  constructor(config: ToolQuotaConfig) {
+    this.defaultQuota = config.defaultQuota;
+    this.toolQuotas = config.toolQuotas ?? {};
+    this.resetIntervalMs = config.resetIntervalMs ?? 3_600_000; // 1 hour default
+  }
+
+  check(sessionId: string, toolName: string): boolean {
+    const key = `${sessionId}:${toolName}`;
+    const now = Date.now();
+    const quota = this.toolQuotas[toolName] ?? this.defaultQuota;
+    const entry = this.usage.get(key);
+
+    if (!entry || now >= entry.resetAt) {
+      this.usage.set(key, { count: 1, resetAt: now + this.resetIntervalMs });
+      return true;
+    }
+
+    if (entry.count >= quota) {
+      return false;
+    }
+
+    entry.count++;
+    return true;
+  }
+
+  reset(sessionId: string, toolName?: string): void {
+    if (toolName) {
+      this.usage.delete(`${sessionId}:${toolName}`);
+    } else {
+      for (const key of this.usage.keys()) {
+        if (key.startsWith(`${sessionId}:`)) {
+          this.usage.delete(key);
+        }
+      }
+    }
+  }
+}
+
 export type McpServerControlConfig = {
   enabled_tools?: string[];
   disabled_tools?: string[];

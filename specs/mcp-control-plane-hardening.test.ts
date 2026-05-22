@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { FixedWindowRateLimiter, McpToolListCache, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
+import { FixedWindowRateLimiter, McpToolListCache, ToolQuotaManager, isToolEnabledByPolicy, resolveMcpServerControl } from "../engine/mcp-control-plane.js";
 
 describe("cachePath validation", () => {
   test("rejects keys containing forward slash", () => {
@@ -270,5 +270,88 @@ describe("FixedWindowRateLimiter", () => {
     limiter.check("session1");
     const size = (limiter as any).windows.size;
     expect(size).toBe(1);
+  });
+});
+
+describe("ToolQuotaManager", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("allows requests under quota", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 100,
+      toolQuotas: { query: 50 },
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "get")).toBe(true);
+  });
+
+  test("blocks requests over tool-specific quota", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 100,
+      toolQuotas: { query: 2 },
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(false);
+  });
+
+  test("blocks requests over default quota", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 2,
+    });
+    expect(quotas.check("session1", "get")).toBe(true);
+    expect(quotas.check("session1", "get")).toBe(true);
+    expect(quotas.check("session1", "get")).toBe(false);
+  });
+
+  test("resets quotas periodically", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 1,
+      resetIntervalMs: 100,
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(false);
+    vi.advanceTimersByTime(150);
+    expect(quotas.check("session1", "query")).toBe(true);
+  });
+
+  test("tracks sessions independently", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 2,
+      toolQuotas: { query: 1 },
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(false);
+    expect(quotas.check("session2", "query")).toBe(true);
+  });
+
+  test("reset clears specific tool usage", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 1,
+      toolQuotas: { query: 1 },
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(false);
+    quotas.reset("session1", "query");
+    expect(quotas.check("session1", "query")).toBe(true);
+  });
+
+  test("reset clears all tool usage for session", () => {
+    const quotas = new ToolQuotaManager({
+      defaultQuota: 1,
+    });
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "query")).toBe(false);
+    expect(quotas.check("session1", "get")).toBe(true);
+    expect(quotas.check("session1", "get")).toBe(false);
+    quotas.reset("session1");
+    expect(quotas.check("session1", "query")).toBe(true);
+    expect(quotas.check("session1", "get")).toBe(true);
   });
 });
