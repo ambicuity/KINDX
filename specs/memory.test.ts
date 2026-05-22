@@ -15,6 +15,7 @@ import {
   initializeMemoryFeedbackSchema,
   recordFeedback,
   getFeedbackForScope,
+  computeFeedbackBias,
 } from "../engine/memory.js";
 
 const openDbs: Database[] = [];
@@ -370,5 +371,84 @@ describe("memory subsystem", () => {
     expect(summary[0]?.negative).toBe(1);
     expect(summary[0]?.neutral).toBe(0);
     expect(summary[0]?.total).toBe(3);
+  });
+
+  test("computeFeedbackBias returns empty Map for empty input", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+    const bias = computeFeedbackBias(db, "s1", []);
+    expect(bias.size).toBe(0);
+  });
+
+  test("positive feedback boosts bias above 1.0", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query", [
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+      { id: memId, satisfaction: "positive" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBeGreaterThan(1.0);
+  });
+
+  test("negative feedback reduces bias below 1.0", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "s1", "query", [
+      { id: memId, satisfaction: "negative" },
+      { id: memId, satisfaction: "negative" },
+      { id: memId, satisfaction: "negative" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBeLessThan(1.0);
+  });
+
+  test("no feedback defaults to 1.0 bias", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBe(1.0);
+  });
+
+  test("feedback from different scopes does not affect bias", () => {
+    const db = createMemoryDb();
+    initializeMemoryFeedbackSchema(db);
+
+    const mem = db.prepare(
+      `INSERT INTO memories (scope, key, value, confidence, source, appeared_count, accessed_count, created_at, last_appeared_at, search_text)
+       VALUES (?, ?, ?, 1.0, NULL, 1, 0, datetime('now'), datetime('now'), ?)`
+    ).run("s1", "test:key", "value", "test:key value");
+    const memId = Number(mem.lastInsertRowid);
+
+    recordFeedback(db, "other-scope", "query", [
+      { id: memId, satisfaction: "positive" },
+    ]);
+
+    const bias = computeFeedbackBias(db, "s1", [memId]);
+    expect(bias.get(memId)).toBe(1.0);
   });
 });

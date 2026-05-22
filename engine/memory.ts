@@ -580,6 +580,45 @@ export function recordFeedback(
   });
 }
 
+export function computeFeedbackBias(
+  db: Database,
+  scope: string,
+  memoryIds: number[],
+): Map<number, number> {
+  const biasMap = new Map<number, number>();
+  if (memoryIds.length === 0) return biasMap;
+
+  const normalizedScope = normalizeScope(scope);
+  const boostFactor = Number(process.env.KINDX_FEEDBACK_BOOST_FACTOR) || 0.3;
+  const placeholders = memoryIds.map(() => "?").join(",");
+
+  try {
+    const rows = db.prepare(`
+      SELECT result_id,
+        SUM(CASE WHEN satisfaction = 'positive' THEN 1 ELSE 0 END) AS positive,
+        COUNT(*) AS total
+      FROM memory_feedback
+      WHERE scope = ? AND result_id IN (${placeholders})
+      GROUP BY result_id
+    `).all(normalizedScope, ...memoryIds) as { result_id: number; positive: number; total: number }[];
+
+    for (const row of rows) {
+      const ratio = Number(row.positive) / Number(row.total);
+      const bias = 1 + boostFactor * (ratio - 0.5);
+      biasMap.set(Number(row.result_id), bias);
+    }
+  } catch {
+    // Table may not exist yet; treat as no feedback
+  }
+
+  // Fill in default 1.0 for IDs not in feedback table
+  for (const id of memoryIds) {
+    if (!biasMap.has(id)) biasMap.set(id, 1.0);
+  }
+
+  return biasMap;
+}
+
 export function getFeedbackForScope(db: Database, scope: string): FeedbackSummary[] {
   const normalizedScope = normalizeScope(scope);
   const rows = db.prepare(`
@@ -806,7 +845,14 @@ export function textSearchMemory(db: Database, scopeInput: string, queryInput: s
       hitRate: Number(row.hit_rate || 0),
       score,
     };
-  }).sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
+    }).sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
+
+  // Apply feedback bias
+  const feedbackBias = computeFeedbackBias(db, scope, scored.map(s => s.id));
+  for (const s of scored) {
+    s.score *= feedbackBias.get(s.id) ?? 1.0;
+  }
+  scored.sort((a, b) => (b.score - a.score) || (b.hitRate || 0) - (a.hitRate || 0));
 
   incrementCounters(db, scored.map((s) => s.id));
 
@@ -875,6 +921,13 @@ export function semanticSearchMemoryWithVector(
     .filter((row) => row.similarity >= threshold)
     .sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
     .slice(0, limit);
+
+  // Apply feedback bias
+  const feedbackBias = computeFeedbackBias(db, scope, scored.map(s => s.id));
+  for (const s of scored) {
+    s.similarity = (s.similarity ?? 0) * (feedbackBias.get(s.id) ?? 1.0);
+  }
+  scored.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
 
   incrementCounters(db, scored.map((s) => s.id));
 
