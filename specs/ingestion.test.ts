@@ -19,6 +19,37 @@ describe("ingestion adapter", () => {
     }
   });
 
+  test("ingests CSV with schema-aware chunking", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "sample.csv");
+      const csv = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago\n";
+      await writeFile(path, csv);
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("csv");
+      expect(out.metadata.extractor).toBe("csv_parser");
+      expect(out.text).toContain("Schema: name: string, age: string, city: string");
+      expect(out.text).toContain("Alice, 30, NYC");
+      expect(out.warnings).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("handles empty CSV gracefully", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
+    try {
+      const path = join(dir, "empty.csv");
+      await writeFile(path, "");
+      const out = await ingestFile(path);
+      expect(out.metadata.format).toBe("csv");
+      expect(out.text).toBe("");
+      expect(out.warnings).toContain("extractor_failed:csv_empty");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("marks unsupported extensions with deterministic warning", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kindx-ingest-"));
     try {

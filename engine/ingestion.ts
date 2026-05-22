@@ -152,6 +152,95 @@ const MAX_DOC_BYTES = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 25 * 1024 * 1024;
 })();
 
+function parseCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]!;
+
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++; // Skip next quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+function ingestCsv(path: string): IngestionResult {
+  const warnings: string[] = [];
+  const bytes = statSync(path).size;
+
+  try {
+    const content = readFileSync(path, "utf-8");
+    const lines = content.split("\n").filter(line => line.trim());
+
+    if (lines.length === 0) {
+      warnings.push("extractor_failed:csv_empty");
+      return {
+        text: "",
+        metadata: { format: "csv", extractor: "csv_parser", bytes },
+        warnings,
+      };
+    }
+
+    // Parse header
+    const header = parseCsvLine(lines[0]!);
+    const schema = header.map(col => `${col}: string`).join(", ");
+
+    // Parse rows
+    const rows: string[][] = [];
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i]!.trim()) {
+        rows.push(parseCsvLine(lines[i]!));
+      }
+    }
+
+    // Create chunks preserving row boundaries
+    const maxRowsPerChunk = 100;
+    const chunks: string[] = [];
+
+    for (let i = 0; i < rows.length; i += maxRowsPerChunk) {
+      const chunkRows = rows.slice(i, i + maxRowsPerChunk);
+      const chunkContent = [
+        `Schema: ${schema}`,
+        `Rows ${i + 1}-${i + chunkRows.length}:`,
+        header.join(", "),
+        ...chunkRows.map(row => row.join(", "))
+      ].join("\n");
+      chunks.push(chunkContent);
+    }
+
+    // Combine chunks with separator
+    const text = chunks.join("\n\n---\n\n");
+
+    return {
+      text,
+      metadata: { format: "csv", extractor: "csv_parser", bytes },
+      warnings,
+    };
+  } catch (error) {
+    warnings.push(`extractor_failed:csv_error:${error instanceof Error ? error.message : String(error)}`);
+    return {
+      text: "",
+      metadata: { format: "csv", extractor: "csv_parser_error", bytes },
+      warnings,
+    };
+  }
+}
+
 async function ingestImage(path: string): Promise<IngestionResult> {
   const warnings: string[] = [];
   const bytes = statSync(path).size;
@@ -218,6 +307,7 @@ export async function ingestFile(path: string): Promise<IngestionResult> {
   if (ext === ".pdf") return ingestPdf(path);
   if (ext === ".docx") return ingestDocx(path);
   if (IMAGE_EXTENSIONS.has(ext)) return ingestImage(path);
+  if (ext === ".csv") return ingestCsv(path);
 
   if (TEXT_EXTENSIONS.has(ext) || ext === "") {
     if (bytes > MAX_DOC_BYTES) {
