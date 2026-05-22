@@ -207,6 +207,22 @@ export class LLMPool {
     }
     this.available++;
   }
+
+  /**
+   * Reject all waiting acquire() calls and clear the queue.
+   * Use for graceful shutdown so callers don't hang indefinitely.
+   */
+  shutdown(): void {
+    const err = new LLMPoolExhaustedError("LLM pool is shutting down");
+    while (this.waitQueue.length > 0) {
+      const entry = this.waitQueue.shift()!;
+      if (entry.settled) continue;
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.detachAbort?.();
+      entry.settled = true;
+      entry.reject(err);
+    }
+  }
 }
 
 export class LLMPoolExhaustedError extends Error {

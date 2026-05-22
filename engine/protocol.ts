@@ -3143,6 +3143,8 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       port: actualPort,
       url,
     });
+    // Start idle session reaper for HTTP transport
+    SessionRegistry.startReaper();
   } catch (err) {
     emitStartupEvent("mcp_startup_failure", {
       phase: "binding",

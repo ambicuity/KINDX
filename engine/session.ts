@@ -89,6 +89,9 @@ export class KindxSession {
   /** Timestamp when this session was constructed. */
   readonly createdAt: number;
 
+  /** Timestamp of last activity (embedding, query log, cache lookup). */
+  lastActivityAt: number;
+
   /** Whether this session has been explicitly aborted. */
   private _aborted = false;
 
@@ -97,6 +100,7 @@ export class KindxSession {
     this.scopeContext = scopeContext;
     this._abortController = new AbortController();
     this.createdAt = Date.now();
+    this.lastActivityAt = this.createdAt;
   }
 
   // ---------------------------------------------------------------------------
@@ -134,6 +138,7 @@ export class KindxSession {
    * @returns Embedding vector, or null if the LLM failed
    */
   async cachedEmbed(text: string, isQuery: boolean = true): Promise<number[] | null> {
+    this.lastActivityAt = Date.now();
     const cacheKey = `${isQuery ? "q" : "d"}:${text}`;
     const cached = this._embeddingCache.get(cacheKey);
     if (cached !== undefined && cached !== null) {
@@ -164,6 +169,7 @@ export class KindxSession {
    * Useful for checking before making an LLM call.
    */
   getCachedEmbedding(text: string, isQuery: boolean = true): number[] | null {
+    this.lastActivityAt = Date.now();
     const v = this._embeddingCache.get(`${isQuery ? "q" : "d"}:${text}`);
     return v ?? null;
   }
@@ -182,6 +188,7 @@ export class KindxSession {
    * Oldest entries are evicted when the log reaches QUERY_LOG_MAX.
    */
   logQuery(query: string): void {
+    this.lastActivityAt = Date.now();
     this._queryLog.push({ query, ts: Date.now() });
     if (this._queryLog.length > KindxSession.QUERY_LOG_MAX) {
       this._queryLog.shift();
@@ -239,12 +246,54 @@ export class KindxSession {
  */
 export const SessionRegistry = {
   _sessions: new Map<string, KindxSession>(),
+  _reaperTimer: null as ReturnType<typeof setInterval> | null,
+
+  /** Configurable idle timeout (env: KINDX_SESSION_IDLE_TIMEOUT_MS, default: 10 minutes). */
+  get _idleTimeoutMs(): number {
+    const raw = parseInt(process.env.KINDX_SESSION_IDLE_TIMEOUT_MS || "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+  },
+
+  /** Configurable reaper interval (env: KINDX_SESSION_REAPER_INTERVAL_MS, default: 60 seconds). */
+  get _reaperIntervalMs(): number {
+    const raw = parseInt(process.env.KINDX_SESSION_REAPER_INTERVAL_MS || "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 60 * 1000;
+  },
+
+  /** Configurable max sessions limit (env: KINDX_MAX_SESSIONS, default: 100). */
+  get _maxSessions(): number {
+    const raw = parseInt(process.env.KINDX_MAX_SESSIONS || "", 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 100;
+  },
 
   /**
    * Create and register a new session.
    * If a session with the same ID already exists, it is replaced.
+   * When the max sessions limit is reached, the oldest session (by createdAt) is evicted.
+   * Auto-starts the idle reaper on first create.
    */
   create(sessionId: string, scopeContext: SessionScopeContext = {}): KindxSession {
+    this.startReaper();
+
+    // Evict oldest session if at capacity
+    if (this._sessions.size >= this._maxSessions) {
+      let oldestId: string | null = null;
+      let oldestCreatedAt = Infinity;
+      for (const [id, sess] of this._sessions) {
+        if (sess.createdAt < oldestCreatedAt) {
+          oldestCreatedAt = sess.createdAt;
+          oldestId = id;
+        }
+      }
+      if (oldestId) {
+        process.stderr.write(
+          `[SessionRegistry] max sessions (${this._maxSessions}) reached, evicting oldest session ${oldestId}\n`
+        );
+        const oldest = this._sessions.get(oldestId);
+        oldest?.dispose();
+      }
+    }
+
     const existing = this._sessions.get(sessionId);
     if (existing) {
       existing.dispose();
@@ -276,8 +325,34 @@ export const SessionRegistry = {
     return this._sessions.size;
   },
 
-  /** Dispose all sessions (call on server shutdown). */
+  /** Start the idle session reaper if not already running. */
+  startReaper(): void {
+    if (this._reaperTimer) return;
+    this._reaperTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [id, session] of this._sessions) {
+        if (now - session.lastActivityAt > this._idleTimeoutMs) {
+          process.stderr.write(
+            `[SessionRegistry] reaping idle session ${id} (idle for ${Math.round((now - session.lastActivityAt) / 1000)}s)\n`
+          );
+          session.dispose();
+        }
+      }
+    }, this._reaperIntervalMs);
+    this._reaperTimer.unref?.();
+  },
+
+  /** Stop the idle session reaper. */
+  stopReaper(): void {
+    if (this._reaperTimer) {
+      clearInterval(this._reaperTimer);
+      this._reaperTimer = null;
+    }
+  },
+
+  /** Dispose all sessions and stop the reaper (call on server shutdown). */
   async disposeAll(): Promise<void> {
+    this.stopReaper();
     for (const session of this._sessions.values()) {
       session.dispose();
     }
