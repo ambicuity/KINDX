@@ -732,16 +732,15 @@ function buildInstructions(store: Store, session?: KindxSession): string {
     lines.push("Tools: `query` (lex/vec/hyde sub-queries), `get` (path or #docid), `multi_get` (glob/list). Use `minScore: 0.5` to filter low-confidence results. File paths in results are collection-relative.");
   }
 
-  // --- Hard ceiling (byte-accurate: use Buffer.byteLength for UTF-8 multi-byte chars) ---
+  // --- Hard ceiling (byte-accurate, UTF-8 safe) ---
   let out = lines.join("\n");
-  if (Buffer.byteLength(out, "utf8") > MAX_INSTRUCTIONS_BYTES) {
-    const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
-    const budget = MAX_INSTRUCTIONS_BYTES - markerBytes;
-    // Slice by characters until the UTF-8 byte count fits within the budget.
-    let sliced = Buffer.from(out, "utf8").subarray(0, budget).toString("utf8");
-    // The subarray cut may have split a multi-byte character; trim trailing replacement chars.
-    // Replacing the incomplete sequence is handled automatically by toString("utf8").
-    out = sliced + TRUNCATION_MARKER;
+  const outBuf = Buffer.from(out, "utf8");
+  if (outBuf.length > MAX_INSTRUCTIONS_BYTES) {
+    const markerLen = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+    let end = MAX_INSTRUCTIONS_BYTES - markerLen;
+    // Walk back to a UTF-8 boundary: continuation bytes are 10xxxxxx.
+    while (end > 0 && (outBuf[end] & 0xc0) === 0x80) end--;
+    out = outBuf.subarray(0, end).toString("utf8") + TRUNCATION_MARKER;
   }
   return out;
 }

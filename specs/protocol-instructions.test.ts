@@ -227,4 +227,33 @@ describe("buildInstructions — auto-invocation contract", () => {
     expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(8 * 1024);
     expect(instructions).toContain("[instructions truncated — see kindx://capabilities]");
   });
+
+  test("UTF-8 truncation stays within budget and introduces no replacement chars", () => {
+    const fx = setupFixture({
+      collections: { docs: { path: "/tmp/docs" } },
+      seed: { docs: [{ path: "readme.md", title: "Readme", body: "hello" }] },
+      withVectorIndex: true,
+    });
+    fixtures.push(fx);
+
+    const workDir = mkdtempSync(join(tmpdir(), `kindx-instr-utf8-`));
+    const agentsFile = join(workDir, "AGENTS.md");
+    // "é" is 2 UTF-8 bytes; 32 * 1024 repetitions = 64 KB raw — well over the 8 KB cap.
+    writeFileSync(agentsFile, "é".repeat(32 * 1024));
+
+    const prevCwd = process.cwd();
+    process.chdir(workDir);
+
+    let instructions: string;
+    try {
+      instructions = buildInstructionsForTest(makeStore(fx.db));
+    } finally {
+      process.chdir(prevCwd);
+      try { rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+
+    expect(Buffer.byteLength(instructions, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(instructions.endsWith("[instructions truncated — see kindx://capabilities]")).toBe(true);
+    expect(instructions.includes("�")).toBe(false);
+  });
 });
