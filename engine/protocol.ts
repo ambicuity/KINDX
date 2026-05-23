@@ -591,6 +591,44 @@ const MEMORY_PREFETCH_LIMIT = 3;
 const MEMORY_PREFETCH_LINE_MAX_CHARS = 120;
 const MEMORY_PREFETCH_TOTAL_MAX_CHARS = 360;
 
+// =============================================================================
+// Auto-invocation contract — appears at top of MCP `initialize.instructions`.
+// Rewording this changes how aggressively every MCP-aware agent picks up kindx.
+// Snapshot-tested in specs/protocol-instructions.test.ts; update snapshots
+// deliberately, with a one-line rationale in the commit message.
+// =============================================================================
+const AUTO_INVOCATION_CONTRACT = [
+  "## When to call KINDX (auto-invocation contract)",
+  "",
+  "Before answering any user turn that is not a greeting, a pure code-generation request",
+  "with no reference to user files, or a trivial yes/no, call `query` first.",
+  "Auto-invoke is default-on. Skip only when:",
+  "  (a) the user explicitly says \"don't search\",",
+  "  (b) you already have results from a query this turn, or",
+  "  (c) the request is exclusively about writing new code with no need to consult prior notes.",
+  "",
+  "Decision table:",
+  "  | User turn shape                                          | First call                       |",
+  "  |----------------------------------------------------------|----------------------------------|",
+  "  | \"what did I write about X\" / \"find …\" / \"show me …\"     | `query` (lex+vec)                |",
+  "  | \"open <path>\" / mentions a specific file                 | `get`                            |",
+  "  | Question that could be answered by existing notes        | `query` (vec+hyde)               |",
+  "  | New code, no file reference                              | skip kindx                       |",
+  "  | Greeting / chitchat                                      | skip kindx                       |",
+  "  | Memory-related (\"remember\", \"what did we decide\")        | `memory_search` then `memory_put`|",
+  "",
+  "Cost: default `query` returns top 3 snippets (~600 tokens). Pull bodies with `get`",
+  "only for snippets that look relevant. Set `KINDX_AUTO_INVOKE=off` on the server to disable.",
+].join("\n");
+
+const MAX_INSTRUCTIONS_BYTES = 8 * 1024;
+const TRUNCATION_MARKER = "\n\n[instructions truncated — see kindx://capabilities]";
+
+function isAutoInvokeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.KINDX_AUTO_INVOKE ?? "").trim().toLowerCase();
+  return v !== "off" && v !== "0" && v !== "false";
+}
+
 function buildInstructions(store: Store, session?: KindxSession): string {
   const status = store.getStatus();
   const lines: string[] = [];
