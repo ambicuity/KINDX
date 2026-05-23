@@ -51,6 +51,24 @@ describe("tool descriptions lead with WHEN-TO-USE", () => {
     // at that point.
   });
 
+  test("get/multi_get/status descriptions lead with the agreed WHEN-TO-USE sentence", () => {
+    const tools = listRegisteredToolsForTest();
+    const expectedLeads: Record<string, string> = {
+      get: "Call after `query` to read the full body",
+      multi_get: "Call when you need multiple related docs at once",
+      status: "Call once per session if `instructions` did not list collections",
+    };
+    for (const [name, lead] of Object.entries(expectedLeads)) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool, `missing tool ${name}`).toBeDefined();
+      expect(
+        tool!.description.split("\n")[0],
+        `tool ${name} should lead with: ${lead}`,
+      ).toContain(lead);
+    }
+    // TODO(Task 6): extend to memory_search/memory_put once their descriptions are rewritten.
+  });
+
   test("query.limit defaults to 3 (tight triage)", () => {
     const tools = listRegisteredToolsForTest();
     const query = tools.find((t) => t.name === "query")!;

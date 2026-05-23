@@ -1311,7 +1311,9 @@ Example:
     "get",
     {
       title: "Get Document",
-      description: "Retrieve the full content of a document by its file path or docid. Use paths or docids (#abc123) from search results. Suggests similar files if not found.",
+      description: `Call after \`query\` to read the full body of a result that looked promising in a snippet. Also call when the user mentions a specific file path or docid.
+
+Use paths or docids (#abc123) from search results. Supports line offset via "file.md:100" or the \`fromLine\` param. Suggests similar files if not found.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         file: z.string().describe("File path or docid from search results (e.g., 'pages/meeting.md', '#abc123', or 'pages/meeting.md:100' to start at line 100)"),
@@ -1432,7 +1434,7 @@ Example:
     "multi_get",
     {
       title: "Multi-Get Documents",
-      description: "Retrieve multiple documents by glob pattern (e.g., 'journals/2025-05*.md') or comma-separated list. Skips files larger than maxBytes.",
+      description: `Call when you need multiple related docs at once — e.g., a glob like 'journals/2025-05*.md' or a comma-separated list of paths returned by a prior \`query\`. Skips files larger than maxBytes (default 10 KB).`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         pattern: z.string().describe("Glob pattern or comma-separated list of file paths"),
@@ -1551,7 +1553,7 @@ Example:
     "status",
     {
       title: "Index Status",
-      description: "Show the status of the KINDX index: collections, document counts, and health information.",
+      description: `Call once per session if \`instructions\` did not list collections — surfaces what's actually indexed, vector readiness, and scale metrics. Rarely needed mid-turn.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
     },
