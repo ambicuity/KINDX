@@ -3000,6 +3000,7 @@ function parseCLI() {
       http: { type: "boolean" },
       daemon: { type: "boolean" },
       port: { type: "string" },
+      "health-check": { type: "boolean" },
       "log-format": { type: "string" },
       "log-level": { type: "string" },
       "check-only": { type: "boolean" },
@@ -4638,6 +4639,19 @@ if (isMain) {
     }
 
     case "mcp": {
+      if (cli.values["health-check"]) {
+        try {
+          const store = createStore();
+          const status = store.getStatus();
+          try { store.close?.(); } catch { /* ignore */ }
+          console.log(JSON.stringify({ ok: true, totalDocuments: status.totalDocuments, collections: status.collections.length }));
+          process.exit(0);
+        } catch (err: any) {
+          console.error(JSON.stringify({ ok: false, error: String(err?.message ?? err) }));
+          process.exit(1);
+        }
+      }
+
       const sub = cli.args[0]; // stop | status | undefined
 
       // Cache dir for PID/log files — same dir as the index
