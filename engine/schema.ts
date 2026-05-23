@@ -5,17 +5,51 @@ import { initializeAiUsageSchema } from "./ai-usage.js";
 import { KINDX_SCHEMA_VERSION, getUserVersion, setUserVersion } from "./utils/schema-version.js";
 import { quietWarn } from "./utils/quiet-warn.js";
 
+/**
+ * Forward-only schema migrations. Each entry runs exactly once on databases
+ * whose current user_version is < `to`. The runner only stamps user_version
+ * after every applicable migration has executed, so bumping
+ * KINDX_SCHEMA_VERSION without adding a matching entry here is a hard error
+ * instead of silently marking unmigrated databases as up-to-date.
+ *
+ * Add a new migration as `{ from: N, to: N+1, run(db) { /* ... *\/ } }`.
+ */
+const SCHEMA_MIGRATIONS: ReadonlyArray<{ from: number; to: number; run: (db: Database) => void }> = [
+  {
+    from: 0,
+    to: 1,
+    run(db) {
+      // Schema version 0 -> 1: drop the legacy `path_contexts` and `collections`
+      // tables superseded by ~/.config/kindx/index.yml in v1.0.
+      dropLegacyV0Tables(db);
+    },
+  },
+];
+
+function applyMigrations(db: Database, current: number): number {
+  let v = current;
+  for (const step of SCHEMA_MIGRATIONS) {
+    if (step.from < v || step.to <= v) continue;
+    if (step.from !== v) {
+      throw new Error(
+        `schema: migration step ${step.from}->${step.to} cannot run from current version ${v}; missing intermediate migration.`
+      );
+    }
+    step.run(db);
+    setUserVersion(db, step.to);
+    v = step.to;
+  }
+  if (v < KINDX_SCHEMA_VERSION) {
+    throw new Error(
+      `schema: no migration registered to reach KINDX_SCHEMA_VERSION=${KINDX_SCHEMA_VERSION}; stopped at v${v}. Add an entry to SCHEMA_MIGRATIONS.`
+    );
+  }
+  return v;
+}
+
 export function initializeCoreSchema(db: Database): void {
   const currentVersion = getUserVersion(db);
-  // Schema version 0 = legacy / fresh DB. Version 1 = post-YAML-migration.
-  // The legacy `path_contexts` and `collections` tables were superseded by
-  // ~/.config/kindx/index.yml in v1.0. Drop them ONCE during the v0 -> v1
-  // transition, after warning if they hold any rows. Previously this DROP
-  // ran on every initialization, silently destroying any user data that
-  // happened to exist in those tables.
-  if (currentVersion < 1) {
-    dropLegacyV0Tables(db);
-  }
+  applyMigrations(db, currentVersion);
 
   // Content-addressable storage - the source of truth for document content
   db.exec(`
@@ -203,10 +237,10 @@ export function initializeCoreSchema(db: Database): void {
   setCapability.run("encryption", process.env.KINDX_ENCRYPTION_KEY ? "keyed-runtime" : "none", now);
   setCapability.run("extractors", "native-text+pdf-docx-adapter-v1+vision-model+csv-json", now);
 
-  // Stamp schema version so future startups skip the v0 migration window.
-  if (currentVersion < KINDX_SCHEMA_VERSION) {
-    setUserVersion(db, KINDX_SCHEMA_VERSION);
-  }
+  // user_version is already stamped by applyMigrations() at the top of this
+  // function — after every registered step ran. No fallback stamp here:
+  // bumping KINDX_SCHEMA_VERSION without a matching migration is a hard
+  // error rather than a silent version-only bump.
 }
 
 export function storeDocumentSchema(
