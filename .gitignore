@@ -29,6 +29,7 @@ bun.lock
 # Test artifacts
 coverage/
 .vitest/
+test-results/
 test_corpus/
 test_watch_collection/
 mock_chroma.sqlite3
