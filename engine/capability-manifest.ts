@@ -14,6 +14,19 @@
 import type { Store } from "./repository.js";
 import { buildOperationalStatus } from "./diagnostics.js";
 
+/**
+ * Local copy of protocol.ts's env-gate helper.
+ *
+ * Duplicated here intentionally to break a circular import:
+ * protocol.ts already imports buildCapabilityManifest from this module, so
+ * importing back into it would create a cycle. The check is a 3-line env
+ * lookup; keep both in sync if the gate semantics ever change.
+ */
+function isAutoInvokeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.KINDX_AUTO_INVOKE ?? "").trim().toLowerCase();
+  return v !== "off" && v !== "0" && v !== "false";
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -61,6 +74,18 @@ export type CapabilityManifest = {
     totalDocuments: number;
     error?: string;
   };
+  /**
+   * Auto-invocation observability.
+   * - `contractEmitted`: true when the auto-invocation contract is active
+   *   (env gate on) AND there is at least one collection to search. MCP
+   *   clients can read this to verify the contract is in force.
+   * - `lastTurnTrigger`: trigger source of the most recent recorded tool
+   *   call ("agent-auto" | "user-explicit" | "unknown"), if any.
+   */
+  autoInvocation: {
+    contractEmitted: boolean;
+    lastTurnTrigger?: string;
+  };
 };
 
 // =============================================================================
@@ -98,6 +123,9 @@ export function buildCapabilityManifest(
       encryption: { enabled: false, keyConfigured: false },
       totalDocuments: 0,
     },
+    autoInvocation: {
+      contractEmitted: false,
+    },
   };
 
   try {
@@ -120,6 +148,19 @@ export function buildCapabilityManifest(
       },
       totalDocuments: status.totalDocuments,
     };
+    manifest.autoInvocation.contractEmitted =
+      isAutoInvokeEnabled() && status.collections.length > 0;
+    // Best-effort lookup of the most recent recorded trigger. Wrapped in
+    // try/catch because the `mcp_query_log` table is created lazily by
+    // initializeCoreSchema, and we want this to be a no-op on older indexes.
+    try {
+      const row = store.db
+        .prepare(`SELECT trigger FROM mcp_query_log ORDER BY id DESC LIMIT 1`)
+        .get() as { trigger: string | null } | undefined;
+      if (row?.trigger) {
+        manifest.autoInvocation.lastTurnTrigger = row.trigger;
+      }
+    } catch { /* table absent or read failed — leave lastTurnTrigger undefined */ }
   } catch (err) {
     manifest.runtime.error = err instanceof Error ? err.message : String(err);
   }

@@ -32,11 +32,23 @@ export type SessionScopeContext = {
 };
 
 /**
+ * Whether a tool call was triggered by the agent automatically (per the
+ * auto-invocation contract), by an explicit user request, or undetermined.
+ * Default is "unknown" when the MCP client did not pass _meta.kindx.trigger.
+ */
+export type TriggerSource = "user-explicit" | "agent-auto" | "unknown";
+
+/**
  * A single query turn log entry for context enrichment.
  */
 export type QueryLogEntry = {
   query: string;
   ts: number; // Unix ms timestamp
+  /**
+   * Origin of the tool call that produced this query, if known.
+   * Recorded from `params._meta.kindx.trigger` on the MCP request.
+   */
+  trigger?: TriggerSource;
 };
 
 // =============================================================================
@@ -186,10 +198,15 @@ export class KindxSession {
   /**
    * Record a query text in the session's query log.
    * Oldest entries are evicted when the log reaches QUERY_LOG_MAX.
+   *
+   * @param query - The query text
+   * @param trigger - Optional trigger source ("agent-auto" | "user-explicit" | "unknown")
    */
-  logQuery(query: string): void {
+  logQuery(query: string, trigger?: TriggerSource): void {
     this.lastActivityAt = Date.now();
-    this._queryLog.push({ query, ts: Date.now() });
+    const entry: QueryLogEntry = { query, ts: Date.now() };
+    if (trigger !== undefined) entry.trigger = trigger;
+    this._queryLog.push(entry);
     if (this._queryLog.length > KindxSession.QUERY_LOG_MAX) {
       this._queryLog.shift();
     }

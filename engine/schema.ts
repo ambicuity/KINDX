@@ -236,6 +236,21 @@ export function initializeCoreSchema(db: Database): void {
   // AI usage ledger — immutable per-call token consumption tracking.
   initializeAiUsageSchema(db);
 
+  // MCP query log — best-effort telemetry tracking whether each tool call
+  // was triggered by the agent automatically (per the auto-invocation
+  // contract), by an explicit user request, or undetermined. Read by
+  // `kindx status --auto-invoke-rate` and the capability manifest. Inserts
+  // are best-effort: telemetry failures must never block a tool call.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_query_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tool TEXT NOT NULL,
+      trigger TEXT,
+      ts INTEGER NOT NULL
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_query_log_ts ON mcp_query_log(ts)`);
+
   const now = new Date().toISOString();
   const setCapability = db.prepare(`
     INSERT OR REPLACE INTO index_capabilities (capability, value, updated_at)

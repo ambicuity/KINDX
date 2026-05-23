@@ -3009,6 +3009,8 @@ function parseCLI() {
       path: { type: "string" },
       resume: { type: "boolean" },
       description: { type: "string" },
+      // Telemetry — surfaces auto-invocation contract trigger counts.
+      "auto-invoke-rate": { type: "boolean" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -4326,9 +4328,49 @@ if (isMain) {
       break;
     }
 
-    case "status":
+    case "status": {
+      // --auto-invoke-rate short-circuits the regular status output and
+      // emits only the trigger-source counters aggregated from the
+      // mcp_query_log table. Designed for scripts that want to verify the
+      // auto-invocation contract is causing agent-auto calls locally.
+      if (cli.values["auto-invoke-rate"]) {
+        const db = getDb();
+        const counts = { totalCalls: 0, agentAuto: 0, userExplicit: 0, unknown: 0 };
+        try {
+          const rows = db
+            .prepare(`SELECT trigger, COUNT(*) as n FROM mcp_query_log GROUP BY trigger`)
+            .all() as Array<{ trigger: string | null; n: number }>;
+          for (const r of rows) {
+            counts.totalCalls += r.n;
+            if (r.trigger === "agent-auto") counts.agentAuto += r.n;
+            else if (r.trigger === "user-explicit") counts.userExplicit += r.n;
+            else counts.unknown += r.n;
+          }
+        } catch {
+          // Table absent (older index) — fall through with zero counts.
+        }
+        const data = { autoInvocation: counts };
+        if (cli.opts.format === "json") {
+          // Match the surrounding command pattern: emit the JSON envelope
+          // when KINDX_JSON_ENVELOPE is set, otherwise the bare payload.
+          const { jsonEnvelope, jsonEnvelopeEnabled } = await import("./cli/output.js");
+          if (jsonEnvelopeEnabled(process.env)) {
+            console.log(JSON.stringify(jsonEnvelope("status", data), null, 2));
+          } else {
+            console.log(JSON.stringify(data, null, 2));
+          }
+        } else {
+          console.log(
+            `Auto-invoke rate: ${counts.agentAuto}/${counts.totalCalls} agent-auto, ` +
+            `${counts.userExplicit} user-explicit, ${counts.unknown} unknown.`,
+          );
+        }
+        closeDb();
+        break;
+      }
       await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir }, { format: cli.opts.format });
       break;
+    }
 
     case "scheduler": {
       const code = runSchedulerStatusCommand({

@@ -624,9 +624,47 @@ const AUTO_INVOCATION_CONTRACT = [
 const MAX_INSTRUCTIONS_BYTES = 8 * 1024;
 const TRUNCATION_MARKER = "\n\n[instructions truncated — see kindx://capabilities]";
 
-function isAutoInvokeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isAutoInvokeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.KINDX_AUTO_INVOKE ?? "").trim().toLowerCase();
   return v !== "off" && v !== "0" && v !== "false";
+}
+
+/**
+ * Extract the trigger source from a tool-call request's `_meta.kindx.trigger`.
+ * Returns "agent-auto" / "user-explicit" if recognized, "unknown" otherwise.
+ *
+ * Telemetry must never throw — any unexpected shape collapses to "unknown".
+ */
+export function extractTriggerFromMeta(extra: unknown): "user-explicit" | "agent-auto" | "unknown" {
+  try {
+    const meta = (extra as { _meta?: unknown })?._meta;
+    const kindx = (meta as { kindx?: unknown } | undefined)?.kindx;
+    const trig = (kindx as { trigger?: unknown } | undefined)?.trigger;
+    if (trig === "agent-auto" || trig === "user-explicit") return trig;
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Best-effort insert into `mcp_query_log`. Swallows every error so telemetry
+ * failure never blocks a tool call. The table is created by
+ * `initializeCoreSchema`; the try/catch also covers stores whose schema
+ * predates the table.
+ */
+export function recordToolTrigger(
+  store: Store,
+  tool: string,
+  trigger: "user-explicit" | "agent-auto" | "unknown",
+): void {
+  try {
+    store.db
+      .prepare(`INSERT INTO mcp_query_log (tool, trigger, ts) VALUES (?, ?, ?)`)
+      .run(tool, trigger, Date.now());
+  } catch {
+    // Swallow — telemetry must not affect tool behaviour.
+  }
 }
 
 function buildInstructions(store: Store, session?: KindxSession): string {
@@ -868,7 +906,31 @@ function createMcpServer(
       readOnly: def.annotations?.readOnlyHint ?? false,
       inputSchema: def.inputSchema ?? {},
     });
-    server.registerTool(name, def, handler);
+
+    // Wrap the handler so we can record the trigger source for every tool
+    // call. Telemetry is best-effort: any error here is swallowed; the call
+    // proceeds to the real handler regardless.
+    //
+    // The SDK passes handlers as (args, extra) when an inputSchema is
+    // present, or (extra) when there isn't one. Detect by arity.
+    const wrappedHandler =
+      handler.length >= 2
+        ? async (args: any, extra: any) => {
+            try {
+              const trigger = extractTriggerFromMeta(extra);
+              recordToolTrigger(store, name, trigger);
+            } catch { /* never block on telemetry */ }
+            return handler(args, extra);
+          }
+        : async (extra: any) => {
+            try {
+              const trigger = extractTriggerFromMeta(extra);
+              recordToolTrigger(store, name, trigger);
+            } catch { /* never block on telemetry */ }
+            return handler(extra);
+          };
+
+    server.registerTool(name, def, wrappedHandler as any);
     // Notify test hook after successful registration.
     onRegister?.(name, def);
   };
