@@ -144,7 +144,8 @@ import { renderSearchResults } from "./cli/renderers/search.js";
 import { createProgressReporter, type ProgressReporter } from "./cli/progress.js";
 import { renderMcpStatus, redactedMcpStatus, type McpStatusData } from "./cli/renderers/mcp-status.js";
 import { renderMemorySearch, renderMemoryEntry } from "./cli/renderers/memory.js";
-import { renderRootHelp, renderCommandHelp } from "./cli/help.js";
+import { renderRootHelp, renderCommandHelp, renderSubcommandList, renderSubcommandHelp } from "./cli/help.js";
+import { suggestCommandNames } from "./cli/registry.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -219,7 +220,12 @@ import {
 } from "./utils/ui.js";
 
 const isTTY = process.stderr.isTTY;
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+// Module-level default. The actual `useColor` value is *recomputed* inside
+// main() after parseCLI() so the parsed --color / --no-color flags take
+// precedence (today they are ignored when stdout isn't a TTY). Keep a sane
+// default for code paths that touch `useColor` before main() runs — e.g.
+// the top-level error handler installed at module load.
+let useColor = !process.env.NO_COLOR && process.stdout.isTTY;
 
 // Lazy module-level progress reporter. Built from resolveOutputMode() on first
 // access so its paint mode reflects the actual CLI invocation (TTY, --quiet,
@@ -3757,6 +3763,26 @@ if (isMain) {
 
   const cli = parseCLI();
 
+  // Recompute the module-level `useColor` from the parsed flags so --color /
+  // --no-color actually win against TTY auto-detection. resolveOutputMode()
+  // already encodes the documented precedence (flag > NO_COLOR > TTY).
+  {
+    const v = cli.values as Record<string, unknown>;
+    const resolved = resolveOutputMode({
+      format: typeof v.format === "string" ? v.format : undefined,
+      color: v.color as boolean | undefined,
+      noColor: v["no-color"] as boolean | undefined,
+      json: v.json as boolean | undefined,
+      plain: v.plain as boolean | undefined,
+      csv: v.csv as boolean | undefined,
+      md: v.md as boolean | undefined,
+      xml: v.xml as boolean | undefined,
+      files: v.files as boolean | undefined,
+      quiet: v.quiet as boolean | undefined,
+    });
+    useColor = resolved.color;
+  }
+
   // Set the progress-mode hint as early as possible so the lazy reporter
   // (built on first checkIndexHealth/hook call) picks the right paint mode.
   // We map the legacy --json/--csv/--md/--xml/--files booleans + --format to
@@ -3784,9 +3810,24 @@ if (isMain) {
   }
 
   if (!cli.command || cli.values.help) {
-    // Per-command help: `kindx query --help` renders just that command's
-    // help block instead of the whole reference dump.
+    // Per-command / per-subcommand help.
+    //   `kindx <cmd> <sub> --help` → renderSubcommandHelp (detail block)
+    //   `kindx <cmd> --help`       → renderSubcommandList if available,
+    //                                else renderCommandHelp (regular block)
     if (cli.command && cli.values.help) {
+      const sub = cli.args[0];
+      if (sub) {
+        const subHelp = renderSubcommandHelp(cli.command, sub, { color: useColor });
+        if (subHelp) {
+          console.log(subHelp);
+          process.exit(0);
+        }
+      }
+      const subList = renderSubcommandList(cli.command, { color: useColor });
+      if (subList) {
+        console.log(subList);
+        process.exit(0);
+      }
       const help = renderCommandHelp(cli.command, { color: useColor });
       if (help) {
         console.log(help);
@@ -4860,10 +4901,29 @@ if (isMain) {
       break;
     }
 
-    default:
-      console.error(`Unknown command: ${cli.command}`);
+    case "arch":
+      // Migration message for the removed `kindx arch` command group.
+      // Exit code 2 (not 1) so scripts can distinguish "removed/migrated"
+      // from a generic "unknown command".
+      console.error("The 'kindx arch' command was removed in v1.3.");
+      console.error("  See: docs/troubleshooting.md#arch-removed");
+      console.error("  Migration: experiments/arch/ contains the relocated code.");
+      process.exit(2);
+      // fallthrough impossible (process.exit terminates) — fall through
+      // marker omitted intentionally.
+
+    default: {
+      const cmd = cli.command ?? "";
+      const suggestions = suggestCommandNames(cmd);
+      console.error(`Unknown command: ${cmd}`);
+      if (suggestions.length === 1) {
+        console.error(`  Did you mean: ${suggestions[0]}?`);
+      } else if (suggestions.length > 1) {
+        console.error(`  Did you mean one of: ${suggestions.join(", ")}?`);
+      }
       console.error("Run 'kindx --help' for usage.");
       process.exit(1);
+    }
   }
 
   if (cli.command !== "mcp") {

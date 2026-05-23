@@ -17,6 +17,7 @@ import {
   type TenantRole,
 } from "../rbac.js";
 import { paletteFor, glyphsFor } from "../cli/output.js";
+import { renderSubcommandList } from "../cli/help.js";
 import type { OutputFormat } from "../renderer.js";
 
 export function runTenantCommand(
@@ -245,30 +246,14 @@ export function runTenantCommand(
 
     case "help":
     case undefined: {
-      console.log("Usage: kindx tenant <subcommand> [options]");
+      console.log(renderSubcommandList("tenant", { color: useColor }) ?? "Usage: kindx tenant <subcommand> [options]");
+      // Role taxonomy stays inline — it's a tenant-specific concept that
+      // doesn't fit the generic SubcommandSpec shape.
       console.log();
-      console.log("Subcommands:");
-      console.log("  add <id> [collections...] --role <role>  Create tenant (shows token once)");
-      console.log("  remove <id>                              Remove tenant");
-      console.log("  list                                     List all tenants");
-      console.log("  show <id>                                Show tenant details");
-      console.log("  rotate <id>                              Rotate tenant token");
-      console.log("  grant <id> <col1> [col2 ...]             Grant collection access");
-      console.log("  revoke <id> <col1> [col2 ...]            Revoke collection access");
-      console.log("  disable <id>                             Disable tenant (reject auth)");
-      console.log("  enable <id>                              Re-enable tenant");
-      console.log("  status                                   Show RBAC status summary");
-      console.log();
-      console.log("Roles:");
+      console.log(`${p.bold("Roles:")}`);
       console.log("  admin   Full access to all collections and operations");
       console.log("  editor  Read + write to assigned collections");
       console.log("  viewer  Read-only access to assigned collections");
-      console.log();
-      console.log("Examples:");
-      console.log("  kindx tenant add ci-bot --role viewer notes docs");
-      console.log("  kindx tenant add team-lead --role editor --name 'Team Lead'");
-      console.log("  kindx tenant grant ci-bot meetings");
-      console.log("  kindx tenant rotate ci-bot");
       return 0;
     }
 

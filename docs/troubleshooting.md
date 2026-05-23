@@ -95,6 +95,23 @@ Run `reset` (or `stty sane && printf '\033[?1049l\033[?25h'`) to restore the ter
   - `--format json|csv|md|xml|files` → NDJSON events on stderr (one JSON object per line). stdout stays clean for `jq` and friends.
 - Force UTF-8 glyphs in CI environments with a missing locale: `KINDX_FORCE_UTF8=1`.
 
+## Migration: `kindx arch` removed
+
+In v1.3 the `kindx arch` command group was removed. Its code was relocated to `experiments/arch/` (not built into the main CLI). Scripts that called any `kindx arch <sub>` subcommand will now see:
+
+```text
+The 'kindx arch' command was removed in v1.3.
+  See: docs/troubleshooting.md#arch-removed
+  Migration: experiments/arch/ contains the relocated code.
+```
+
+(Exit code 2, distinct from the generic "Unknown command" exit code 1, so scripts can branch on the migration case.)
+
+If you still need the architectural-scanning behavior:
+
+- The relocated code lives under `experiments/arch/` in the repository. It is unsupported and may change without notice.
+- The replacement workflow is to use `kindx query` against your own indexed code with structured queries (e.g., `lex: <symbol> vec: <concept>`).
+
 ## Reporting an issue
 
 When opening an issue, please include:

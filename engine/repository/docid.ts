@@ -6,7 +6,7 @@
 
 import type { Database } from "../runtime.js";
 
-function levenshtein(a: string, b: string, maxDistance: number = Number.POSITIVE_INFINITY): number {
+export function levenshtein(a: string, b: string, maxDistance: number = Number.POSITIVE_INFINITY): number {
   const m = a.length, n = b.length;
   if (m === 0) return n;
   if (n === 0) return m;

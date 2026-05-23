@@ -6,7 +6,7 @@
  */
 
 import { paletteFor } from "./output.js";
-import { COMMANDS, commandByName, groupedCommands, type CommandSpec } from "./registry.js";
+import { COMMANDS, commandByName, groupedCommands, type CommandSpec, type SubcommandSpec } from "./registry.js";
 
 const GLOBAL_FLAGS_HELP: { name: string; description: string }[] = [
   { name: "--help, -h",          description: "Show usage" },
@@ -124,4 +124,88 @@ function renderCommandHelpSpec(
 
 export function listCommandNames(): string[] {
   return COMMANDS.map((c) => c.name);
+}
+
+/**
+ * Render the subcommand summary block for `kindx <cmd> --help` (or for the
+ * "no subcommand" branch of a dispatcher). Returns `undefined` when the
+ * command isn't in the registry or has no `subcommands` array.
+ */
+export function renderSubcommandList(
+  cmdName: string,
+  opts: HelpRenderOptions,
+): string | undefined {
+  const spec = commandByName(cmdName);
+  if (!spec || !spec.subcommands || spec.subcommands.length === 0) return undefined;
+  const palette = paletteFor(opts.color);
+  // Width auto-fits the longest subcommand-name (including aliases) so the
+  // summary column lines up cleanly.
+  const labels = spec.subcommands.map((s) => subcommandLabel(s));
+  const nameCol = Math.max(...labels.map((l) => l.length), 14) + 2;
+
+  const out: string[] = [];
+  out.push(palette.bold(`kindx ${spec.name}`) + palette.dim(`  — ${spec.summary}`));
+  out.push("");
+  out.push(palette.bold("Usage:"));
+  out.push(`  ${spec.usage}`);
+  out.push("");
+  out.push(palette.bold("Subcommands:"));
+  for (let i = 0; i < spec.subcommands.length; i++) {
+    const sub = spec.subcommands[i]!;
+    const label = labels[i]!.padEnd(nameCol);
+    out.push(`  ${palette.cyan(label)} ${sub.summary}`);
+  }
+  out.push("");
+  out.push(palette.dim(`Run \`kindx ${spec.name} <subcommand> --help\` for per-subcommand options.`));
+  return out.join("\n");
+}
+
+/**
+ * Render the detail block for `kindx <cmd> <sub> --help`. Returns `undefined`
+ * when either the command or the subcommand isn't registered.
+ */
+export function renderSubcommandHelp(
+  cmdName: string,
+  subName: string,
+  opts: HelpRenderOptions,
+): string | undefined {
+  const spec = commandByName(cmdName);
+  if (!spec || !spec.subcommands) return undefined;
+  const sub = spec.subcommands.find(
+    (s) => s.name === subName || (s.aliases ?? []).includes(subName),
+  );
+  if (!sub) return undefined;
+  const palette = paletteFor(opts.color);
+  const out: string[] = [];
+  out.push(palette.bold(`kindx ${spec.name} ${sub.name}`) + palette.dim(`  — ${sub.summary}`));
+  out.push("");
+  if (sub.usage) {
+    out.push(palette.bold("Usage:"));
+    out.push(`  ${sub.usage}`);
+  }
+  if (sub.flags && sub.flags.length > 0) {
+    out.push("");
+    out.push(palette.bold("Options:"));
+    for (const f of sub.flags) {
+      const label = f.short ? `${f.name}, ${f.short}` : f.name;
+      out.push(`  ${palette.dim(label.padEnd(28))} ${f.description}`);
+    }
+  }
+  if (sub.examples && sub.examples.length > 0) {
+    out.push("");
+    out.push(palette.bold("Examples:"));
+    for (const ex of sub.examples) out.push(`  ${palette.cyan(ex)}`);
+  }
+  if (sub.aliases && sub.aliases.length > 0) {
+    out.push("");
+    out.push(palette.dim(`Aliases: ${sub.aliases.join(", ")}`));
+  }
+  return out.join("\n");
+}
+
+function subcommandLabel(sub: SubcommandSpec): string {
+  if (sub.aliases && sub.aliases.length > 0) {
+    return `${sub.name} (${sub.aliases.join(", ")})`;
+  }
+  return sub.name;
 }

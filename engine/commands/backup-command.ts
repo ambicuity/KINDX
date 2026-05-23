@@ -10,6 +10,7 @@ import { getDefaultBackupName } from "../diagnostics.js";
 import { resolve } from "path";
 import { formatBytes } from "../utils/ui.js";
 import { paletteFor, glyphsFor } from "../cli/output.js";
+import { renderSubcommandList } from "../cli/help.js";
 
 export function runBackupCommand(
   args: string[],
@@ -72,6 +73,14 @@ export function runBackupCommand(
     return 0;
   }
 
-  console.error("Usage: kindx backup <create|verify|restore> [path] [--force]");
+  // Unknown / missing subcommand: print the subcommand list. Exit non-zero
+  // when an unknown sub was actually provided; zero when the user explicitly
+  // asked via `help`.
+  const help = renderSubcommandList("backup", { color: useColor });
+  if (sub === "help" || sub === undefined) {
+    console.log(help ?? "Usage: kindx backup <create|verify|restore> [path] [--force]");
+    return 0;
+  }
+  console.error(help ?? "Usage: kindx backup <create|verify|restore> [path] [--force]");
   return 1;
 }

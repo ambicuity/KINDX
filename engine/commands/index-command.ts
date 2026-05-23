@@ -1,5 +1,6 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { paletteFor, glyphsFor } from "../cli/output.js";
+import { renderSubcommandList } from "../cli/help.js";
 import {
   registerIndex,
   unregisterIndex,
@@ -186,20 +187,7 @@ export async function runIndexCommand(
 
     case "help":
     case undefined: {
-      console.log("Usage: kindx index <subcommand> [options]");
-      console.log();
-      console.log("Subcommands:");
-      console.log("  list                      List all named indexes");
-      console.log("  create <name>             Create a new named index");
-      console.log("  delete <name> --force     Permanently delete a named index");
-      console.log("  migrate <collection>      Copy collection data between indexes");
-      console.log("         --from <src> --to <dst>");
-      console.log();
-      console.log("Examples:");
-      console.log("  kindx index create my-project --description 'Project Alpha'");
-      console.log("  kindx index list");
-      console.log("  kindx index delete old-project --force");
-      console.log("  kindx index migrate logs --from alpha --to beta");
+      console.log(renderSubcommandList("index", { color: useColor }) ?? "Usage: kindx index <subcommand> [options]");
       return 0;
     }
 
