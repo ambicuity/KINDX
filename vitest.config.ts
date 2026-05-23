@@ -17,6 +17,12 @@ export default defineConfig({
                 "engine/kindx.ts",
                 "engine/benchmarks.ts",
             ],
+            thresholds: {
+                statements: 60,
+                branches: 50,
+                functions: 65,
+                lines: 60,
+            },
         },
     },
 });
