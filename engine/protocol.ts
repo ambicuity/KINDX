@@ -3215,7 +3215,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         const dedupeKey = stableHash({
           searches: subSearches,
           collections: effectiveCollections,
-          limit: params.limit ?? 10,
+          limit: params.limit ?? 3,
           minScore: params.minScore ?? 0,
           candidateLimit: params.candidateLimit,
           maxRerankCandidates: params.maxRerankCandidates,
@@ -3234,7 +3234,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             effectiveCollections,
             sessionKey,
             {
-              limit: params.limit ?? 10,
+              limit: params.limit ?? 3,
               minScore: params.minScore ?? 0,
               candidateLimit: params.candidateLimit,
               maxRerankCandidates: params.maxRerankCandidates,
@@ -3363,7 +3363,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               () => raceWithTimeout(
                 (signal) => structuredSearchWithDiagnostics(store, subSearches, {
                   collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
-                  limit: params.limit ?? 10,
+                  limit: params.limit ?? 3,
                   minScore: params.minScore ?? 0,
                   candidateLimit: profilePolicy.candidateLimit,
                   maxRerankCandidates: params.maxRerankCandidates,
