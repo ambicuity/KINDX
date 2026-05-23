@@ -16,6 +16,19 @@ To disable: run kindx with `KINDX_AUTO_INVOKE=off` in its environment.
 
 ## Configure MCP Client
 
+**Recommended:** run `kindx init` once after install. It detects every supported MCP client on this machine and wires kindx in (and optionally appends a fenced auto-invocation block to your project's AGENTS.md/CLAUDE.md).
+
+```bash
+kindx init --client auto      # auto-detect & wire all detected clients + current project
+kindx init --client all       # wire every supported client
+kindx init --client cursor    # wire just one
+kindx init --dry-run --client all   # preview without changes
+```
+
+Supported clients: Claude Code, Claude Desktop, Cursor, Continue, OpenCode, Codex CLI, Copilot CLI, Zed. Ollama support is via a separate bridge — see `references/ollama-bridge.md`.
+
+If you prefer to wire manually, the per-client config snippets below still work.
+
 **Claude Code** (`~/.claude/settings.json`):
 ```json
 {
