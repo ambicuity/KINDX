@@ -754,6 +754,53 @@ export function buildInstructionsForTest(store: Store, session?: KindxSession): 
 }
 
 /**
+ * Test hook: enumerate every tool that createMcpServer registers, together
+ * with its description and raw zod inputSchema (not JSON-Schema-converted).
+ *
+ * Uses a minimal stub Store so no real SQLite database is required. The stub
+ * is only used during server/tool registration — tool handlers are never
+ * invoked by this helper.
+ *
+ * Call sites should set KINDX_ENABLE_MAINTENANCE_TOOLS=1 before invoking if
+ * they want maintenance tools (status, memory_stats, etc.) to appear in the
+ * returned list.
+ */
+export function listRegisteredToolsForTest(): Array<{
+  name: string;
+  description: string;
+  inputSchema: any;
+}> {
+  // Minimal stub Store — buildInstructions only needs getStatus() (for
+  // collections-length check) and store.db (for memory prefetch, which is
+  // skipped when no session is provided). Tool handlers are not invoked
+  // during registration, so nothing else needs to be real.
+  const stubStore = {
+    db: { prepare: () => ({ all: () => [], get: () => null }) } as any,
+    dbPath: ":memory:",
+    indexName: "test",
+    getStatus: () => ({
+      totalDocuments: 0,
+      needsEmbedding: 0,
+      hasVectorIndex: false,
+      capabilities: {},
+      ann: { enabled: false, mode: "exact" as const, state: "missing" as const, probeCount: 0, shortlistLimit: 0, details: [] },
+      encryption: { encrypted: false, keyConfigured: false, bytes: 0 },
+      ingestion: { warnedDocuments: 0, byFormat: [], byWarning: [] },
+      collections: [],
+      shards: { enabledCollections: [], checkpointPath: "", checkpointExists: false, warnings: [] },
+    }),
+  } as unknown as Store;
+
+  const defs: Array<{ name: string; description: string; inputSchema: any }> = [];
+  createMcpServer(stubStore, undefined, undefined, {
+    onRegister: (name: string, def: any) => {
+      defs.push({ name, description: def.description, inputSchema: def.inputSchema });
+    },
+  });
+  return defs;
+}
+
+/**
  * Create an MCP server with all KINDX tools, resources, and prompts registered.
  * Shared by both stdio and HTTP transports.
  *
@@ -767,9 +814,12 @@ function createMcpServer(
   getSession?: () => KindxSession | null,
   options?: {
     mcpControl?: ResolvedMcpServerControl;
+    /** Test-only hook: called after every successful tool registration. */
+    onRegister?: (name: string, def: any) => void;
   },
 ): McpServer {
   const mcpControl = options?.mcpControl;
+  const onRegister = options?.onRegister;
   const registeredToolDefs: ToolRegistration[] = [];
   const server = new McpServer(
     { name: "kindx", version: SERVER_VERSION },
@@ -785,7 +835,7 @@ function createMcpServer(
     })) {
       return;
     }
-    
+
     // Dynamic Tool Scoping: Prune maintenance tools to save token overhead unless explicitly requested.
     const maintenanceTools = [
       "status",
@@ -806,6 +856,8 @@ function createMcpServer(
       inputSchema: def.inputSchema ?? {},
     });
     server.registerTool(name, def, handler);
+    // Notify test hook after successful registration.
+    onRegister?.(name, def);
   };
 
   function resolveToolScope(args: any): { scope?: string; errorText?: string } {
@@ -946,31 +998,25 @@ function createMcpServer(
     "query",
     {
       title: "Query",
-      description: `Search the knowledge base using a query document — one or more typed sub-queries combined for best recall.
+      description: `Call this first whenever the user asks a question, references their notes/docs/codebase, or you need context grounded in the user's local knowledge.
 
-## Query Types
+## When to use
+- User asks "what did I write about ...", "find ...", "show me ..."
+- User asks a factual question whose answer might live in their notes
+- You need background context before answering or editing
+- Skip: greetings, pure code-generation with no file reference, trivial yes/no
+
+## How to call
+One or more typed sub-queries combined for best recall.
 
 **lex** — BM25 keyword search. Fast, exact, no LLM needed.
-Full lex syntax:
 - \`term\` — prefix match ("perf" matches "performance")
 - \`"exact phrase"\` — phrase must appear verbatim
-- \`-term\` or \`-"phrase"\` — exclude documents containing this
+- \`-term\` or \`-"phrase"\` — exclude documents
 
-Good lex examples:
-- \`"connection pool" timeout -redis\`
-- \`"machine learning" -sports -athlete\`
-- \`handleError async typescript\`
+**vec** — Semantic vector search. Write a natural-language question.
 
-**vec** — Semantic vector search. Write a natural language question. Finds documents by meaning, not exact words.
-- \`how does the rate limiter handle burst traffic?\`
-- \`what is the tradeoff between consistency and availability?\`
-
-**hyde** — Hypothetical document. Write 50-100 words that look like the answer. Often the most powerful for nuanced topics.
-- \`The rate limiter uses a token bucket algorithm. When a client exceeds 100 req/min, subsequent requests return 429 until the window resets.\`
-
-## Strategy
-
-Combine types for best results. First sub-query gets 2× weight — put your strongest signal first.
+**hyde** — Hypothetical document. Write 50–100 words that look like the answer. Often the most powerful for nuanced topics.
 
 | Goal | Approach |
 |------|----------|
@@ -978,29 +1024,14 @@ Combine types for best results. First sub-query gets 2× weight — put your str
 | Concept search | \`vec\` only |
 | Best recall | \`lex\` + \`vec\` |
 | Complex/nuanced | \`lex\` + \`vec\` + \`hyde\` |
-| Unknown vocabulary | Use a standalone natural-language query (no typed lines) so the server can auto-expand it |
 
-## Examples
+Defaults to top 3 snippets (~600 tokens). Pull bodies with \`get\` for any snippet that looks relevant. First sub-query gets 2× weight — put your strongest signal first.
 
-Simple lookup:
-\`\`\`json
-[{ "type": "lex", "query": "CAP theorem" }]
-\`\`\`
-
-Best recall on a technical topic:
+Example:
 \`\`\`json
 [
-  { "type": "lex", "query": "\\"connection pool\\" timeout -redis" },
-  { "type": "vec", "query": "why do database connections time out under load" },
-  { "type": "hyde", "query": "Connection pool exhaustion occurs when all connections are in use and new requests must wait. This typically happens under high concurrency when queries run longer than expected." }
-]
-\`\`\`
-
-Intent-aware lex (C++ performance, not sports):
-\`\`\`json
-[
-  { "type": "lex", "query": "\\"C++ performance\\" optimization -sports -athlete" },
-  { "type": "vec", "query": "how to optimize C++ program performance" }
+  { "type": "lex", "query": "\\"connection pool\\" timeout" },
+  { "type": "vec", "query": "why do database connections time out under load" }
 ]
 \`\`\``,
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -1008,7 +1039,7 @@ Intent-aware lex (C++ performance, not sports):
         searches: z.array(subSearchSchema).min(1).max(10).describe(
           "Typed sub-queries to execute (lex/vec/hyde). First gets 2x weight."
         ),
-        limit: z.number().max(200).optional().default(10).describe("Max results (default: 10, max: 200)"),
+        limit: z.number().max(200).optional().default(3).describe("Max results (default: 3 for tight triage, max: 200). Use `get` to expand a snippet rather than raising this."),
         minScore: z.number().optional().default(0).describe("Min relevance 0-1 (default: 0)"),
         candidateLimit: z.number().optional().describe(
           "Maximum candidates to rerank (default: 40, lower = faster but may miss results)"
@@ -1035,8 +1066,8 @@ Intent-aware lex (C++ performance, not sports):
           "Retrieval routing profile: fast (lower latency), balanced (default), max_precision (higher recall/precision)."
         ),
         collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
-        maxSnippetLines: z.number().optional().describe(
-          "Maximum lines per result snippet. Truncates to the most relevant excerpt. Reduces token usage for agents with limited context windows."
+        maxSnippetLines: z.number().optional().default(4).describe(
+          "Maximum lines per result snippet (default: 4). Reduces token usage; use `get` to read the full body of a promising result."
         ),
         indexes: z.array(z.string()).optional().describe(
           "Named indexes to query (cross-index federation). Omit to use current index."
