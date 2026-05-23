@@ -26,7 +26,7 @@
     "pretest": "npm run build",
     "pretest:all": "npm run build:all",
     "test": "vitest run --reporter=verbose specs/",
-    "test:ci": "vitest run --reporter=verbose --reporter=junit --outputFile.junit=test-results/junit.xml specs/",
+    "test:ci": "vitest run --coverage --reporter=verbose --reporter=junit --outputFile.junit=test-results/junit.xml specs/",
     "test:packages": "npm run test -w @ambicuity/kindx-schemas && npm run test -w @ambicuity/kindx-client",
     "test:python": "python3 -m unittest discover -s python/kindx-langchain/tests -v",
     "test:all": "npm run pretest:all && npm run test && npm run test:packages && npm run test:python",
