@@ -82,6 +82,42 @@ export function getQueueController(key: string): QueueController {
   return controller;
 }
 
+/**
+ * Evict idle / unused queue controllers. Long-running daemons that see
+ * many transient collection names (renames, integration tests, ephemeral
+ * scopes) otherwise accumulate Map entries forever.
+ *
+ * "Idle" means no active in-flight requests, no waiting entries, and no
+ * activity since the previous call (lastServedSeq unchanged). Callers can
+ * also force-evict a specific key when they know the collection was
+ * removed/renamed.
+ */
+export function evictRerankController(key: string): boolean {
+  const c = rerankControllers.get(key);
+  if (!c) return false;
+  if (c.active === 0 && c.waiting.length === 0) {
+    rerankControllers.delete(key);
+    return true;
+  }
+  return false;
+}
+
+export function pruneIdleRerankControllers(): number {
+  let pruned = 0;
+  for (const [key, c] of rerankControllers) {
+    if (c.active === 0 && c.waiting.length === 0 && c.metrics.enqueued === c.metrics.dequeued) {
+      rerankControllers.delete(key);
+      pruned++;
+    }
+  }
+  return pruned;
+}
+
+/** Returns the number of controllers currently tracked. Used in tests. */
+export function getRerankControllerCount(): number {
+  return rerankControllers.size;
+}
+
 export function makeQueueRelease(controller: QueueController, concurrency: number): () => void {
   let released = false;
   return () => {
