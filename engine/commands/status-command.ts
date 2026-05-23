@@ -29,6 +29,7 @@ import {
   formatTimeAgo,
   formatBytes,
 } from "../utils/ui.js";
+import { jsonEnvelope, jsonEnvelopeEnabled } from "../cli/output.js";
 
 export interface StatusDeps {
   getDb: () => Database;
@@ -37,7 +38,7 @@ export interface StatusDeps {
   getKindxCacheDir: () => string;
 }
 
-export async function runStatusCommand(deps: StatusDeps): Promise<void> {
+export async function runStatusCommand(deps: StatusDeps, opts: { format?: string } = {}): Promise<void> {
   const { getDb, getDbPath, closeDb, getKindxCacheDir } = deps;
   const dbPath = getDbPath();
   const db = getDb();
@@ -54,6 +55,54 @@ export async function runStatusCommand(deps: StatusDeps): Promise<void> {
   const needsEmbedding = getHashesNeedingEmbedding(db);
   const status = getStatus(db);
   const mostRecent = db.prepare(`SELECT MAX(modified_at) as latest FROM documents WHERE active = 1`).get() as { latest: string | null };
+
+  // Inspect MCP/Watch daemon presence early so both JSON and pretty paths
+  // can include the information without diverging.
+  const mcpCacheDirEarly = getKindxCacheDir();
+  const mcpPidPathEarly = resolve(mcpCacheDirEarly, "mcp.pid");
+  const watchPidPathEarly = resolve(mcpCacheDirEarly, "watch.pid");
+  function readLivePid(pidPath: string): number | undefined {
+    if (!existsSync(pidPath)) return undefined;
+    const pid = parseInt(readFileSync(pidPath, "utf-8").trim());
+    if (!Number.isFinite(pid)) return undefined;
+    try { process.kill(pid, 0); return pid; } catch { return undefined; }
+  }
+  const mcpLivePid = readLivePid(mcpPidPathEarly);
+  const watchLivePid = readLivePid(watchPidPathEarly);
+
+  // JSON output emits a structured snapshot. We always include enough fields
+  // for a script to drive UI/automation: paths, doc counts, capabilities,
+  // collections, daemon presence, and pending work.
+  if (opts.format === "json") {
+    const data = {
+      index: { path: dbPath, sizeBytes: indexSize },
+      mcp: mcpLivePid ? { running: true, pid: mcpLivePid, pidPath: mcpPidPathEarly, transport: "http", endpoint: "http://localhost:<port>/mcp" } : { running: false },
+      watch: watchLivePid ? { running: true, pid: watchLivePid, pidPath: watchPidPathEarly } : { running: false },
+      documents: {
+        total: totalDocs.count,
+        vectors: vectorCount.count,
+        needsEmbedding,
+        mostRecent: mostRecent.latest,
+      },
+      capabilities: status.capabilities ?? {},
+      encryption: status.encryption,
+      ann: status.ann,
+      ingestion: status.ingestion,
+      collections: collections.map((col) => ({
+        name: col.name,
+        glob: col.glob_pattern,
+        active: col.active_count,
+        lastModified: col.last_modified,
+      })),
+    };
+    if (jsonEnvelopeEnabled(process.env)) {
+      console.log(JSON.stringify(jsonEnvelope("status", data), null, 2));
+    } else {
+      console.log(JSON.stringify(data, null, 2));
+    }
+    closeDb();
+    return;
+  }
 
   console.log(`${c.bold}KINDX Status${c.reset}\n`);
   console.log(`Index: ${dbPath}`);

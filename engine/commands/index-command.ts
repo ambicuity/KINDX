@@ -1,5 +1,5 @@
 import { existsSync, unlinkSync } from "node:fs";
-import { c } from "../utils/ui.js";
+import { paletteFor, glyphsFor } from "../cli/output.js";
 import {
   registerIndex,
   unregisterIndex,
@@ -18,6 +18,9 @@ export async function runIndexCommand(
   values: Record<string, unknown>,
 ): Promise<number> {
   const sub = args[0];
+  const useColor = !process.env.NO_COLOR && Boolean(process.stdout?.isTTY);
+  const p = paletteFor(useColor);
+  const g = glyphsFor();
 
   switch (sub) {
     case "list":
@@ -27,15 +30,15 @@ export async function runIndexCommand(
       const defaultName = getDefaultIndexName();
 
       if (indexes.length === 0) {
-        console.log(`${c.dim}No named indexes found. Create one with: kindx index create <name>${c.reset}`);
+        console.log(p.dim("No named indexes found. Create one with: kindx index create <name>"));
         return 0;
       }
 
-      console.log(`${c.bold}Named Indexes (${indexes.length}):${c.reset}\n`);
+      console.log(`${p.bold(`Named Indexes (${indexes.length}):`)}\n`);
       for (const idx of indexes) {
-        const isDefault = idx.name === defaultName ? ` ${c.cyan}(default)${c.reset}` : "";
-        console.log(`  ${c.bold}${idx.name}${c.reset}${isDefault}`);
-        if (idx.description) console.log(`    ${c.dim}${idx.description}${c.reset}`);
+        const isDefault = idx.name === defaultName ? ` ${p.cyan("(default)")}` : "";
+        console.log(`  ${p.bold(idx.name)}${isDefault}`);
+        if (idx.description) console.log(`    ${p.dim(idx.description)}`);
         console.log(`    Created: ${idx.created_at}`);
         console.log();
       }
@@ -55,11 +58,11 @@ export async function runIndexCommand(
         const db = openDatabase(dbPath);
         initializeDatabase(db);
         db.close();
-        console.log(`${c.green}✓${c.reset} Created index '${c.bold}${name}${c.reset}'`);
+        console.log(`${p.green(g.ok)} Created index '${p.bold(name)}'`);
         console.log(`  Database: ${dbPath}`);
         return 0;
       } catch (err: any) {
-        console.error(`${c.yellow}!${c.reset} ${err.message}`);
+        console.error(`${p.yellow(g.warn)} ${err.message}`);
         return 1;
       }
     }
@@ -76,24 +79,24 @@ export async function runIndexCommand(
       if (!force) {
         const defaultName = getDefaultIndexName();
         if (name === defaultName) {
-          console.error(`${c.yellow}!${c.reset} Cannot delete the default index '${name}'`);
+          console.error(`${p.yellow(g.warn)} Cannot delete the default index '${name}'`);
           return 1;
         }
-        console.log(`${c.yellow}This will permanently delete index '${name}' and all its data.${c.reset}`);
-        console.log(`${c.yellow}Use --force to confirm.${c.reset}`);
+        console.log(p.yellow(`This will permanently delete index '${name}' and all its data.`));
+        console.log(p.yellow(`Use --force to confirm.`));
         return 1;
       }
 
       try {
         unregisterIndex(name);
         const dbPath = getDefaultDbPath(name);
-        [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].forEach(p => {
-          if (existsSync(p)) unlinkSync(p);
+        [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].forEach(path => {
+          if (existsSync(path)) unlinkSync(path);
         });
-        console.log(`${c.green}✓${c.reset} Deleted index '${c.bold}${name}${c.reset}'`);
+        console.log(`${p.green(g.ok)} Deleted index '${p.bold(name)}'`);
         return 0;
       } catch (err: any) {
-        console.error(`${c.yellow}!${c.reset} ${err.message}`);
+        console.error(`${p.yellow(g.warn)} ${err.message}`);
         return 1;
       }
     }
@@ -113,11 +116,11 @@ export async function runIndexCommand(
         const dstDbPath = getDefaultDbPath(toIndex);
 
         if (!existsSync(srcDbPath)) {
-          console.error(`${c.yellow}!${c.reset} Source index '${fromIndex}' database not found`);
+          console.error(`${p.yellow(g.warn)} Source index '${fromIndex}' database not found`);
           return 1;
         }
         if (!existsSync(dstDbPath)) {
-          console.error(`${c.yellow}!${c.reset} Destination index '${toIndex}' database not found`);
+          console.error(`${p.yellow(g.warn)} Destination index '${toIndex}' database not found`);
           return 1;
         }
 
@@ -129,7 +132,7 @@ export async function runIndexCommand(
         ).get(collection) as any)?.c || 0;
 
         if (contentCount === 0) {
-          console.log(`${c.yellow}!${c.reset} Collection '${collection}' is empty in source index`);
+          console.log(`${p.yellow(g.warn)} Collection '${collection}' is empty in source index`);
           srcDb.close();
           dstDb.close();
           return 0;
@@ -173,10 +176,10 @@ export async function runIndexCommand(
         srcDb.close();
         dstDb.close();
 
-        console.log(`${c.green}✓${c.reset} Migrated collection '${c.bold}${collection}${c.reset}' from '${c.bold}${fromIndex}${c.reset}' to '${c.bold}${toIndex}${c.reset}': ${contentCount} documents`);
+        console.log(`${p.green(g.ok)} Migrated collection '${p.bold(collection)}' from '${p.bold(fromIndex)}' to '${p.bold(toIndex)}': ${contentCount} documents`);
         return 0;
       } catch (err: any) {
-        console.error(`${c.yellow}!${c.reset} Migration failed: ${err.message}`);
+        console.error(`${p.yellow(g.warn)} Migration failed: ${err.message}`);
         return 1;
       }
     }

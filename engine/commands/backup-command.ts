@@ -8,7 +8,8 @@ import type { OutputFormat } from "../renderer.js";
 import { createBackup, restoreBackup, verifyBackup } from "../backup.js";
 import { getDefaultBackupName } from "../diagnostics.js";
 import { resolve } from "path";
-import { c, formatBytes } from "../utils/ui.js";
+import { formatBytes } from "../utils/ui.js";
+import { paletteFor, glyphsFor } from "../cli/output.js";
 
 export function runBackupCommand(
   args: string[],
@@ -17,6 +18,9 @@ export function runBackupCommand(
   dbPath: string,
 ): number {
   const sub = args[0];
+  const useColor = !process.env.NO_COLOR && Boolean(process.stdout?.isTTY);
+  const p = paletteFor(useColor);
+  const g = glyphsFor();
 
   if (sub === "create") {
     const requested = typeof values.path === "string" ? values.path : args[1];
@@ -25,7 +29,7 @@ export function runBackupCommand(
     if (output === "json") {
       console.log(JSON.stringify(result, null, 2));
     } else {
-      console.log(`${c.green}✓${c.reset} Backup created: ${result.backupPath}`);
+      console.log(`${p.green(g.ok)} Backup created: ${result.backupPath}`);
       console.log(`  Size: ${formatBytes(result.bytes)}`);
       console.log(`  WAL checkpoint: ${result.checkpointed ? "yes" : "no"}`);
       console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}`);
@@ -43,11 +47,11 @@ export function runBackupCommand(
     if (output === "json") {
       console.log(JSON.stringify(result, null, 2));
     } else if (result.integrity === "ok") {
-      console.log(`${c.green}✓${c.reset} Backup verified: ${result.backupPath}`);
+      console.log(`${p.green(g.ok)} Backup verified: ${result.backupPath}`);
       console.log(`  Size: ${formatBytes(result.bytes)}`);
       console.log(`  Encrypted: ${result.encrypted ? "yes" : "no"}${result.keyRequired ? " (key required)" : ""}`);
     } else {
-      console.error(`${c.yellow}!${c.reset} Backup verify failed: ${result.detail}`);
+      console.error(`${p.yellow(g.warn)} Backup verify failed: ${result.detail}`);
     }
     return result.integrity === "ok" ? 0 : 2;
   }
@@ -63,7 +67,7 @@ export function runBackupCommand(
     if (output === "json") {
       console.log(JSON.stringify(result, null, 2));
     } else {
-      console.log(`${c.green}✓${c.reset} Restored backup to ${result.restoredTo}`);
+      console.log(`${p.green(g.ok)} Restored backup to ${result.restoredTo}`);
     }
     return 0;
   }
