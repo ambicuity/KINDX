@@ -2002,7 +2002,11 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
     }
     initSpinner?.succeed("Model loaded successfully");
     reporter.end("model-load");
-    reporter.start("embed", `Embedding ${totalDocs} documents (${totalChunks} chunks)`);
+    // The embed loop renders its own progress bar via renderProgressBar()
+    // each batch (see below, ~line 2140). Pass bar: true so the reporter
+    // records the phase but does not animate a competing spinner that
+    // would overwrite the bar 12× per second.
+    reporter.start("embed", `Embedding ${totalDocs} documents (${totalChunks} chunks)`, { bar: true });
     ensureVecTable(db, firstResult.embedding.length);
 
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;

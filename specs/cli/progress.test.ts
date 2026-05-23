@@ -178,6 +178,24 @@ describe("pretty-tty reporter", () => {
     expect(aIdx).toBeGreaterThan(okIdx);
   });
 
+  it("bar:true suppresses spinner render but still records the ✓ on end", () => {
+    const r = createProgressReporter({
+      mode: "pretty-tty", color: false, stderr: out, now: () => clock, intervalMs: 0,
+    });
+    r.start("embed", "Embedding 100 chunks", { bar: true });
+    // No spinner frame should have been written between start and end —
+    // the caller would have drawn its own bar. Only cursor-hide and the
+    // closing ✓ line should appear.
+    const between = out.plain;
+    expect(between).not.toContain("Embedding 100 chunks…");
+    clock = 2500;
+    r.end("embed");
+    r.done();
+    const after = out.plain;
+    expect(after).toContain("✓ Embedding 100 chunks");
+    expect(after).toContain("(2.5s)");
+  });
+
   it("implicitly closes previous phase when start() is called twice", () => {
     const r = createProgressReporter({
       mode: "pretty-tty", color: false, stderr: out, now: () => clock, intervalMs: 0,

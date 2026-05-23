@@ -42,8 +42,14 @@ export interface ProgressReporter {
    * overrun: once elapsed exceeds 1.5× this value, the spinner frame
    * recolors from cyan to yellow until the phase ends. ndjson includes
    * the expected duration in its phase-start event. Other modes ignore it.
+   *
+   * `opts.bar` declares that the caller will drive its own progress bar
+   * on stderr for the duration of this phase. In pretty-tty mode the
+   * reporter records the phase for telemetry but suppresses its spinner
+   * animation so the caller's bar is not overwritten 12× per second.
+   * Other modes ignore it.
    */
-  start(name: string, label: string, opts?: { expectedDurationMs?: number }): void;
+  start(name: string, label: string, opts?: { expectedDurationMs?: number; bar?: boolean }): void;
   /**
    * Attach indented detail lines to the current (or most-recent) phase.
    * In pretty-tty mode these flush when the phase ends.
@@ -287,6 +293,12 @@ function prettyTtyReporter(stderr: NodeJS.WritableStream, deps: ReporterDeps): P
       active = { name, label, startedAt: now(), expectedDurationMs: opts?.expectedDurationMs };
       frameIndex = 0;
       hideCursor();
+      // When the caller drives its own progress bar (opts.bar === true),
+      // skip the initial spinner render and never start the animation
+      // timer. Otherwise the 80 ms spinner tick would clear the line and
+      // overwrite the caller's bar on every frame, leaving the user with
+      // only a spinning glyph and no visible progress.
+      if (opts?.bar) return;
       renderFrame();
       startAnimation();
     },
