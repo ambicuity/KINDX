@@ -1666,7 +1666,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_put",
     {
       title: "Memory Put",
-      description: "Create or update a scoped memory record.",
+      description: "Call after the user states a preference, decision, or fact you'll need next session. Do not echo memory back; just persist with the smallest appropriate scope (session > workspace > global).",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1715,7 +1715,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_search",
     {
       title: "Memory Search",
-      description: "Search scoped memories using semantic or text mode.",
+      description: `Call at the start of any turn that says "we", "earlier", "you remember", "the project", or that resumes ongoing work. Searches workspace and session memory; returns ranked entries with their scope.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1749,7 +1749,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_history",
     {
       title: "Memory History",
-      description: "Show historical values for a key in one scope.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Show historical values for a key in one scope.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1777,7 +1777,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_stats",
     {
       title: "Memory Stats",
-      description: "Get memory statistics for a scope.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Get memory statistics for a scope.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1804,7 +1804,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_mark_accessed",
     {
       title: "Memory Mark Accessed",
-      description: "Increment accessed counter for a scoped memory id.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Increment accessed counter for a scoped memory id.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1838,7 +1838,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_delete",
     {
       title: "Memory Delete",
-      description: "Delete a memory record by its ID. Removes associated tags, embeddings, and links.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Delete a memory record by its ID. Removes associated tags, embeddings, and links.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1885,7 +1885,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_bulk",
     {
       title: "Memory Bulk Operations",
-      description: "Batch execute multiple memory insertions and deletions efficiently. Highly recommended when summarizing blocks or migrating multiple related facts at once.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Batch execute multiple memory insertions and deletions efficiently. Highly recommended when summarizing blocks or migrating multiple related facts at once.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Fallback memory scope if not specified per item. Resolved as explicit > session > workspace > default."),
@@ -2161,7 +2161,7 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
     "memory_feedback",
     {
       title: "Memory Feedback",
-      description: "Record satisfaction feedback on memory search results.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Record satisfaction feedback on memory search results.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),

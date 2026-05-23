@@ -46,9 +46,7 @@ describe("tool descriptions lead with WHEN-TO-USE", () => {
     expect(query!.description.split("\n")[0]).toContain(
       "Call this first whenever the user asks a question",
     );
-    // TODO(Tasks 5 & 6): extend coverage to get/multi_get/status/memory_search/memory_put
-    // once their descriptions are rewritten. The expectedLeads map should be reintroduced
-    // at that point.
+    // TODO(Tasks 7+): extend coverage to remaining tools as their descriptions are rewritten.
   });
 
   test("get/multi_get/status descriptions lead with the agreed WHEN-TO-USE sentence", () => {
@@ -66,7 +64,34 @@ describe("tool descriptions lead with WHEN-TO-USE", () => {
         `tool ${name} should lead with: ${lead}`,
       ).toContain(lead);
     }
-    // TODO(Task 6): extend to memory_search/memory_put once their descriptions are rewritten.
+  });
+
+  test("memory_search/memory_put descriptions lead with the agreed WHEN-TO-USE sentence", () => {
+    const tools = listRegisteredToolsForTest();
+    const expectedLeads: Record<string, string> = {
+      memory_search: 'Call at the start of any turn that says "we"',
+      memory_put: "Call after the user states a preference, decision, or fact",
+    };
+    for (const [name, lead] of Object.entries(expectedLeads)) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool, `missing tool ${name}`).toBeDefined();
+      expect(
+        tool!.description.split("\n")[0],
+        `tool ${name} should lead with: ${lead}`,
+      ).toContain(lead);
+    }
+  });
+
+  test("diagnostic memory tools are tagged as 'only call when the user asks about memory itself'", () => {
+    const tools = listRegisteredToolsForTest();
+    const diagnostics = ["memory_history", "memory_stats", "memory_mark_accessed", "memory_delete", "memory_bulk", "memory_feedback"];
+    for (const name of diagnostics) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool, `missing tool ${name}`).toBeDefined();
+      expect(tool!.description).toContain(
+        "Diagnostic — only call when the user asks about memory itself",
+      );
+    }
   });
 
   test("query.limit defaults to 3 (tight triage)", () => {
