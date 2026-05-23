@@ -47,3 +47,33 @@ describe("collectBody", () => {
     await expect(collectBody(req, 1024)).rejects.toBeInstanceOf(BodyTooLargeError);
   });
 });
+
+import { parseBearer } from "../engine/http/bearer.js";
+
+describe("parseBearer", () => {
+  test.each([
+    ["Bearer abc", "abc"],
+    ["bearer abc", "abc"],
+    ["BEARER abc", "abc"],
+    ["Bearer   abc", "abc"],
+    ["  Bearer abc  ", "abc"],
+    ["Bearer abc.def-ghi_jkl", "abc.def-ghi_jkl"],
+  ])("accepts %j → %j", (header, want) => {
+    expect(parseBearer(header)).toBe(want);
+  });
+
+  test.each([
+    ["Bearer ", null],
+    ["Bearer", null],
+    ["Basic dXNlcjpwYXNz", null],
+    ["", null],
+    [undefined, null],
+    [null as unknown as string, null],
+  ])("rejects %j → %j", (header, want) => {
+    expect(parseBearer(header as any)).toBe(want);
+  });
+
+  test("does not echo back arbitrary tokens with embedded CRLF", () => {
+    expect(parseBearer("Bearer abc\r\nX-Inject: 1")).toBe(null);
+  });
+});

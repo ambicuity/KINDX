@@ -64,6 +64,7 @@ import {
 import { getShardHealthSummary } from "./sharding.js";
 import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary, purgeOldAuditEntries } from "./audit.js";
 import { collectBody, BodyTooLargeError } from "./http/body.js";
+import { parseBearer } from "./http/bearer.js";
 import { getDocumentVersions } from "./repository/content.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
@@ -3011,7 +3012,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       let requestIdentity: import("./rbac.js").ResolvedIdentity | null = null;
       {
         const authHeader = nodeReq.headers["authorization"];
-        const bearerToken = authHeader?.replace(/^Bearer\s+/i, "").trim() || null;
+        const bearerToken = parseBearer(authHeader ?? null);
         const { isMultiTenantEnabled, resolveTokenToIdentity } = await import("./rbac.js");
 
         if (isMultiTenantEnabled()) {
