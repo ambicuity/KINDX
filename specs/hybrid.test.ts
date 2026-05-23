@@ -4,13 +4,26 @@
  * Unit tests for engine/repository/retrieval/hybrid.ts - Hybrid search orchestrator.
  */
 
-import { describe, test, expect } from "vitest";
+import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { openDatabase } from "../engine/runtime.js";
+import { createStore } from "../engine/repository.js";
+import type { Store } from "../engine/repository.js";
 import {
   detectContentType,
   extractSchemaFromBody,
 } from "../engine/repository/retrieval/hybrid.js";
 
 describe("hybrid", () => {
+  let store: Store;
+
+  beforeEach(() => {
+    store = createStore(":memory:");
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
   describe("detectContentType", () => {
     test("detects text content", () => {
       expect(detectContentType("Hello world", "file.txt")).toBe("text");
@@ -68,6 +81,51 @@ describe("hybrid", () => {
     test("handles malformed schema", () => {
       const body = "Schema: invalid-format\nSome data";
       expect(extractSchemaFromBody(body)).toBeUndefined();
+    });
+  });
+
+  describe("hybridQuery", () => {
+    test("returns empty results when no documents indexed", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      const results = await hybridQuery(store, "test query");
+      expect(results).toEqual([]);
+    });
+
+    test("accepts options parameter", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      const results = await hybridQuery(store, "test query", {
+        limit: 5,
+        minScore: 0.5,
+        collection: "test",
+      });
+      expect(results).toEqual([]);
+    });
+
+    test("accepts hooks parameter", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      let expandStartCalled = false;
+      let expandDoneCalled = false;
+      const results = await hybridQuery(store, "test query", {
+        hooks: {
+          onExpandStart: () => { expandStartCalled = true; },
+          onExpand: () => { expandDoneCalled = true; },
+        },
+      });
+      expect(results).toEqual([]);
+      expect(expandStartCalled).toBe(true);
+      expect(expandDoneCalled).toBe(true);
+    });
+
+    test("accepts explain parameter", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      const results = await hybridQuery(store, "test query", {
+        explain: true,
+      });
+      expect(results).toEqual([]);
     });
   });
 });
