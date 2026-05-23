@@ -5,10 +5,31 @@
 import { createHash } from "crypto";
 import type { Database } from "../runtime.js";
 
+/**
+ * Canonical JSON stringify: walks the value and emits objects with keys in
+ * sorted order so two semantically identical requests hash to the same key
+ * regardless of property insertion order. Arrays preserve order (significant).
+ */
+function canonicalStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalStringify).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const parts: string[] = [];
+  for (const k of keys) {
+    const v = obj[k];
+    if (v === undefined) continue;
+    parts.push(`${JSON.stringify(k)}:${canonicalStringify(v)}`);
+  }
+  return `{${parts.join(",")}}`;
+}
+
 export function getCacheKey(url: string, body: object): string {
   const hash = createHash("sha256");
   hash.update(url);
-  hash.update(JSON.stringify(body));
+  hash.update(canonicalStringify(body));
   return hash.digest("hex");
 }
 

@@ -39,10 +39,16 @@ export function getHashesForEmbedding(db: Database): { hash: string; body: strin
 /**
  * Clear all embeddings from the database (force re-index).
  * Deletes all rows from content_vectors and drops the vectors_vec table.
+ *
+ * The per-db prepared-statement and transaction caches MUST be invalidated
+ * here. Without invalidation the next insertEmbedding call would reuse a
+ * compiled statement bound to the dropped vectors_vec, blowing up with
+ * "no such table" or executing against a stale plan.
  */
 export function clearAllEmbeddings(db: Database): void {
   db.exec(`DELETE FROM content_vectors`);
   db.exec(`DROP TABLE IF EXISTS vectors_vec`);
+  invalidateEmbeddingStmtCaches(db);
 }
 
 // Prepared statement cache for insertEmbedding — avoids recompiling the same SQL
@@ -53,16 +59,37 @@ const _insertEmbeddingStmtCache = new WeakMap<
   {
     insertVec: ReturnType<Database["prepare"]>;
     insertContentVector: ReturnType<Database["prepare"]>;
+    insertPairTxn: (h: string, s: number, p: number, e: Float32Array, m: string, t: string) => void;
   }
 >();
+
+export function invalidateEmbeddingStmtCaches(db: Database): void {
+  _insertEmbeddingStmtCache.delete(db);
+  _bulkInsertTxnCache.delete(db);
+}
 
 export function getInsertEmbeddingStmts(db: Database) {
   const cached = _insertEmbeddingStmtCache.get(db);
   if (cached) return cached;
-  const stmts = {
-    insertVec: db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`),
-    insertContentVector: db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`),
-  };
+  const insertVec = db.prepare(`INSERT OR REPLACE INTO vectors_vec (hash_seq, embedding) VALUES (?, ?)`);
+  const insertContentVector = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`);
+  // Cache a compiled transaction wrapper so single-row inserts commit
+  // atomically without paying the BEGIN/COMMIT compilation cost on every
+  // call. Without this wrapper the two .run() calls auto-commit
+  // independently and an interrupted process drifts the two tables out of
+  // parity — the exact mismatch ensureVectorIndexIntegrity now warns on.
+  const insertPairTxn = db.transaction((
+    h: string,
+    s: number,
+    p: number,
+    e: Float32Array,
+    m: string,
+    t: string,
+  ) => {
+    insertVec.run(`${h}_${s}`, e);
+    insertContentVector.run(h, s, p, m, t);
+  });
+  const stmts = { insertVec, insertContentVector, insertPairTxn };
   _insertEmbeddingStmtCache.set(db, stmts);
   return stmts;
 }
@@ -73,6 +100,10 @@ export function getInsertEmbeddingStmts(db: Database) {
  *
  * Performance note: prepared statements are cached per database connection via a
  * WeakMap, so this function compiles the SQL exactly once per store lifetime.
+ *
+ * Atomicity: both inserts commit together via a cached SQLite transaction so
+ * an interrupted call cannot leave content_vectors and vectors_vec out of
+ * parity.
  */
 export function insertEmbedding(
   db: Database,
@@ -83,10 +114,8 @@ export function insertEmbedding(
   model: string,
   embeddedAt: string
 ): void {
-  const hashSeq = `${hash}_${seq}`;
-  const { insertVec, insertContentVector } = getInsertEmbeddingStmts(db);
-  insertVec.run(hashSeq, embedding);
-  insertContentVector.run(hash, seq, pos, model, embeddedAt);
+  const { insertPairTxn } = getInsertEmbeddingStmts(db);
+  insertPairTxn(hash, seq, pos, embedding, model, embeddedAt);
 }
 
 // Cached transaction wrapper for bulk embedding inserts.

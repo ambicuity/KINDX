@@ -68,7 +68,22 @@ export async function indexSingleFile(
     try {
       insertContent(db, hash, content, now);
       if (activeDoc) {
-        // Delete old vectors if hash changed
+        // Delete old vectors if hash changed — both the metadata row in
+        // content_vectors AND the matching ANN entries in vectors_vec. Dropping
+        // only content_vectors leaves stale rows in vectors_vec pointing at a
+        // hash that no longer exists, which causes parity drift and stale
+        // matches in vector search.
+        const hasVecTable = db.prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
+        ).get();
+        if (hasVecTable) {
+          db.prepare(`
+            DELETE FROM vectors_vec
+            WHERE hash_seq IN (
+              SELECT hash || '_' || seq FROM content_vectors WHERE hash = ?
+            )
+          `).run(activeDoc.hash);
+        }
         db.prepare(`DELETE FROM content_vectors WHERE hash = ?`).run(activeDoc.hash);
         updateDocument(db, activeDoc.id, title, hash, modifiedAt);
       } else {

@@ -104,6 +104,27 @@ export function ensureVectorIndexIntegrity(
       // probe. Surface as a quiet warning so operators can see when the
       // probe is silently skipped — previously this catch was a black hole.
       quietWarn("repository.vec_parity_probe_unsupported", { err: errString(e) });
+      // Fallback probe: hash-of-hash_seq from each side, no virtual-table
+      // join required. Same row count + same sorted-string fingerprint =
+      // same set. Different fingerprints flag the mismatch even on SQLite
+      // builds that block vec0 in correlated subqueries.
+      try {
+        const cvFp = db.prepare(`
+          SELECT group_concat(hs) AS fp FROM (
+            SELECT hash || '_' || seq AS hs FROM content_vectors ORDER BY hash, seq
+          )
+        `).get() as { fp: string | null };
+        const vvFp = db.prepare(`
+          SELECT group_concat(hs) AS fp FROM (
+            SELECT hash_seq AS hs FROM vectors_vec ORDER BY hash_seq
+          )
+        `).get() as { fp: string | null };
+        if ((cvFp?.fp ?? "") !== (vvFp?.fp ?? "")) {
+          mismatch = true;
+        }
+      } catch (e2) {
+        quietWarn("repository.vec_parity_fallback_probe_failed", { err: errString(e2) });
+      }
     }
   }
 
