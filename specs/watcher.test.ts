@@ -42,5 +42,16 @@ describe("watcher", () => {
       const daemon = new WatchDaemon(store);
       await expect(daemon.start([])).resolves.toBeUndefined();
     });
+
+    test("start() completes without error for undefined collections", async () => {
+      const daemon = new WatchDaemon(store);
+      await expect(daemon.start()).resolves.toBeUndefined();
+    });
+
+    test("has correct initial state", () => {
+      const daemon = new WatchDaemon(store);
+      expect(daemon.eventCount).toBe(0);
+      expect(daemon.lastUpdateTs).toBe(daemon.startTime);
+    });
   });
 });
