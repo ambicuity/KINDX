@@ -801,6 +801,19 @@ export function listRegisteredToolsForTest(): Array<{
 }
 
 /**
+ * Test hook: spin up a real McpServer backed by the given on-disk SQLite DB.
+ * Designed for in-process pairing with InMemoryTransport so tests can exercise
+ * the full initialize handshake without stdio.
+ *
+ * @param opts.dbPath   - Path to an existing KINDX SQLite database.
+ * @param opts.indexName - Index name (must match the catalog YAML file name).
+ */
+export function startMcpServerForTest(opts?: { dbPath?: string; indexName?: string }): McpServer {
+  const store = createStore(opts?.dbPath, opts?.indexName);
+  return createMcpServer(store);
+}
+
+/**
  * Create an MCP server with all KINDX tools, resources, and prompts registered.
  * Shared by both stdio and HTTP transports.
  *
