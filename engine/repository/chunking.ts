@@ -124,8 +124,14 @@ export async function chunkDocumentByTokens(
     if (tokensLength <= maxTokens) {
       results.push({ text: chunk.text, pos: chunk.pos, tokens: tokensLength });
     } else {
+      // First-pass safety margin tightened from 0.95 to 0.85. The previous
+      // 5% headroom was eaten by intra-chunk token-density variation (a
+      // chunk whose average is 3.5 chars/tok can still contain a tail at
+      // 2.5 chars/tok), causing systematic sub-chunk overshoots that were
+      // then silently dropped. See spec:
+      //   docs/superpowers/specs/2026-05-23-chunker-no-data-loss-design.md
       const actualCharsPerToken = Math.max(1, chunk.text.length / tokensLength);
-      const safeMaxChars = Math.floor(maxTokens * actualCharsPerToken * 0.95);
+      const safeMaxChars = Math.floor(maxTokens * actualCharsPerToken * 0.85);
 
       const subChunks = chunkDocument(
         chunk.text,
@@ -153,8 +159,100 @@ export async function chunkDocumentByTokens(
             tokens: subTokensLength,
           });
         } else {
+          // Force-split fallback: never drop content. Walk forward through
+          // the sub-chunk in token-density-aware slices until every byte is
+          // covered. Each emitted slice is guaranteed ≤ maxTokens because
+          // we re-tokenize and shrink the window proportionally when over.
+          const localCharsPerToken = Math.max(
+            1,
+            subChunk.text.length / subTokensLength
+          );
+          let safeChars = Math.max(
+            1,
+            Math.floor(maxTokens * localCharsPerToken * 0.85)
+          );
+          let cursor = 0;
+          let emitted = 0;
+          const MAX_SHRINK_ITERS = 8;
+
+          while (cursor < subChunk.text.length) {
+            let shrinkIter = 0;
+            let accepted = false;
+
+            while (shrinkIter < MAX_SHRINK_ITERS && !accepted) {
+              const end = Math.min(cursor + safeChars, subChunk.text.length);
+              const slice = subChunk.text.slice(cursor, end);
+
+              let pieceTokens: number;
+              try {
+                if (llm.tokenize) {
+                  pieceTokens = (await llm.tokenize(slice)).length;
+                } else {
+                  pieceTokens = estimateTokensFromChars(slice.length, false);
+                }
+              } catch {
+                pieceTokens = estimateTokensFromChars(slice.length, true);
+              }
+
+              if (pieceTokens <= maxTokens) {
+                results.push({
+                  text: slice,
+                  pos: chunk.pos + subChunk.pos + cursor,
+                  tokens: pieceTokens,
+                });
+                cursor = end;
+                emitted++;
+                accepted = true;
+              } else {
+                // Proportional shrink: target maxTokens with 10% headroom,
+                // based on observed token density of this exact slice.
+                const ratio = (maxTokens / pieceTokens) * 0.9;
+                const next = Math.max(1, Math.floor(safeChars * ratio));
+                // Force progress: ensure the window actually shrinks.
+                safeChars = next < safeChars ? next : Math.max(1, Math.floor(safeChars / 2));
+                shrinkIter++;
+              }
+            }
+
+            if (!accepted) {
+              // Guard: refuse to advance with an oversize slice. Halve and
+              // continue from the same cursor. Guaranteed to terminate:
+              // at safeChars = 1 a single character produces O(1) tokens
+              // for any practical tokenizer, well under maxTokens.
+              safeChars = Math.max(1, Math.floor(safeChars / 2));
+              if (safeChars === 1 && cursor + 1 < subChunk.text.length) {
+                // Pathological tokenizer: emit a single-char slice and step.
+                // Cannot exceed maxTokens for any sane tokenizer.
+                const slice = subChunk.text.slice(cursor, cursor + 1);
+                let pieceTokens: number;
+                try {
+                  pieceTokens = llm.tokenize
+                    ? (await llm.tokenize(slice)).length
+                    : 1;
+                } catch {
+                  pieceTokens = 1;
+                }
+                if (pieceTokens <= maxTokens) {
+                  results.push({
+                    text: slice,
+                    pos: chunk.pos + subChunk.pos + cursor,
+                    tokens: pieceTokens,
+                  });
+                  cursor += 1;
+                  emitted++;
+                } else {
+                  // Truly unreachable for any normal tokenizer. Bail out
+                  // loudly rather than silently lose data.
+                  throw new Error(
+                    `KINDX chunker: tokenizer reports ${pieceTokens} tokens for a single character at pos=${chunk.pos + subChunk.pos + cursor}; cannot force-split further.`
+                  );
+                }
+              }
+            }
+          }
+
           process.stderr.write(
-            `KINDX Warning: sub-chunk at pos=${chunk.pos + subChunk.pos} (tokens≈${subTokensLength}) exceeds maxTokens=${maxTokens}, skipping to prevent model overflow.\n`
+            `KINDX Note: force-split applied at pos=${chunk.pos + subChunk.pos} (orig tokens≈${subTokensLength}, emitted ${emitted} slices ≤ ${maxTokens}).\n`
           );
         }
       }

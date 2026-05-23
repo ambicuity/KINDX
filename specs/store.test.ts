@@ -698,6 +698,100 @@ describe.skipIf(!!process.env.CI)("Token-based Chunking", () => {
 });
 
 // =============================================================================
+// Force-split fallback — no silent data loss
+//
+// Spec: docs/superpowers/specs/2026-05-23-chunker-no-data-loss-design.md
+// Regression for ingest warnings of the form:
+//   "KINDX Warning: sub-chunk at pos=… exceeds maxTokens=900, skipping…"
+// =============================================================================
+
+describe("chunkDocumentByTokens — force-split (no data loss)", () => {
+  // A tokenizer with non-uniform density: dense-tokenizing text inside a
+  // marked region forces the planner's chunk-mean estimate to be wrong, so
+  // a re-chunked sub-chunk still overshoots maxTokens. Before the fix that
+  // content was dropped; after the fix it must be force-split.
+  function makeDensityTokenizer() {
+    return async (text: string): Promise<readonly number[]> => {
+      let tokens = 0;
+      for (const ch of text) {
+        // "@" is the dense marker — ~1 char per token, 4x denser than prose.
+        tokens += ch === "@" ? 1 : 0.25;
+      }
+      return new Array(Math.ceil(tokens)).fill(0);
+    };
+  }
+
+  test("force-splits when sub-chunk still exceeds maxTokens and emits all bytes", async () => {
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
+      tokenize: makeDensityTokenizer(),
+    } as any);
+
+    try {
+      // Prose front (low density) + dense tail (high density). Average density
+      // is ~0.4 tok/char; planner thinks 900 tok ≈ 2250 chars; in dense tail
+      // 2250 chars is actually ~2250 tokens. The re-chunk pass would have
+      // dropped it.
+      const prose = "the quick brown fox jumps over the lazy dog. ".repeat(200);
+      const dense = "@".repeat(4000);
+      const content = prose + dense;
+
+      const chunks = await chunkDocumentByTokens(content, 900, 135);
+
+      // 1. Every chunk satisfies the token budget.
+      for (const c of chunks) {
+        expect(c.tokens).toBeLessThanOrEqual(900);
+      }
+
+      // 2. Every byte of input is covered by some chunk (ignoring overlap):
+      //    the union of [pos, pos+text.length) intervals covers [0, content.length).
+      const intervals = chunks
+        .map(c => [c.pos, c.pos + c.text.length] as [number, number])
+        .sort((a, b) => a[0] - b[0]);
+      let covered = 0;
+      for (const [start, end] of intervals) {
+        if (start <= covered) covered = Math.max(covered, end);
+      }
+      expect(covered).toBe(content.length);
+
+      // 3. Reconstruction sanity: each chunk's text equals the slice at its pos.
+      for (const c of chunks) {
+        expect(content.slice(c.pos, c.pos + c.text.length)).toBe(c.text);
+      }
+    } finally {
+      llmSpy.mockRestore();
+    }
+  });
+
+  test("force-split terminates on pathological density (entire input dense)", async () => {
+    const llmSpy = vi.spyOn(llmModule, "getDefaultLLM").mockReturnValue({
+      tokenize: makeDensityTokenizer(),
+    } as any);
+
+    try {
+      // All-dense content: every char is a token. 4000 tokens of input
+      // must come out as ≥ 5 chunks of ≤ 900 tokens each.
+      const content = "@".repeat(4000);
+      const chunks = await chunkDocumentByTokens(content, 900, 135);
+
+      expect(chunks.length).toBeGreaterThanOrEqual(5);
+      for (const c of chunks) {
+        expect(c.tokens).toBeLessThanOrEqual(900);
+      }
+      const intervals = chunks
+        .map(c => [c.pos, c.pos + c.text.length] as [number, number])
+        .sort((a, b) => a[0] - b[0]);
+      let covered = 0;
+      for (const [start, end] of intervals) {
+        if (start <= covered) covered = Math.max(covered, end);
+      }
+      expect(covered).toBe(content.length);
+    } finally {
+      llmSpy.mockRestore();
+    }
+  });
+});
+
+// =============================================================================
 // Smart Chunking - Break Point Detection Tests
 // =============================================================================
 
