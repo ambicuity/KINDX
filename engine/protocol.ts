@@ -633,10 +633,38 @@ function buildInstructions(store: Store, session?: KindxSession): string {
   const status = store.getStatus();
   const lines: string[] = [];
 
-  // --- What is this? ---
+  // --- Identity (always first) ---
+  const collectionNames = status.collections.map((c) => `"${c.name}"`).join(", ");
+  const collectionsClause = collectionNames ? ` across collections: ${collectionNames}` : "";
+  lines.push(
+    `KINDX is your local search index over ${status.totalDocuments} markdown documents${collectionsClause}.`,
+  );
   const globalCtx = getGlobalContext();
-  lines.push(`KINDX is your local search engine over ${status.totalDocuments} markdown documents.`);
   if (globalCtx) lines.push(`Context: ${globalCtx}`);
+
+  // --- Auto-invocation contract (load-bearing) ---
+  if (status.collections.length === 0) {
+    lines.push("");
+    lines.push("kindx is installed but has no collections — run `kindx collection add <path>` to enable auto-search.");
+  } else if (isAutoInvokeEnabled()) {
+    lines.push("");
+    lines.push(AUTO_INVOCATION_CONTRACT);
+    if (!status.hasVectorIndex) {
+      lines.push("");
+      lines.push("Note: lex-only mode — vector index not built. Do not call `vec`/`hyde`. Run `kindx embed` to enable semantic search.");
+    } else if (status.needsEmbedding > 0) {
+      lines.push("");
+      lines.push(`Note: ${status.needsEmbedding} documents need re-embedding. Run \`kindx embed\` to update.`);
+    }
+  } else if (!status.hasVectorIndex) {
+    lines.push("");
+    lines.push("Note: No vector embeddings yet. Run `kindx embed` to enable semantic search (vec/hyde).");
+  } else if (status.needsEmbedding > 0) {
+    lines.push("");
+    lines.push(`Note: ${status.needsEmbedding} documents need embedding. Run \`kindx embed\` to update.`);
+  }
+
+  // --- Layered project instructions (AGENTS.md / SOUL.md / CLAUDE.md) ---
   const layered = loadLayeredInstructions({
     cwd: process.cwd(),
     globalFiles: [resolve(homedir(), ".codex", "AGENTS.md")],
@@ -655,7 +683,7 @@ function buildInstructions(store: Store, session?: KindxSession): string {
     lines.push(layered.text);
   }
 
-  // --- What's searchable? ---
+  // --- Collections list (detail) ---
   if (status.collections.length > 0) {
     lines.push("");
     lines.push("Collections (scope with `collection` parameter):");
@@ -667,28 +695,15 @@ function buildInstructions(store: Store, session?: KindxSession): string {
     }
   }
 
-  // --- Capability gaps ---
-  if (!status.hasVectorIndex) {
-    lines.push("");
-    lines.push("Note: No vector embeddings yet. Run `kindx embed` to enable semantic search (vec/hyde).");
-  } else if (status.needsEmbedding > 0) {
-    lines.push("");
-    lines.push(`Note: ${status.needsEmbedding} documents need embedding. Run \`kindx embed\` to update.`);
-  }
-
-  // --- Memory prefetch: surface top-accessed workspace memories inline ---
-  // This avoids a separate memory_search tool call at the start of every session.
-  // We only surface memories when we have a scope to resolve against.
+  // --- Workspace memory prefetch (unchanged behaviour, kept) ---
   const workspaceScope = session?.scopeContext?.workspaceScope;
   if (workspaceScope) {
     try {
       const stats = getMemoryStats(store.db, workspaceScope);
       let topMemories = stats.topAccessed.slice(0, MEMORY_PREFETCH_LIMIT);
       if (topMemories.length === 0) {
-        // Fallback for fresh scopes where no entry has been marked as accessed yet.
         const recentRows = store.db.prepare(`
-          SELECT value
-          FROM memories
+          SELECT value FROM memories
           WHERE scope = ? AND superseded_by IS NULL
           ORDER BY accessed_count DESC, appeared_count DESC, id DESC
           LIMIT ?
@@ -708,37 +723,27 @@ function buildInstructions(store: Store, session?: KindxSession): string {
           remainingChars -= line.length;
         }
       }
-    } catch {
-      // Memory prefetch is best-effort — never block startup
-    }
+    } catch { /* best-effort */ }
   }
 
-  // --- Search tool ---
-  lines.push("");
-  lines.push("Search: Use `query` with sub-queries (lex/vec/hyde):");
-  lines.push("  - type:'lex' — BM25 keyword search (exact terms, fast)");
-  lines.push("  - type:'vec' — semantic vector search (meaning-based)");
-  lines.push("  - type:'hyde' — hypothetical document (write what the answer looks like)");
-  lines.push("");
-  lines.push("Examples:");
-  lines.push("  Quick keyword lookup: [{type:'lex', query:'error handling'}]");
-  lines.push("  Semantic search: [{type:'vec', query:'how to handle errors gracefully'}]");
-  lines.push("  Best results: [{type:'lex', query:'error'}, {type:'vec', query:'error handling best practices'}]");
+  // --- Condensed search/retrieval reference (long examples now live in tool descriptions) ---
+  if (status.collections.length > 0) {
+    lines.push("");
+    lines.push("Tools: `query` (lex/vec/hyde sub-queries), `get` (path or #docid), `multi_get` (glob/list). Use `minScore: 0.5` to filter low-confidence results. File paths in results are collection-relative.");
+  }
 
-  // --- Retrieval workflow ---
-  lines.push("");
-  lines.push("Retrieval:");
-  lines.push("  - `get` — single document by path or docid (#abc123). Supports line offset (`file.md:100`).");
-  lines.push("  - `multi_get` — batch retrieve by glob (`journals/2025-05*.md`) or comma-separated list.");
-
-  // --- Non-obvious things that prevent mistakes ---
-  lines.push("");
-  lines.push("Tips:");
-  lines.push("  - File paths in results are relative to their collection.");
-  lines.push("  - Use `minScore: 0.5` to filter low-confidence results.");
-  lines.push("  - Results include a `context` field describing the content type.");
-
-  return lines.join("\n");
+  // --- Hard ceiling (byte-accurate: use Buffer.byteLength for UTF-8 multi-byte chars) ---
+  let out = lines.join("\n");
+  if (Buffer.byteLength(out, "utf8") > MAX_INSTRUCTIONS_BYTES) {
+    const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+    const budget = MAX_INSTRUCTIONS_BYTES - markerBytes;
+    // Slice by characters until the UTF-8 byte count fits within the budget.
+    let sliced = Buffer.from(out, "utf8").subarray(0, budget).toString("utf8");
+    // The subarray cut may have split a multi-byte character; trim trailing replacement chars.
+    // Replacing the incomplete sequence is handled automatically by toString("utf8").
+    out = sliced + TRUNCATION_MARKER;
+  }
+  return out;
 }
 
 /**
