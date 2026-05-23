@@ -46,8 +46,9 @@ describe("tool descriptions lead with WHEN-TO-USE", () => {
     expect(query!.description.split("\n")[0]).toContain(
       "Call this first whenever the user asks a question",
     );
-    // TODO(Tasks 7+): extend coverage to remaining tools as their descriptions are rewritten.
   });
+
+  test.todo("extend coverage to remaining tools as their descriptions are rewritten");
 
   test("get/multi_get/status descriptions lead with the agreed WHEN-TO-USE sentence", () => {
     const tools = listRegisteredToolsForTest();

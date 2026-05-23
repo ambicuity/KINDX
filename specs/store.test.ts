@@ -2272,11 +2272,6 @@ describe("Integration", () => {
     const searchResults = store.searchFTS("project", 10);
     expect(searchResults.length).toBe(2);
 
-    // Status - SKIPPED: getStatus() has bug (queries non-existent collections table)
-    // const status = store.getStatus();
-    // expect(status.totalDocuments).toBe(2);
-    // expect(status.collections).toHaveLength(1);
-
     // Retrieve single document
     const doc = store.findDocument("notes/meeting.md", { includeBody: true });
     expect("error" in doc).toBe(false);
@@ -2569,16 +2564,13 @@ describe("Edge Cases", () => {
     const searchResults = store.searchFTS("anything", 10);
     expect(searchResults).toHaveLength(0);
 
-    // SKIPPED: getStatus() has bug (queries non-existent collections table)
-    // const status = store.getStatus();
-    // expect(status.totalDocuments).toBe(0);
-    // expect(status.collections).toHaveLength(0);
-
     const doc = store.findDocument("nonexistent.md");
     expect("error" in doc).toBe(true);
 
     await cleanupTestDb(store);
   });
+
+  test.todo("getStatus returns zero counts for empty store (blocked by collections table bug)");
 
   test("handles very long document bodies", async () => {
     const store = await createTestStore();
