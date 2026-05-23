@@ -29,13 +29,10 @@ describe("collectBody", () => {
 
   test("rejects body well over cap and exposes limit", async () => {
     const body = "x".repeat(2048);
-    try {
-      await collectBody(makeReq(body), 1024);
-      throw new Error("expected throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(BodyTooLargeError);
-      expect((err as BodyTooLargeError).limitBytes).toBe(1024);
-    }
+    await expect(collectBody(makeReq(body), 1024)).rejects.toMatchObject({
+      name: "BodyTooLargeError",
+      limitBytes: 1024,
+    });
   });
 
   test("preserves UTF-8 multi-byte content under cap", async () => {
@@ -43,5 +40,10 @@ describe("collectBody", () => {
     const bytes = Buffer.byteLength(body, "utf-8");
     const out = await collectBody(makeReq(body), bytes);
     expect(out).toBe(body);
+  });
+
+  test("rejects when overflow happens on a later chunk", async () => {
+    const req = Readable.from([Buffer.alloc(600, "x"), Buffer.alloc(600, "x")]) as unknown as IncomingMessage;
+    await expect(collectBody(req, 1024)).rejects.toBeInstanceOf(BodyTooLargeError);
   });
 });

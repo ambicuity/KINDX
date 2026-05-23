@@ -3,7 +3,6 @@
  *
  * Pure helper for reading an HTTP request body with a hard byte cap.
  * Extracted from engine/protocol.ts so it can be unit-tested directly.
- * Behavior must remain identical to the inline closure it replaces.
  */
 import type { IncomingMessage } from "node:http";
 
@@ -21,8 +20,8 @@ export class BodyTooLargeError extends Error {
  * `BodyTooLargeError` once cumulative bytes exceed `capBytes`.
  *
  * On overflow the request stream is paused (not destroyed) so the caller
- * can write a 413 response before the socket closes. This matches the
- * behavior of the inline `collectBody` in `engine/protocol.ts`.
+ * can write a 413 response before the socket closes. Replaces the inline
+ * `collectBody` closure that previously lived inside `startMcpHttpServer`.
  */
 export async function collectBody(req: IncomingMessage, capBytes: number): Promise<string> {
   const chunks: Buffer[] = [];
