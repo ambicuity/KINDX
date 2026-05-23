@@ -193,6 +193,54 @@ describe("pretty-tty reporter", () => {
     expect(text).toContain("✓ Searching 6 queries");
   });
 
+  it("spinner frame is cyan while elapsed < 1.5× expected", () => {
+    let clk = 0;
+    const r = createProgressReporter({
+      mode: "pretty-tty", color: true, stderr: out,
+      now: () => clk, intervalMs: 0,
+    });
+    r.start("rerank", "Reranking 40 candidates", { expectedDurationMs: 10000 });
+    // 5s in: well under expected (10s), spinner stays cyan
+    clk = 5000;
+    out.clear();
+    // Re-render via warn() which pauses + repaints the spinner.
+    r.warn("noise", "x");
+    // Look at the spinner frame specifically — it's the braille char in
+    // SPINNER_FRAMES wrapped in a color code. Cyan = [36m.
+    expect(out.text).toMatch(/\x1b\[36m[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(out.text).not.toMatch(/\x1b\[33m[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    r.done();
+  });
+
+  it("spinner frame is yellow once elapsed > 1.5× expected", () => {
+    let clk = 0;
+    const r = createProgressReporter({
+      mode: "pretty-tty", color: true, stderr: out,
+      now: () => clk, intervalMs: 0,
+    });
+    r.start("rerank", "Reranking 40 candidates", { expectedDurationMs: 10000 });
+    // 16s in: 1.6× expected → spinner should be yellow
+    clk = 16000;
+    out.clear();
+    r.warn("noise", "x");
+    expect(out.text).toMatch(/\x1b\[33m[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(out.text).not.toMatch(/\x1b\[36m[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    r.done();
+  });
+
+  it("ndjson reporter records expectedDurationMs on phase-start", () => {
+    let clk = 1000;
+    const r = createProgressReporter({
+      mode: "ndjson", color: false, stderr: out, now: () => clk,
+    });
+    r.start("rerank", "Reranking 40 candidates", { expectedDurationMs: 10000 });
+    const ev = JSON.parse(out.text.trim());
+    expect(ev).toMatchObject({
+      event: "phase-start", name: "rerank", label: "Reranking 40 candidates",
+      expectedDurationMs: 10000,
+    });
+  });
+
   it("done() restores cursor visibility", () => {
     const r = createProgressReporter({
       mode: "pretty-tty", color: false, stderr: out, intervalMs: 0,

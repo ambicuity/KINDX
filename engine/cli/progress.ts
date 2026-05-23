@@ -35,8 +35,15 @@ export interface ProgressEvent {
 }
 
 export interface ProgressReporter {
-  /** Begin a new phase. Implicitly closes any active phase. */
-  start(name: string, label: string): void;
+  /**
+   * Begin a new phase. Implicitly closes any active phase.
+   *
+   * `opts.expectedDurationMs` lets the pretty-tty reporter signal an
+   * overrun: once elapsed exceeds 1.5× this value, the spinner frame
+   * recolors from cyan to yellow until the phase ends. ndjson includes
+   * the expected duration in its phase-start event. Other modes ignore it.
+   */
+  start(name: string, label: string, opts?: { expectedDurationMs?: number }): void;
   /**
    * Attach indented detail lines to the current (or most-recent) phase.
    * In pretty-tty mode these flush when the phase ends.
@@ -91,7 +98,7 @@ export function createProgressReporter(deps: ReporterDeps): ProgressReporter {
 function silentReporter(stderr: NodeJS.WritableStream, color: boolean): ProgressReporter {
   const palette = paletteFor(color);
   return {
-    start() {},
+    start(_name, _label, _opts) {},
     detail() {},
     end() {},
     warn() {},
@@ -108,9 +115,13 @@ function ndjsonReporter(stderr: NodeJS.WritableStream, now: () => number): Progr
   const phaseStart = new Map<string, number>();
   const write = (ev: ProgressEvent) => stderr.write(JSON.stringify(ev) + "\n");
   return {
-    start(name, label) {
+    start(name, label, opts) {
       phaseStart.set(name, now());
-      write({ event: "phase-start", name, label });
+      const ev: ProgressEvent = { event: "phase-start", name, label };
+      if (opts?.expectedDurationMs !== undefined) {
+        (ev as ProgressEvent & { expectedDurationMs?: number }).expectedDurationMs = opts.expectedDurationMs;
+      }
+      write(ev);
     },
     detail(lines) {
       // Detail in ndjson is folded into the next phase-end event, but it's
@@ -155,7 +166,7 @@ function prettyLogReporter(stderr: NodeJS.WritableStream, deps: ReporterDeps): P
   };
 
   return {
-    start(name, label) {
+    start(name, label, _opts) {
       flushDetail();
       stderr.write(`${palette.dim("▸")} ${palette.dim(label + "…")}\n`);
       phaseStart.set(name, now());
@@ -201,12 +212,13 @@ function prettyTtyReporter(stderr: NodeJS.WritableStream, deps: ReporterDeps): P
   const utf8 = glyphs.ok === "✓";
   const frames = utf8 ? SPINNER_FRAMES : ASCII_SPINNER_FRAMES;
 
-  interface ActivePhase { name: string; label: string; startedAt: number; }
+  interface ActivePhase { name: string; label: string; startedAt: number; expectedDurationMs?: number; }
   let active: ActivePhase | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let frameIndex = 0;
   let detailBuffer: string[] = [];
   let cursorHidden = false;
+  const OVERRUN_MULTIPLIER = 1.5;
 
   const hideCursor = () => {
     if (!cursorHidden) {
@@ -226,7 +238,13 @@ function prettyTtyReporter(stderr: NodeJS.WritableStream, deps: ReporterDeps): P
     if (!active) return;
     clearLine();
     const frame = frames[frameIndex % frames.length];
-    stderr.write(`${palette.cyan(frame ?? "")} ${palette.dim(active.label + "…")}`);
+    // When the phase has an expected duration and we've overrun it by the
+    // multiplier, the spinner turns yellow to signal "this is taking longer
+    // than usual". The label stays dim so the eye lands on the color shift.
+    const overrun = active.expectedDurationMs !== undefined &&
+                    (now() - active.startedAt) > active.expectedDurationMs * OVERRUN_MULTIPLIER;
+    const colored = overrun ? palette.yellow(frame ?? "") : palette.cyan(frame ?? "");
+    stderr.write(`${colored} ${palette.dim(active.label + "…")}`);
   };
 
   const startAnimation = () => {
@@ -264,9 +282,9 @@ function prettyTtyReporter(stderr: NodeJS.WritableStream, deps: ReporterDeps): P
   };
 
   return {
-    start(name, label) {
+    start(name, label, opts) {
       if (active) closeActive(active.name);
-      active = { name, label, startedAt: now() };
+      active = { name, label, startedAt: now(), expectedDurationMs: opts?.expectedDurationMs };
       frameIndex = 0;
       hideCursor();
       renderFrame();

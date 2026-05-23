@@ -190,6 +190,40 @@ export function stripAnsi(s: string): string {
 }
 
 /**
+ * Wrap `text` in an OSC 8 hyperlink escape so terminals that support it
+ * (iTerm2, WezTerm, kitty, VS Code, Windows Terminal) render it as a
+ * cmd/ctrl-clickable link. When `color` is false (pipes, NO_COLOR, dumb
+ * terminals) returns the text unchanged.
+ *
+ * Format: ESC ] 8 ; ; URL BEL TEXT ESC ] 8 ; ; BEL
+ *
+ * `stripAnsi()` removes the wrapping bytes, so plain-mode output via the
+ * existing helpers stays byte-equivalent.
+ */
+export function hyperlink(text: string, url: string, color: boolean): string {
+  if (!color || !url) return text;
+  // Strip control chars from URL to avoid escape injection.
+  // eslint-disable-next-line no-control-regex
+  const safeUrl = url.replace(/[\x00-\x1f\x7f]/g, "");
+  return `\x1b]8;;${safeUrl}\x07${text}\x1b]8;;\x07`;
+}
+
+/**
+ * Build a file:// URL from an absolute filesystem path, with an optional
+ * `#L<line>` anchor. Terminals that honor line anchors (some IDE protocols)
+ * jump to that line; others ignore the fragment.
+ *
+ * Spaces and non-ASCII characters are percent-encoded; existing percent
+ * sequences are preserved.
+ */
+export function fileUrl(absolutePath: string, opts: { line?: number } = {}): string {
+  // encodeURI handles spaces, unicode, etc. but preserves path separators.
+  const encoded = encodeURI(absolutePath);
+  const anchor = opts.line ? `#L${opts.line}` : "";
+  return `file://${encoded}${anchor}`;
+}
+
+/**
  * Returns a color helper that honors the active color setting. When `color`
  * is false, every wrapper is the identity function — this is what allows
  * renderers to be written in a single style and degrade gracefully.

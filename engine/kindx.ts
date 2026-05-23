@@ -2374,28 +2374,38 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
     const layout = (opts.layout ?? "snippets") as "snippets" | "cards" | "table" | "lines";
     const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
     const rows = filtered.map((r, i) => {
-      const { line, snippet } = extractSnippet(r.body, query, layout === "snippets" ? 500 : 240, r.chunkPos);
+      const extracted = extractSnippet(r.body, query, layout === "snippets" ? 500 : 240, r.chunkPos);
+      const { line, snippet, body: snippetBodyOnly, bodyStartLine } = extracted;
       // Match-gate the :line suffix exactly like the legacy snippets path did.
-      const snippetBody = snippet.split("\n").slice(1).join("\n").toLowerCase();
-      const hasMatch = queryTerms.some(t => snippetBody.includes(t));
+      const lowerBody = snippetBodyOnly.toLowerCase();
+      const hasMatch = queryTerms.some(t => lowerBody.includes(t));
       const docid = r.docid || (r.hash ? r.hash.slice(0, 6) : undefined);
 
-      let body: string | undefined;
+      let rowBody: string | undefined;
+      let rowBodyStartLine: number | undefined;
       if (layout === "snippets") {
-        const displaySnippet = opts.lineNumbers ? addLineNumbers(snippet, line) : snippet;
-        body = highlightTerms(displaySnippet, query);
+        // New default: pass the bare body + start line; renderer composes
+        // the human header and the line-number gutter. Highlighting still
+        // happens here so the renderer stays pure.
+        const baseBody = opts.lineNumbers ? addLineNumbers(snippetBodyOnly, bodyStartLine) : snippetBodyOnly;
+        rowBody = highlightTerms(baseBody, query);
+        rowBodyStartLine = bodyStartLine;
       } else {
-        body = snippet;
+        rowBody = snippet;
       }
 
+      const totalLines = r.body ? r.body.split("\n").length : undefined;
       const row: import("./cli/renderers/search.js").SearchRenderRow = {
         rank: i + 1,
         docid,
         displayPath: r.displayPath,
+        absolutePath: r.file,
         title: r.title || undefined,
         context: r.context,
         score: r.score,
-        snippet: body,
+        snippet: rowBody,
+        bodyStartLine: rowBodyStartLine,
+        totalLines,
         matchedLine: hasMatch ? line : undefined,
       };
 
@@ -2618,6 +2628,26 @@ function search(query: string, opts: OutputOptions): void {
   outputResults(resultsWithContext, query, opts);
 }
 
+/**
+ * Estimate rerank phase duration so the progress spinner can show
+ * `Reranking N candidates (~Ts expected)`. The pretty-tty reporter also uses
+ * this to recolor the spinner yellow when actual elapsed exceeds expected.
+ *
+ * Model: a fixed overhead (model warmup, batching) plus a per-candidate cost.
+ * Numbers tuned against observed traces on the current Qwen3-0.6B rerank
+ * model. Recalibrate by running `estimateRerankMs(N)` against real timings:
+ * the goal is for 80% of queries to complete within 1.5× the estimate.
+ */
+function estimateRerankMs(candidates: number): number {
+  // 400ms model warmup + ~500ms per candidate on a cold rerank session.
+  // Once warm the per-item cost drops to ~22ms, but we estimate cold by
+  // default because that's the worst-case path for first-query feedback.
+  // Per-candidate latency scales sublinearly past 20 (batched).
+  const overhead = 400;
+  const perCandidate = candidates <= 20 ? 500 : 500 - Math.min(300, (candidates - 20) * 5);
+  return Math.round(overhead + perCandidate * candidates);
+}
+
 // Build query-expansion tree lines (rendered under the "Expanding query" phase
 // by the active ProgressReporter). Returned as plain strings; ANSI dimming is
 // applied by the reporter via its palette.
@@ -2754,7 +2784,10 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
-            reporter.start("rerank", `Reranking ${chunkCount} chunks`);
+            {
+              const expectedMs = estimateRerankMs(chunkCount);
+              reporter.start("rerank", `Reranking ${chunkCount} candidates (~${formatMs(expectedMs)} expected)`, { expectedDurationMs: expectedMs });
+            }
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
@@ -2803,7 +2836,10 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
-            reporter.start("rerank", `Reranking ${chunkCount} chunks`);
+            {
+              const expectedMs = estimateRerankMs(chunkCount);
+              reporter.start("rerank", `Reranking ${chunkCount} candidates (~${formatMs(expectedMs)} expected)`, { expectedDurationMs: expectedMs });
+            }
             progress.indeterminate();
           },
           onRerankDone: (ms) => {

@@ -82,18 +82,26 @@ KINDX_FORCE_UTF8=1 kindx query "auth"
 
 ## Search formats
 
-`--format snippets|cards|table|lines` switch between four pretty layouts for `query`, `search`, and `vsearch`. `snippets` is the default (legacy look):
+`--format snippets|cards|table|lines` switch between four pretty layouts for `query`, `search`, and `vsearch`. `snippets` is the default:
 
 ```text
 $ kindx query auth
-kindx://docs/auth.md:12 #abc123
+kindx://docs/auth.md:12 #abc123          ← cmd/ctrl-click opens in editor
 Title: Authentication
 Score:  84%
 
-@@ -10,4 @@ (9 before, 30 after)
-JWT tokens are issued on login
-and verified by middleware.
+lines 10–13 (9 before, 30 after)
+10 │ ## Authentication
+11 │
+12 │ JWT tokens are issued on login
+13 │ and verified by middleware.
 ```
+
+In modern terminals (iTerm2, WezTerm, kitty, Windows Terminal, VS Code's integrated terminal), the `kindx://` URI is wrapped in an [OSC 8 hyperlink](https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda) pointing at `file://<absolute-path>#L<line>`. Cmd/ctrl-clicking opens the document at the matched line in the user's default editor. Pipes, `--no-color`, and terminals that don't support OSC 8 see plain text — no fallback required.
+
+Snippet bodies use a `<n> │ ` gutter prefix so every line is anchored to its position in the source file. The gutter auto-fits the widest line number, so blocks spanning lines 98–102 align cleanly. The `lines X–Y (A before, B after)` header replaces the old unified-diff `@@ -X,Y @@` form — same information, readable to humans.
+
+During slow phases (`rerank` on a fresh model, ~5–25s), the spinner label carries an expected-duration hint: `Reranking 40 candidates (~12s expected)`. If the actual elapsed time exceeds 1.5× the estimate, the spinner frame recolors from cyan to yellow so the user can tell at a glance that the query is running longer than usual.
 
 `--format cards|table|lines` switch to alternative layouts:
 

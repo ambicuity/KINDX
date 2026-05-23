@@ -13,16 +13,29 @@
  * monochrome palette and the output is automatically ANSI-free.
  */
 
-import { paletteFor } from "../output.js";
+import { paletteFor, hyperlink, fileUrl } from "../output.js";
 
 export interface SearchRenderRow {
   rank: number;
   docid?: string;
   displayPath: string;
+  /**
+   * Absolute filesystem path. When provided in the `snippets` layout the
+   * URI line is wrapped in an OSC 8 hyperlink to `file://<absolutePath>#L<matchedLine>`.
+   */
+  absolutePath?: string;
   title?: string;
   context?: string | null;
   score: number;
   snippet?: string;
+  /**
+   * 1-indexed line number where the snippet body begins. Drives the
+   * `lines X–Y` header and the line-number gutter in the snippets layout.
+   * When absent, the gutter and the friendly header are suppressed.
+   */
+  bodyStartLine?: number;
+  /** Total lines in the source document; needed for `(A before, B after)` counts. */
+  totalLines?: number;
   matchedLine?: number;
   collection?: string;
   retrievalMode?: "hybrid" | "lex" | "vec" | "hyde" | "search" | "vsearch";
@@ -147,11 +160,17 @@ function renderSnippets(rows: SearchRenderRow[], opts: SearchRenderOptions): str
     if (!row) continue;
     const lines: string[] = [];
 
-    // Line 1: filepath + optional :line + optional #docid
+    // Line 1: kindx:// URI + optional :line + optional #docid.
+    // When color is on and an absolutePath is available, the URI portion
+    // is wrapped in OSC 8 so modern terminals make it cmd+click-openable.
     const path = `kindx://${row.displayPath}`;
     const lineSuffix = row.matchedLine !== undefined ? `:${row.matchedLine}` : "";
     const docidStr = row.docid ? ` ${palette.dim(`#${row.docid}`)}` : "";
-    lines.push(`${palette.cyan(path)}${palette.dim(lineSuffix)}${docidStr}`);
+    const cyanPath = palette.cyan(path);
+    const linked = row.absolutePath
+      ? hyperlink(cyanPath, fileUrl(row.absolutePath, { line: row.matchedLine }), opts.color)
+      : cyanPath;
+    lines.push(`${linked}${palette.dim(lineSuffix)}${docidStr}`);
 
     // Optional Title / Context
     if (row.title) lines.push(`${palette.bold(`Title: ${row.title}`)}`);
@@ -166,18 +185,66 @@ function renderSnippets(rows: SearchRenderRow[], opts: SearchRenderOptions): str
       for (const l of row.explainLines) lines.push(palette.dim(l));
     }
 
-    // Blank line, then snippet (which already contains the @@ -X,M @@ header
-    // and any caller-applied term highlighting — the renderer does not touch
-    // the body so byte-equivalence with pre-highlighted callers is preserved).
+    // Blank line, then friendly header + gutter-rendered body (or, if
+    // the caller didn't supply bodyStartLine, fall back to the legacy
+    // pre-formatted snippet to stay compatible with older call sites).
     lines.push("");
-    if (row.snippet) {
-      lines.push(row.snippet);
+    if (row.snippet !== undefined) {
+      if (row.bodyStartLine !== undefined) {
+        const bodyLines = row.snippet.split("\n");
+        const header = formatSnippetHeader(row.bodyStartLine, bodyLines.length, row.totalLines, opts.color);
+        lines.push(header);
+        lines.push(renderGutter(bodyLines, row.bodyStartLine, palette));
+      } else {
+        // Legacy path: snippet already has `@@ ... @@` header + body baked in.
+        lines.push(row.snippet);
+      }
     }
 
     blocks.push(lines.join("\n"));
   }
   // Double blank between results, matching legacy output.
   return blocks.join("\n\n\n");
+}
+
+/**
+ * Build the human-readable snippet context header.
+ *
+ * `lines 12–42 (10 before, 18 after)`  ← when totalLines is known
+ * `lines 12–42`                         ← when before/after counts are unknown
+ */
+function formatSnippetHeader(
+  bodyStartLine: number,
+  bodyLineCount: number,
+  totalLines: number | undefined,
+  color: boolean,
+): string {
+  const palette = paletteFor(color);
+  const endLine = bodyStartLine + bodyLineCount - 1;
+  let header = `lines ${bodyStartLine}–${endLine}`;
+  if (totalLines !== undefined && totalLines > 0) {
+    const before = bodyStartLine - 1;
+    const after = Math.max(0, totalLines - endLine);
+    header += ` (${before} before, ${after} after)`;
+  }
+  return palette.dim(header);
+}
+
+/**
+ * Prefix each snippet line with `<n> | `. The gutter width auto-fits the
+ * largest line number in the block so column alignment stays clean.
+ */
+function renderGutter(
+  bodyLines: string[],
+  startLine: number,
+  palette: ReturnType<typeof paletteFor>,
+): string {
+  const maxLine = startLine + bodyLines.length - 1;
+  const gutterW = String(maxLine).length;
+  return bodyLines.map((line, i) => {
+    const num = String(startLine + i).padStart(gutterW);
+    return `${palette.dim(`${num} │`)} ${line}`;
+  }).join("\n");
 }
 
 function renderLines(rows: SearchRenderRow[], opts: SearchRenderOptions): string {

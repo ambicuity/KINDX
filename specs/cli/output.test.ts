@@ -6,6 +6,8 @@ import {
   paletteFor,
   glyphsFor,
   stripAnsi,
+  hyperlink,
+  fileUrl,
 } from "../../engine/cli/output.js";
 
 describe("resolveOutputMode", () => {
@@ -136,6 +138,53 @@ describe("glyphsFor", () => {
   it("KINDX_FORCE_UTF8=1 forces Unicode glyphs", () => {
     const g = glyphsFor({ KINDX_FORCE_UTF8: "1" });
     expect(g.ok).toBe("✓");
+  });
+});
+
+describe("hyperlink", () => {
+  it("wraps text in OSC 8 escapes when color is enabled", () => {
+    const out = hyperlink("docs/auth.md", "file:///abs/auth.md#L12", true);
+    expect(out).toBe("\x1b]8;;file:///abs/auth.md#L12\x07docs/auth.md\x1b]8;;\x07");
+  });
+
+  it("returns text unchanged when color is disabled", () => {
+    expect(hyperlink("docs/auth.md", "file:///abs/auth.md", false)).toBe("docs/auth.md");
+  });
+
+  it("returns text unchanged when url is empty (even with color)", () => {
+    expect(hyperlink("docs/auth.md", "", true)).toBe("docs/auth.md");
+  });
+
+  it("strips control chars from the URL to prevent escape injection", () => {
+    const out = hyperlink("x", "file:///a\x1b[31mb", true);
+    // ESC byte removed so the terminal can't re-interpret the URL as an escape.
+    expect(out).not.toContain("\x1b[31m");
+    // Remaining printable bytes are left in place (harmless to terminals).
+    expect(out).toContain("file:///a[31mb");
+  });
+
+  it("survives stripAnsi (round-trips back to bare text)", () => {
+    const out = hyperlink("docs/auth.md", "file:///abs/auth.md", true);
+    expect(stripAnsi(out)).toBe("docs/auth.md");
+  });
+});
+
+describe("fileUrl", () => {
+  it("builds file:// URL from an absolute path", () => {
+    expect(fileUrl("/Users/x/docs/auth.md")).toBe("file:///Users/x/docs/auth.md");
+  });
+
+  it("appends #L<line> anchor when line is provided", () => {
+    expect(fileUrl("/Users/x/docs/auth.md", { line: 12 })).toBe("file:///Users/x/docs/auth.md#L12");
+  });
+
+  it("percent-encodes spaces and unicode in paths", () => {
+    expect(fileUrl("/Users/x/My Docs/café.md", { line: 1 }))
+      .toBe("file:///Users/x/My%20Docs/caf%C3%A9.md#L1");
+  });
+
+  it("preserves path separators", () => {
+    expect(fileUrl("/a/b/c.md").startsWith("file:///a/b/")).toBe(true);
   });
 });
 

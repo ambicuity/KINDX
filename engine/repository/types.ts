@@ -171,9 +171,12 @@ export type IndexHealthInfo = {
 };
 
 export type SnippetResult = {
-  line: number;           // 1-indexed line number of best match
-  snippet: string;        // The snippet text with diff-style header
-  linesBefore: number;    // Lines in document before snippet
-  linesAfter: number;     // Lines in document after snippet
-  snippetLines: number;   // Number of lines in snippet
+  line: number;            // 1-indexed line number of best match
+  snippet: string;         // Snippet text WITH legacy `@@ -X,Y @@` diff-style header
+                           // (kept for JSON/CSV/MD/XML output backward compat)
+  body: string;            // Snippet text WITHOUT the diff header (for new CLI renderer)
+  bodyStartLine: number;   // 1-indexed line number of the FIRST line of `body`
+  linesBefore: number;     // Lines in document before snippet
+  linesAfter: number;      // Lines in document after snippet
+  snippetLines: number;    // Number of lines in snippet
 };
