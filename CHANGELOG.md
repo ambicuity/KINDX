@@ -7,8 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP auto-invocation contract**: every MCP-aware agent now receives a "WHEN TO CALL KINDX" prescription at the top of `initialize.instructions`, with a 6-row decision table that tells the agent to call `query` automatically before answering any user turn that could be informed by their local notes. Default on; set `KINDX_AUTO_INVOKE=off` in the server's environment to disable.
+- New `kindx mcp --health-check` flag that exits `0` with a `{ok, totalDocuments, collections}` JSON line when the store opens cleanly, `1` with an error payload otherwise. Useful for installer probes and CI.
+- New `kindx status --auto-invoke-rate` flag that summarises the local `mcp_query_log` table. Reports `agent-auto` / `user-explicit` / `unknown` trigger counts (clients pass attribution via `_meta.kindx.trigger`).
+- `kindx://capabilities` resource gains an `autoInvocation: { contractEmitted, lastTurnTrigger? }` block so MCP clients can observe whether the contract is currently active.
+
 ### Changed
 
+- **Default `query.limit` is now `3` (was `10`).** Tight triage by default: agents read top-3 snippets and use `get` to expand any that look promising, rather than pulling full bodies up front. Applies to both the MCP `query` tool and the HTTP `/query` and `/query/stream` endpoints. Set `limit` explicitly to opt back into wider result sets.
+- `query.maxSnippetLines` now defaults to `4`; previously it had no default.
+- MCP tool descriptions (`query`, `get`, `multi_get`, `status`, `memory_search`, `memory_put`) now lead with a WHEN-TO-USE sentence; the diagnostic memory tools (`memory_history`, `memory_stats`, `memory_mark_accessed`, `memory_delete`, `memory_bulk`, `memory_feedback`) are explicitly marked `Diagnostic — only call when the user asks about memory itself`.
+- `initialize.instructions` content has been reshaped: the auto-invocation contract leads, then layered AGENTS.md, then the collections list, then condensed search/retrieval reference. Output is hard-capped at 8 KB with a `[instructions truncated — see kindx://capabilities]` marker.
 - Relocated Arch sidecar integration from `engine/integrations/arch/` to `experiments/arch/`. Removed `KINDX_ARCH_*` environment variables, the `arch` CLI subcommand, the `arch_query` and `arch_status` MCP tools, and the `arch:status` / `arch:refresh` npm scripts. The code remains in the tree under `experiments/` and may be revived if adoption data appears.
 
 ## [1.3.5] - 2026-05-09

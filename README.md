@@ -417,6 +417,7 @@ Index data is stored in SQLite. By default, the database path is under `~/.cache
 | `KINDX_MAX_CONCURRENCY_PER_TENANT` | No | Maximum concurrent HTTP requests per tenant. Default: `10`. |
 | `KINDX_RATE_LIMIT_BURST` | No | Per-tenant rate-limit burst size. Default: `100`. |
 | `KINDX_RATE_LIMIT_MS` | No | Rate-limit window in milliseconds. Default: `1000`. |
+| `KINDX_AUTO_INVOKE` | No | Auto-invocation contract delivered in MCP `initialize.instructions`. Default: on. Set to `off` (or `0` / `false`) to suppress the contract block. |
 | `KINDX_SQLITE_DRIVER` | No | Forces a SQLite driver module. By default KINDX tries `better-sqlite3-multiple-ciphers`, then `better-sqlite3`. |
 | `KINDX_ENCRYPTION_KEY` | No | Enables keyed SQLCipher runtime support when using a compatible SQLite driver. |
 | `KINDX_LLM_BACKEND` | No | Set to `remote` to use the OpenAI-compatible backend; otherwise local `node-llama-cpp` is used. |
