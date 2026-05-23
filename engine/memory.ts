@@ -133,8 +133,7 @@ function withTransaction<T>(db: Database, fn: () => T): T {
   // deleteMemory from within an upsert), opening another BEGIN fails with
   // "cannot start a transaction within a transaction". Detect the case and
   // run the callback inline — the outer commit/rollback will cover us.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  if ((db as any).inTransaction === true) {
+  if (db.inTransaction === true) {
     return fn();
   }
   db.exec("BEGIN IMMEDIATE");

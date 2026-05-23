@@ -200,8 +200,16 @@ export function initializeCoreSchema(db: Database): void {
     END
   `);
 
+  // Drop the previous unconditional trigger if it exists so DBs created
+  // before the WHEN gate pick up the gated version on next startup.
+  db.exec(`DROP TRIGGER IF EXISTS documents_au`);
   db.exec(`
-    CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents
+    CREATE TRIGGER documents_au AFTER UPDATE ON documents
+    WHEN new.hash IS NOT old.hash
+      OR new.title IS NOT old.title
+      OR new.active IS NOT old.active
+      OR new.collection IS NOT old.collection
+      OR new.path IS NOT old.path
     BEGIN
       -- Always delete old FTS entry first (FTS5 does not cleanly support INSERT OR REPLACE)
       DELETE FROM documents_fts WHERE rowid = old.id;

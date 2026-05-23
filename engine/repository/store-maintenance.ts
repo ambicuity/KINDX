@@ -64,7 +64,7 @@ export function walCheckpointTruncate(db: Database): boolean {
  */
 export function cleanupSqliteSidecars(
   dbPath: string,
-  opts?: { openDb?: { open?: boolean; inTransaction?: boolean } },
+  opts?: { openDb?: { readonly open?: boolean; readonly inTransaction?: boolean } },
 ): {
   walRemoved: boolean;
   shmRemoved: boolean;

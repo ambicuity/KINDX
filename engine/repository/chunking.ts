@@ -70,6 +70,23 @@ export function chunkDocument(
   return chunks;
 }
 
+// Empirical avg chars/token for the models we ship. Used in two places:
+//  (1) initial char-budget when planning chunks
+//  (2) token-count fallback when llm.tokenize is unavailable
+// Using the same constant in both places avoids the silent drift where the
+// planner used 3.0 and the fallback used 3.5 — meaning a chunk that planned
+// to fit X tokens could be reported as overflow by the validator and
+// recursively re-chunked for no real reason.
+const AVG_CHARS_PER_TOKEN = 3.5;
+// Pessimistic ratio used only when tokenize() throws. Treats every two
+// characters as a token so we err on the side of over-chunking instead of
+// silently feeding the model an oversize batch.
+const TOKEN_FALLBACK_ON_ERROR = 2;
+
+function estimateTokensFromChars(chars: number, errored: boolean): number {
+  return Math.ceil(chars / (errored ? TOKEN_FALLBACK_ON_ERROR : AVG_CHARS_PER_TOKEN));
+}
+
 /**
  * Chunk a document by actual token count using the LLM tokenizer.
  */
@@ -81,10 +98,9 @@ export async function chunkDocumentByTokens(
 ): Promise<{ text: string; pos: number; tokens: number }[]> {
   const llm = getDefaultLLM();
 
-  const avgCharsPerToken = 3;
-  const maxChars = maxTokens * avgCharsPerToken;
-  const overlapChars = overlapTokens * avgCharsPerToken;
-  const windowChars = windowTokens * avgCharsPerToken;
+  const maxChars = Math.floor(maxTokens * AVG_CHARS_PER_TOKEN);
+  const overlapChars = Math.floor(overlapTokens * AVG_CHARS_PER_TOKEN);
+  const windowChars = Math.floor(windowTokens * AVG_CHARS_PER_TOKEN);
 
   let charChunks = chunkDocument(content, maxChars, overlapChars, windowChars);
 
@@ -96,13 +112,13 @@ export async function chunkDocumentByTokens(
       if (llm.tokenize) {
         tokensLength = (await llm.tokenize(chunk.text)).length;
       } else {
-        tokensLength = Math.ceil(chunk.text.length / 3.5);
+        tokensLength = estimateTokensFromChars(chunk.text.length, false);
       }
     } catch (tokenizeErr) {
       process.stderr.write(
         `KINDX Warning: tokenize() failed for chunk at pos=${chunk.pos} (len=${chunk.text.length}), skipping. ${tokenizeErr}\n`
       );
-      tokensLength = Math.ceil(chunk.text.length / 2);
+      tokensLength = estimateTokensFromChars(chunk.text.length, true);
     }
 
     if (tokensLength <= maxTokens) {
@@ -124,10 +140,10 @@ export async function chunkDocumentByTokens(
           if (llm.tokenize) {
             subTokensLength = (await llm.tokenize(subChunk.text)).length;
           } else {
-            subTokensLength = Math.ceil(subChunk.text.length / 3.5);
+            subTokensLength = estimateTokensFromChars(subChunk.text.length, false);
           }
         } catch {
-          subTokensLength = Math.ceil(subChunk.text.length / 2);
+          subTokensLength = estimateTokensFromChars(subChunk.text.length, true);
         }
 
         if (subTokensLength <= maxTokens) {
