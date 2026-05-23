@@ -597,7 +597,7 @@ const MEMORY_PREFETCH_TOTAL_MAX_CHARS = 360;
 // Snapshot-tested in specs/protocol-instructions.test.ts; update snapshots
 // deliberately, with a one-line rationale in the commit message.
 // =============================================================================
-const AUTO_INVOCATION_CONTRACT = [
+export const AUTO_INVOCATION_CONTRACT = [
   "## When to call KINDX (auto-invocation contract)",
   "",
   "Before answering any user turn that is not a greeting, a pure code-generation request",
