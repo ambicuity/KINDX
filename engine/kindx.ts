@@ -3011,6 +3011,10 @@ function parseCLI() {
       description: { type: "string" },
       // Telemetry — surfaces auto-invocation contract trigger counts.
       "auto-invoke-rate": { type: "boolean" },
+      // init (MCP client wiring) options
+      "client": { type: "string", multiple: true }, // --client claude-code --client cursor
+      "project": { type: "string" },                // --project <path>
+      "global": { type: "boolean" },                // --global (skip project file)
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -4545,6 +4549,30 @@ if (isMain) {
     }
 
     case "init": {
+      // If --client (or --global/--project without positional args) is present,
+      // route to the MCP client-wiring init flow (Phase B).
+      if (cli.values.client !== undefined || cli.values.global === true) {
+        const { runInit } = await import("./init/index.js");
+        const clients = (cli.values.client as string[] | undefined) ?? ["auto"];
+        const result = runInit({
+          clients,
+          projectPath: (cli.values.project as string | undefined) ?? process.cwd(),
+          globalOnly: Boolean(cli.values.global),
+          dryRun: Boolean(cli.values["dry-run"]),
+          force: Boolean(cli.values.force),
+        });
+        console.log("KINDX init summary");
+        console.log("──────────────────────────────────────────────────");
+        for (const r of result.clientResults) {
+          const tag = r.outcome === "skipped" ? "skip" : r.outcome;
+          console.log(`  [${tag.padEnd(7)}] ${r.label.padEnd(18)}  ${r.configPath}${r.reason ? "  — " + r.reason : ""}`);
+        }
+        if (result.projectFile) {
+          console.log(`  [${result.projectFile.outcome.padEnd(7)}] Project AGENTS.md   ${result.projectFile.path}`);
+        }
+        process.exit(0);
+      }
+      // Default: existing DB/collection setup flow.
       await runInitCommand(cli.args, cli.values as Record<string, unknown>, {
         updateCollections,
         vectorIndex,
