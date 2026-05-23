@@ -4884,7 +4884,20 @@ if (isMain) {
           throw e;
         }
       } else {
-        // Default: stdio transport
+        // Default: stdio transport.
+        // If a real user ran `kindx mcp` from a terminal (stdin is a TTY rather
+        // than a pipe from an MCP client), print a one-line hint to stderr so
+        // they don't think the silent process is broken. Goes to stderr so it
+        // never pollutes the JSON-RPC stdout protocol that real MCP clients
+        // read from this process.
+        if (process.stdin.isTTY) {
+          process.stderr.write(
+            "kindx mcp is running in stdio mode and waiting for an MCP client on stdin/stdout.\n" +
+            "To auto-wire it into your local agents (Claude Code, Cursor, Codex, etc.), press Ctrl+C and run:\n" +
+            "    kindx init --client auto\n" +
+            "Or run `kindx mcp --http` to talk to it over HTTP, or `kindx mcp --health-check` to verify it works.\n\n"
+          );
+        }
         const { startMcpServer } = await import("./protocol.js");
         await startMcpServer(storeDbPathOverride);
       }
