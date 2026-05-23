@@ -5,13 +5,15 @@ license: MIT
 compatibility: Requires kindx CLI or MCP server. Install via `npm install -g @ambicuity/kindx`.
 metadata:
   author: riteshrana
-  version: "2.0.0"
+  version: "2.1.0"
 allowed-tools: Bash(kindx:*), mcp__kindx__*
 ---
 
 # KINDX - Knowledge INDexer
 
 Local search engine for markdown content.
+
+> **Auto-invocation:** As of v2.1.0 kindx tells every MCP-aware agent to call `query` automatically before answering questions that could be informed by your notes. Set `KINDX_AUTO_INVOKE=off` in the server's environment to disable.
 
 ## Status
 

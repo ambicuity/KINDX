@@ -8,6 +8,12 @@ kindx collection add ~/path/to/markdown --name myknowledge
 kindx embed
 ```
 
+## How auto-invocation works
+
+Once kindx is configured in your MCP client and you've added at least one collection, agents will automatically call `query` before answering questions that might be informed by your local notes — no need to say "search my notes". The contract is delivered via MCP `initialize.instructions`.
+
+To disable: run kindx with `KINDX_AUTO_INVOKE=off` in its environment.
+
 ## Configure MCP Client
 
 **Claude Code** (`~/.claude/settings.json`):
