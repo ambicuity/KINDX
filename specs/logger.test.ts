@@ -25,24 +25,29 @@ describe("logger", () => {
 
   describe("configureLogger", () => {
     test("sets log level", async () => {
-      const { configureLogger } = await import("../engine/utils/logger.js");
+      const { configureLogger, logger } = await import("../engine/utils/logger.js");
       
       configureLogger({ level: "DEBUG" });
-      expect(true).toBe(true);
+      logger.debug("debug message");
+      expect(writtenData.length).toBeGreaterThan(0);
+      expect(writtenData[0]).toContain("DEBUG");
     });
 
     test("sets log format", async () => {
-      const { configureLogger } = await import("../engine/utils/logger.js");
+      const { configureLogger, logger } = await import("../engine/utils/logger.js");
       
       configureLogger({ format: "json" });
-      expect(true).toBe(true);
+      logger.info("json message");
+      expect(writtenData.length).toBeGreaterThan(0);
+      expect(writtenData[0]).toContain("{");
     });
 
     test("ignores invalid level", async () => {
-      const { configureLogger } = await import("../engine/utils/logger.js");
+      const { configureLogger, logger } = await import("../engine/utils/logger.js");
       
       configureLogger({ level: "INVALID" });
-      expect(true).toBe(true);
+      logger.info("test message");
+      expect(writtenData.length).toBeGreaterThan(0);
     });
   });
 
