@@ -5,9 +5,14 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import YAML from "yaml";
 import { openDatabase } from "../engine/runtime.js";
 import { createStore } from "../engine/repository.js";
 import type { Store } from "../engine/repository.js";
+import type { CollectionConfig } from "../engine/catalogs.js";
 import {
   detectContentType,
   extractSchemaFromBody,
@@ -15,13 +20,27 @@ import {
 
 describe("hybrid", () => {
   let store: Store;
+  let testDir: string;
+  let testConfigDir: string;
 
-  beforeEach(() => {
-    store = createStore(":memory:");
+  beforeEach(async () => {
+    testDir = await mkdtemp(join(tmpdir(), "kindx-hybrid-test-"));
+    const dbPath = join(testDir, "test.sqlite");
+    testConfigDir = join(testDir, "config");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(testConfigDir, { recursive: true });
+    
+    process.env.KINDX_CONFIG_DIR = testConfigDir;
+    const emptyConfig: CollectionConfig = { collections: {} };
+    await writeFile(join(testConfigDir, "index.yml"), YAML.stringify(emptyConfig));
+    
+    store = createStore(dbPath);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     store.close();
+    delete process.env.KINDX_CONFIG_DIR;
+    await rm(testDir, { recursive: true, force: true });
   });
 
   describe("detectContentType", () => {
@@ -126,6 +145,38 @@ describe("hybrid", () => {
         explain: true,
       });
       expect(results).toEqual([]);
+    });
+
+    test("returns results when documents are indexed", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      const now = new Date().toISOString();
+      const hash = "test-hash-1";
+      store.db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`).run(hash, "# Test Document\n\nThis is a test document about authentication.", now);
+      store.db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)`).run("test", "test/doc.md", "Test Document", hash, now, now);
+
+      const results = await hybridQuery(store, "authentication", {
+        limit: 5,
+        minScore: 0,
+      });
+      expect(results.length).toBeGreaterThan(0);
+    });
+
+    test("respects limit parameter", async () => {
+      const { hybridQuery } = await import("../engine/repository/retrieval/hybrid.js");
+      
+      const now = new Date().toISOString();
+      for (let i = 0; i < 5; i++) {
+        const hash = `test-hash-${i}`;
+        store.db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`).run(hash, `# Document ${i}\n\nContent about topic ${i}.`, now);
+        store.db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)`).run("test", `test/doc${i}.md`, `Document ${i}`, hash, now, now);
+      }
+
+      const results = await hybridQuery(store, "topic", {
+        limit: 2,
+        minScore: 0,
+      });
+      expect(results.length).toBeLessThanOrEqual(2);
     });
   });
 });
