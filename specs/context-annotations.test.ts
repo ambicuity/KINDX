@@ -79,4 +79,12 @@ describe("context-annotations", () => {
       expect(typeof result).toBe("number");
     });
   });
+
+  describe("insertContext", () => {
+    test("throws for non-existent collection", async () => {
+      const { insertContext } = await import("../engine/repository/context-annotations.js");
+      
+      expect(() => insertContext(store.db, 999, "/path", "context")).toThrow();
+    });
+  });
 });
