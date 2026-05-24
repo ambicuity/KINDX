@@ -14,7 +14,6 @@ export default defineConfig({
             include: ["engine/**/*.ts"],
             exclude: [
                 "engine/**/*.d.ts",
-                "engine/kindx.ts",
                 "engine/benchmarks.ts",
             ],
             thresholds: {
