@@ -66,5 +66,19 @@ describe("tenant-command", () => {
       const result = runTenantCommand(["add", "test-id"], { role: "invalid" }, "text");
       expect(result).toBe(1);
     });
+
+    test("returns 0 for add with valid role", async () => {
+      const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
+      
+      const result = runTenantCommand(["add", "test-tenant"], { role: "viewer" }, "text");
+      expect(result).toBe(0);
+    });
+
+    test("returns 0 for add with admin role", async () => {
+      const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
+      
+      const result = runTenantCommand(["add", "admin-tenant"], { role: "admin" }, "text");
+      expect(result).toBe(0);
+    });
   });
 });
