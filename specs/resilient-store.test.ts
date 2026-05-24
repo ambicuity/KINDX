@@ -71,10 +71,45 @@ describe("resilient-store", () => {
       expect(rows).toHaveLength(3);
     });
 
-    test("recycles connection on corrupt error", () => {
+    test("throws error for nonexistent table", () => {
       expect(() => {
         store.db.prepare("SELECT * FROM nonexistent_table").get();
       }).toThrow();
+    });
+
+    test("handles multiple operations", () => {
+      store.db.exec(`
+        CREATE TABLE IF NOT EXISTS test_table (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL
+        )
+      `);
+
+      const insert = store.db.prepare("INSERT INTO test_table (name) VALUES (?)");
+      insert.run("test1");
+      insert.run("test2");
+      insert.run("test3");
+
+      const rows = store.db.prepare("SELECT name FROM test_table").all();
+      expect(rows).toHaveLength(3);
+    });
+
+    test("handles complex queries", () => {
+      store.db.exec(`
+        CREATE TABLE IF NOT EXISTS test_table (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          value INTEGER
+        )
+      `);
+
+      const insert = store.db.prepare("INSERT INTO test_table (name, value) VALUES (?, ?)");
+      insert.run("a", 1);
+      insert.run("b", 2);
+      insert.run("c", 3);
+
+      const result = store.db.prepare("SELECT SUM(value) as total FROM test_table").get();
+      expect(result).toEqual({ total: 6 });
     });
   });
 });
