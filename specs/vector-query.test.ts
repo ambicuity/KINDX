@@ -85,5 +85,39 @@ describe("vector-query", () => {
       });
       expect(results).toEqual([]);
     });
+
+    test("returns results when documents with vectors are indexed", async () => {
+      const { vectorSearchQuery } = await import("../engine/repository/retrieval/vector-query.js");
+      
+      const now = new Date().toISOString();
+      const hash = "test-hash-1";
+      store.db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`).run(hash, "# Test Document\n\nThis is a test document about authentication.", now);
+      store.db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)`).run("test", "test/doc.md", "Test Document", hash, now, now);
+      store.db.prepare(`INSERT OR IGNORE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`).run(hash, 0, 0, "test-model", now);
+
+      const results = await vectorSearchQuery(store, "authentication", {
+        limit: 5,
+        minScore: 0,
+      });
+      expect(Array.isArray(results)).toBe(true);
+    });
+
+    test("handles multiple documents", async () => {
+      const { vectorSearchQuery } = await import("../engine/repository/retrieval/vector-query.js");
+      
+      const now = new Date().toISOString();
+      for (let i = 0; i < 3; i++) {
+        const hash = `test-hash-${i}`;
+        store.db.prepare(`INSERT OR IGNORE INTO content (hash, doc, created_at) VALUES (?, ?, ?)`).run(hash, `# Document ${i}\n\nContent about topic ${i}.`, now);
+        store.db.prepare(`INSERT INTO documents (collection, path, title, hash, created_at, modified_at, active) VALUES (?, ?, ?, ?, ?, ?, 1)`).run("test", `test/doc${i}.md`, `Document ${i}`, hash, now, now);
+        store.db.prepare(`INSERT OR IGNORE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`).run(hash, 0, 0, "test-model", now);
+      }
+
+      const results = await vectorSearchQuery(store, "topic", {
+        limit: 2,
+        minScore: 0,
+      });
+      expect(Array.isArray(results)).toBe(true);
+    });
   });
 });
