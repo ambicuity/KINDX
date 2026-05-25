@@ -35,49 +35,49 @@ describe("tenant-command", () => {
     test("returns 1 for add subcommand without id", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["add"], {}, "text");
+      const result = runTenantCommand(["add"], {}, "cli");
       expect(result).toBe(1);
     });
 
     test("returns 1 for remove subcommand without id", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["remove"], {}, "text");
+      const result = runTenantCommand(["remove"], {}, "cli");
       expect(result).toBe(1);
     });
 
     test("returns 0 for list subcommand", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["list"], {}, "text");
+      const result = runTenantCommand(["list"], {}, "cli");
       expect(result).toBe(0);
     });
 
     test("returns 1 for unknown subcommand", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["unknown"], {}, "text");
+      const result = runTenantCommand(["unknown"], {}, "cli");
       expect(result).toBe(1);
     });
 
     test("returns 1 for add with invalid role", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["add", "test-id"], { role: "invalid" }, "text");
+      const result = runTenantCommand(["add", "test-id"], { role: "invalid" }, "cli");
       expect(result).toBe(1);
     });
 
     test("returns 0 for add with valid role", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["add", "test-tenant"], { role: "viewer" }, "text");
+      const result = runTenantCommand(["add", "test-tenant"], { role: "viewer" }, "cli");
       expect(result).toBe(0);
     });
 
     test("returns 0 for add with admin role", async () => {
       const { runTenantCommand } = await import("../engine/commands/tenant-command.js");
       
-      const result = runTenantCommand(["add", "admin-tenant"], { role: "admin" }, "text");
+      const result = runTenantCommand(["add", "admin-tenant"], { role: "admin" }, "cli");
       expect(result).toBe(0);
     });
   });

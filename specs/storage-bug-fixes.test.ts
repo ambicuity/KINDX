@@ -5,7 +5,7 @@
  * bug it covers (see docs / commit history for the full punch list).
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
@@ -73,7 +73,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  try { await rmdir(testDir, { recursive: true } as { recursive: boolean }); } catch { /* */ }
+  try { await rm(testDir, { recursive: true, force: true }); } catch { /* */ }
 });
 
 describe("storage bug fixes", () => {

@@ -44,21 +44,21 @@ describe("backup-command", () => {
     test("returns 1 for verify without path", async () => {
       const { runBackupCommand } = await import("../engine/commands/backup-command.js");
       
-      const result = runBackupCommand(["verify"], {}, "text", dbPath);
+      const result = runBackupCommand(["verify"], {}, "cli", dbPath);
       expect(result).toBe(1);
     });
 
     test("returns 1 for restore without path", async () => {
       const { runBackupCommand } = await import("../engine/commands/backup-command.js");
       
-      const result = runBackupCommand(["restore"], {}, "text", dbPath);
+      const result = runBackupCommand(["restore"], {}, "cli", dbPath);
       expect(result).toBe(1);
     });
 
     test("returns 0 for help subcommand", async () => {
       const { runBackupCommand } = await import("../engine/commands/backup-command.js");
       
-      const result = runBackupCommand(["help"], {}, "text", dbPath);
+      const result = runBackupCommand(["help"], {}, "cli", dbPath);
       expect(result).toBe(0);
     });
 
@@ -66,14 +66,14 @@ describe("backup-command", () => {
       const { runBackupCommand } = await import("../engine/commands/backup-command.js");
       
       const backupPath = join(testDir, "backup.sqlite");
-      const result = runBackupCommand(["create"], { path: backupPath }, "text", dbPath);
+      const result = runBackupCommand(["create"], { path: backupPath }, "cli", dbPath);
       expect(result).toBe(0);
     });
 
     test("returns 1 for unknown subcommand", async () => {
       const { runBackupCommand } = await import("../engine/commands/backup-command.js");
       
-      const result = runBackupCommand(["unknown"], {}, "text", dbPath);
+      const result = runBackupCommand(["unknown"], {}, "cli", dbPath);
       expect(result).toBe(1);
     });
   });

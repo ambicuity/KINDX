@@ -50,7 +50,7 @@ describe("doctor-command", () => {
         closeDb: () => {},
       };
 
-      const result = runDoctorCommand(deps, "text");
+      const result = runDoctorCommand(deps, "cli");
       expect(typeof result).toBe("number");
     });
 
@@ -63,7 +63,7 @@ describe("doctor-command", () => {
         closeDb: () => {},
       };
 
-      const result = runDoctorCommand(deps, "text");
+      const result = runDoctorCommand(deps, "cli");
       expect(typeof result).toBe("number");
     });
 
@@ -89,7 +89,7 @@ describe("doctor-command", () => {
         closeDb: () => {},
       };
 
-      const result = runDoctorCommand(deps, "text", 32);
+      const result = runDoctorCommand(deps, "cli", 32);
       expect(typeof result).toBe("number");
     });
   });

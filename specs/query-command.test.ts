@@ -65,7 +65,7 @@ describe("query-command", () => {
 
       const mockStderr = {
         write: () => {},
-      };
+      } as unknown as NodeJS.WritableStream;
 
       const result = await executeQueryCommand({
         query: "test query",
@@ -84,7 +84,7 @@ describe("query-command", () => {
 
       const mockStderr = {
         write: () => {},
-      };
+      } as unknown as NodeJS.WritableStream;
 
       const result = await executeQueryCommand({
         query: "",
@@ -106,7 +106,7 @@ describe("query-command", () => {
       let writtenData = "";
       const mockStderr = {
         write: (data: string) => { writtenData += data; },
-      };
+      } as unknown as NodeJS.WritableStream;
 
       await executeQueryCommand({
         query: "test query",

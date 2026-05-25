@@ -161,7 +161,7 @@ describe("ir-metrics", () => {
 
   describe("computeEvaluationReport", () => {
     test("computes aggregate metrics", () => {
-      const queryResults = [
+      const queryResults: Array<{ results: string[]; relevance: Record<string, number> }> = [
         { results: ["doc-a.md", "other.md"], relevance: { "doc-a.md": 3 } },
         { results: ["other.md", "doc-b.md"], relevance: { "doc-b.md": 2 } },
       ];

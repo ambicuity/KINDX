@@ -79,7 +79,7 @@ describe("ai-usage", () => {
     test("applies cache discount", () => {
       const costNoCache = calculateCostUsd("gpt-4o", 1000000, 1000000, 0);
       const costWithCache = calculateCostUsd("gpt-4o", 1000000, 1000000, 500000);
-      expect(costWithCache).toBeLessThan(costNoCache);
+      expect(costWithCache!).toBeLessThan(costNoCache!);
     });
   });
 
