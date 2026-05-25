@@ -85,6 +85,8 @@ import type {
   ResolvedMcpServerControl,
   ToolQuotaConfig,
 } from "./mcp-control-plane.js";
+import { getArchConfig, getArchStatus, buildAndDistillArch } from "./integrations/arch/adapter.js";
+import { selectArchHints } from "./integrations/arch/augment.js";
 
 // =============================================================================
 // Types for structured content
@@ -2428,6 +2430,71 @@ Use paths or docids (#abc123) from search results. Supports line offset via "fil
       }
     }
   );
+
+  // ---------------------------------------------------------------------------
+  // Tools: arch_* (Architecture integration)
+  // ---------------------------------------------------------------------------
+
+  const archConfig = getArchConfig();
+  if (archConfig.enabled) {
+    maybeRegisterTool(
+      "arch_status",
+      {
+        title: "Arch Status",
+        description: "Show Arch integration status and metadata. Returns configuration, repository check, and last build manifest.",
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        inputSchema: {
+          path: z.string().optional().describe("Source root path (defaults to current directory)"),
+        },
+      },
+      async ({ path }: any) => {
+        try {
+          const sourceRoot = path || process.cwd();
+          const status = getArchStatus(archConfig, sourceRoot);
+          return {
+            content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+            structuredContent: status,
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `arch_status_failed: ${error instanceof Error ? error.message : error}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    maybeRegisterTool(
+      "arch_query",
+      {
+        title: "Arch Query",
+        description: "Query architecture hints for a given search. Runs the Arch pipeline if needed and returns relevant architectural insights.",
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        inputSchema: {
+          query: z.string().describe("Search query to find relevant architecture hints"),
+          path: z.string().optional().describe("Source root path (defaults to current directory)"),
+          maxHints: z.number().optional().describe("Maximum number of hints to return (default: 3)"),
+        },
+      },
+      async ({ query, path, maxHints }: any) => {
+        try {
+          const sourceRoot = path || process.cwd();
+          const effectiveMaxHints = maxHints || archConfig.maxHints;
+          const result = await buildAndDistillArch(sourceRoot, archConfig);
+          const hints = selectArchHints(query, result.artifact.hintsPath, effectiveMaxHints);
+          return {
+            content: [{ type: "text", text: JSON.stringify({ query, hints, artifact: { nodeCount: result.artifact.nodeCount, edgeCount: result.artifact.edgeCount, communityCount: result.artifact.communityCount } }, null, 2) }],
+            structuredContent: { query, hints, artifact: { nodeCount: result.artifact.nodeCount, edgeCount: result.artifact.edgeCount, communityCount: result.artifact.communityCount } },
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `arch_query_failed: ${error instanceof Error ? error.message : error}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
 
   return server;
 }

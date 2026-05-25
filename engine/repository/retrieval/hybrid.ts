@@ -21,6 +21,7 @@ import {
   type RerankDropPolicy,
   getCollectionRerankSettings,
 } from "../rerank-queue.js";
+import type { SelectedArchHint } from "../../integrations/arch/augment.js";
 // Store type still lives in engine/repository.ts. Type-only import avoids any
 // runtime cycle. Constants (DEFAULT_EMBED_MODEL, RERANK_CANDIDATE_LIMIT,
 // STRONG_SIGNAL_*) are imported back lazily — Node ESM resolves them on first
@@ -122,6 +123,7 @@ export interface StructuredSearchDiagnostics {
     state: "ready" | "stale" | "missing" | "degraded" | "n/a";
   };
   staleFiles: string[];
+  archHints?: SelectedArchHint[];
   throughput: {
     queue: {
       depth: number;

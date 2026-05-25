@@ -19,6 +19,9 @@ import {
 import { chunkDocument } from "../chunking.js";
 import { withTimeout } from "./document-lookup.js";
 import { detectContentType, extractSchemaFromBody } from "./hybrid.js";
+import { selectArchHints, type SelectedArchHint } from "../../integrations/arch/augment.js";
+import { loadArchConfig } from "../../integrations/arch/config.js";
+import { resolveArchPaths } from "../../integrations/arch/importer.js";
 import { validateLexQuery, validateSemanticQuery } from "../fts.js";
 import { getMainDatabasePath } from "../vec.js";
 import {
@@ -171,6 +174,7 @@ export async function structuredSearchWithDiagnostics(
     fairness: initialQueueSnapshot.fairness,
   };
   const staleFiles: string[] = [];
+  let archHints: SelectedArchHint[] = [];
   const mapScaleWarningToFallbackReason = (warning: string): string | undefined => {
     if (warning.startsWith("ann_missing:")) {
       return "ann_missing";
@@ -256,6 +260,7 @@ export async function structuredSearchWithDiagnostics(
     throughput: {
       queue: queueState,
     },
+    archHints: archHints.length > 0 ? archHints : undefined,
   });
   if (maxRerankCandidates && requestedCandidateLimit > candidateLimit) {
     scaleWarnings.push(`candidate_limit_clamped:${requestedCandidateLimit}->${candidateLimit}`);
@@ -657,6 +662,17 @@ export async function structuredSearchWithDiagnostics(
     })
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+
+  // Step 7.5: Arch hint augmentation (optional)
+  try {
+    const archConfig = loadArchConfig();
+    if (archConfig.enabled && archConfig.augmentEnabled) {
+      const archPaths = resolveArchPaths(archConfig.artifactDir, process.cwd());
+      archHints = selectArchHints(primaryQuery, archPaths.hintsPath, archConfig.maxHints);
+    }
+  } catch {
+    // Arch augmentation is best-effort; never fail the search
+  }
 
   // Step 8: Detect stale files among the returned results
   for (const res of results) {

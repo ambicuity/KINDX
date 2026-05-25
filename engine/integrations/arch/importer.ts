@@ -9,6 +9,7 @@ export type ArchPaths = {
   distilledDir: string;
   docsDir: string;
   manifestPath: string;
+  hintsPath: string;
 };
 
 function shortHash(input: string): string {
@@ -17,12 +18,14 @@ function shortHash(input: string): string {
 
 export function resolveArchPaths(artifactRoot: string, sourceRoot: string): ArchPaths {
   const root = resolve(artifactRoot, shortHash(resolve(sourceRoot)));
+  const distilledDir = resolve(root, "distilled");
   return {
     workspaceRoot: root,
     sidecarOutputDir: resolve(root, "sidecar"),
-    distilledDir: resolve(root, "distilled"),
-    docsDir: resolve(root, "distilled", "docs"),
-    manifestPath: resolve(root, "distilled", "manifest.json"),
+    distilledDir,
+    docsDir: resolve(distilledDir, "docs"),
+    manifestPath: resolve(distilledDir, "manifest.json"),
+    hintsPath: resolve(distilledDir, "hints.json"),
   };
 }
 

@@ -360,6 +360,29 @@ export const COMMANDS: CommandSpec[] = [
     summary: "Scan for residual local index artifacts",
     usage: "kindx verify-wipe [--format json]",
   },
+  {
+    name: "arch",
+    domain: "diagnostics",
+    summary: "Architecture graph integration (status | build | refresh)",
+    usage: "kindx arch <status|build|refresh> [path]",
+    subcommands: [
+      {
+        name: "status",
+        summary: "Show arch integration status and manifest",
+        usage: "kindx arch status [path]",
+      },
+      {
+        name: "build",
+        summary: "Build arch graph artifacts from source",
+        usage: "kindx arch build [path]",
+      },
+      {
+        name: "refresh",
+        summary: "Refresh arch graph artifacts",
+        usage: "kindx arch refresh [path]",
+      },
+    ],
+  },
 
   // ── Backup / restore ───────────────────────────────────────────────────
   {

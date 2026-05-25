@@ -138,6 +138,7 @@ import {
   syncCollectionShardsFromMainDb,
 } from "./sharding.js";
 import { recordDirectUsage, flushAiUsageQueue } from "./ai-usage.js";
+import { getArchConfig, getArchStatus, buildAndDistillArch } from "./integrations/arch/adapter.js";
 import { KindxError, toKindxError, errorEnvelope } from "./cli/errors.js";
 import { jsonEnvelopeEnabled, resolveOutputMode, glyphsFor, paletteFor } from "./cli/output.js";
 import { renderSearchResults } from "./cli/renderers/search.js";
@@ -3397,6 +3398,45 @@ function installSkill(): void {
   console.log(`✓ KINDX skill successfully installed to ${destPath}`);
 }
 
+async function runArchCommand(subcommand: string, args: string[]): Promise<void> {
+  const config = getArchConfig();
+
+  if (!config.enabled) {
+    console.log("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
+    return;
+  }
+
+  const sourceRoot = args[0] || process.cwd();
+
+  switch (subcommand) {
+    case "status": {
+      const status = getArchStatus(config, sourceRoot);
+      console.log(JSON.stringify(status, null, 2));
+      break;
+    }
+    case "build": {
+      console.log(`Building arch artifacts for ${sourceRoot}...`);
+      const result = await buildAndDistillArch(sourceRoot, config);
+      console.log(`✓ Built arch artifacts:`);
+      console.log(`  Nodes: ${result.artifact.nodeCount}`);
+      console.log(`  Edges: ${result.artifact.edgeCount}`);
+      console.log(`  Communities: ${result.artifact.communityCount}`);
+      console.log(`  Hints: ${result.artifact.files.length} files generated`);
+      break;
+    }
+    case "refresh": {
+      console.log(`Refreshing arch artifacts for ${sourceRoot}...`);
+      await buildAndDistillArch(sourceRoot, config);
+      console.log(`✓ Refreshed arch artifacts`);
+      break;
+    }
+    default:
+      console.error(`Unknown arch subcommand: ${subcommand}`);
+      console.log("Usage: kindx arch <status|build|refresh> [path]");
+      process.exit(1);
+  }
+}
+
 function showHelp(): void {
   // New grouped help comes from the declarative registry. The reference
   // material that follows (query grammar, architecture diagram, storage
@@ -5002,16 +5042,11 @@ if (isMain) {
       break;
     }
 
-    case "arch":
-      // Migration message for the removed `kindx arch` command group.
-      // Exit code 2 (not 1) so scripts can distinguish "removed/migrated"
-      // from a generic "unknown command".
-      console.error("The 'kindx arch' command was removed in v1.3.");
-      console.error("  See: docs/troubleshooting.md#arch-removed");
-      console.error("  Migration: experiments/arch/ contains the relocated code.");
-      process.exit(2);
-      // fallthrough impossible (process.exit terminates) — fall through
-      // marker omitted intentionally.
+    case "arch": {
+      const subcommand = cli.args[0] || "status";
+      await runArchCommand(subcommand, cli.args.slice(1));
+      break;
+    }
 
     default: {
       const cmd = cli.command ?? "";
