@@ -84,8 +84,8 @@ export function ensureVectorIndexIntegrity(
   const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableCheck) return { mismatch: false, rebuilt: false, contentCount: 0, indexCount: 0 };
 
-  const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as any).c;
-  const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as any).c;
+  const contentCount = (db.prepare(`SELECT COUNT(*) as c FROM content_vectors`).get() as { c: number } | undefined)?.c ?? 0;
+  const indexCount = (db.prepare(`SELECT COUNT(*) as c FROM vectors_vec`).get() as { c: number } | undefined)?.c ?? 0;
 
   let mismatch = contentCount !== indexCount;
 

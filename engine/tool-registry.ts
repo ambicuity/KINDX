@@ -162,7 +162,13 @@ export function registerKindxTool<TInput, TOutput extends Record<string, unknown
   // Build the raw Zod shape from the ZodObject schema definition.
   // The MCP SDK's registerTool() expects a ZodRawShape (plain object of Zod types).
   // We extract it from the ZodObject, falling back to an empty schema.
-  const rawSchema = def.schema as any;
+  // Extract ZodRawShape from ZodObject for MCP SDK registration.
+  // ZodObject exposes _def.shape() or .shape depending on version.
+  // Cast through unknown to access Zod internals safely.
+  const rawSchema = def.schema as unknown as {
+    _def?: { shape?: () => Record<string, ZodType<unknown>> };
+    shape?: Record<string, ZodType<unknown>>;
+  };
   const inputSchema: Record<string, ZodType<unknown>> =
     typeof rawSchema._def?.shape === "function"
       ? rawSchema._def.shape()
@@ -186,8 +192,8 @@ export function registerKindxTool<TInput, TOutput extends Record<string, unknown
       // Log query if it looks like a search operation. Tier-2: cap the
       // logged query to 1024 chars so a 10 MiB user-supplied query string
       // doesn't sit in the in-memory session log forever.
-      if (ctx.session && typeof (input as any).query === "string") {
-        const raw = (input as any).query as string;
+      if (ctx.session && typeof (input as Record<string, unknown>).query === "string") {
+        const raw = (input as Record<string, unknown>).query as string;
         const capped = raw.length > 1024 ? raw.slice(0, 1024) + "…" : raw;
         ctx.session.logQuery(capped);
       }
@@ -195,7 +201,9 @@ export function registerKindxTool<TInput, TOutput extends Record<string, unknown
       try {
         return await def.execute(typedInput, ctx);
       } catch (err) {
-        return formatToolError(err, def.name) as any;
+        // formatToolError returns KindxToolResult<never> which is compatible
+        // with the expected return type via structural typing.
+        return formatToolError(err, def.name) as KindxToolResult<TOutput>;
       }
     }
   );
@@ -217,7 +225,9 @@ export function formatToolResult<TOut extends Record<string, unknown>>(
     content: [{ type: "text" as const, text }],
   };
   if (data !== undefined) {
-    (result as any).structuredContent = data;
+    // Assign structuredContent for MCP SDK consumption.
+    // The type system constrains TOut but the SDK expects Record<string, unknown>.
+    (result as KindxToolResult<Record<string, unknown>>).structuredContent = data;
   }
   return result;
 }

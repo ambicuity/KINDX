@@ -112,8 +112,8 @@ export class WatchDaemon {
 
       // Simple matcher for the collection pattern
       const picomatchModule = await import("picomatch");
-      const picomatch = picomatchModule.default || picomatchModule;
-      const isMatch = (picomatch as any)(coll.pattern);
+      const picomatchFn = picomatchModule.default || picomatchModule;
+      const isMatch = picomatchFn(coll.pattern);
 
       const processEvent = (type: WatchEvent["type"], absolutePath: string) => {
         let canonicalPath = absolutePath;
@@ -294,8 +294,13 @@ export class WatchDaemon {
     console.log(`\n[${now}] Processing ${batch.length} changed files...`);
 
     try {
-      // Need to cast store to any temporarily since the methods don't exist yet
-      const store = this.store as any;
+      // Store methods for incremental indexing (unlinkSingleFile, indexSingleFile)
+      // are defined on the Store interface but not in the type declaration used here.
+      // Access via dynamic property to avoid widening the Store type globally.
+      const store = this.store as Store & {
+        unlinkSingleFile: (collection: string, path: string) => Promise<boolean>;
+        indexSingleFile: (collection: string, relPath: string, absPath: string) => Promise<"embedded" | "unchanged" | "failed">;
+      };
 
       for (const event of batch) {
         try {

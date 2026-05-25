@@ -6,7 +6,9 @@
  * difference is the import path.
  */
 
-export const isBun = typeof (globalThis as any).Bun !== "undefined";
+// Detect Bun runtime without importing bun:sqlite at compile time.
+// globalThis.Bun is set by the Bun runtime; checking with typeof avoids ReferenceError on Node.
+export const isBun = typeof (globalThis as Record<string, unknown>).Bun !== "undefined";
 
 let _Database: any;
 let _sqliteVecLoad: (db: any) => void;

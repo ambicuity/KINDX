@@ -670,7 +670,12 @@ export function getGraphConnectedCandidates(db: Database, virtualPaths: string[]
           )
         )
       `);
-      const rows = stmt.all(collection, collection, ...chunk, collection, ...chunk) as any[];
+      const rows = stmt.all(collection, collection, ...chunk, collection, ...chunk) as Array<{
+        collection: string;
+        path: string;
+        title: string;
+        body: string;
+      }>;
       for (const r of rows) {
         const key = `${r.collection}/${r.path}`;
         if (seen.has(key)) continue;
