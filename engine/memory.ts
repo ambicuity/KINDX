@@ -380,7 +380,7 @@ function incrementCounters(db: Database, ids: number[]): void {
         last_accessed_at = ?,
         expires_at = CASE
           WHEN ttl_seconds IS NOT NULL
-          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ttl_seconds || ' seconds')
           ELSE expires_at
         END
     WHERE id IN (${placeholders})
@@ -832,7 +832,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
             appeared_count = ?,
             last_appeared_at = ?,
             search_text = ?,
-            expires_at = CASE WHEN ? IS NOT NULL THEN datetime('now', '+' || ? || ' seconds') ELSE expires_at END,
+            expires_at = CASE WHEN ? IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds') ELSE expires_at END,
             ttl_seconds = CASE WHEN ? IS NOT NULL THEN ? ELSE ttl_seconds END
         WHERE id = ?
       `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText,
@@ -1213,7 +1213,7 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
         last_accessed_at = ?,
         expires_at = CASE
           WHEN ttl_seconds IS NOT NULL
-          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ttl_seconds || ' seconds')
           ELSE expires_at
         END
     WHERE id = ? AND scope = ?
