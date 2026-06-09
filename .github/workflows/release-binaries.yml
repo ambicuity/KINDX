@@ -1,0 +1,60 @@
+name: Release Binaries From Tag
+
+# Fallback for attaching Linux binaries to an existing release when the
+# publish-binaries job in release-please.yml was skipped (e.g. a transient
+# failure in an earlier step marked the Create Release job as failed, and
+# release-please outputs release_created=false on re-runs because the
+# release already exists).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing git tag / release to build and upload binaries for (e.g., v1.3.6)'
+        required: true
+
+concurrency:
+  group: release-binaries-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish-binaries:
+    name: Publish Linux Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Prune dev dependencies
+        run: npm prune --omit=dev
+
+      - name: Package binary
+        run: tar -czvf kindx-linux-${{ matrix.arch }}.tar.gz package.json dist/ bin/ node_modules/
+
+      - name: Upload to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.event.inputs.tag }} kindx-linux-${{ matrix.arch }}.tar.gz --clobber
