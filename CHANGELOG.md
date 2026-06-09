@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.6](https://github.com/ambicuity/KINDX/compare/v1.3.5...v1.3.6) (2026-06-09)
+
+
+### Features
+
+* add capability manifest module with types and builder ([23e7a2e](https://github.com/ambicuity/KINDX/commit/23e7a2ea856723af3736d3ba6c6c989d71c4b5e8))
+* add document versioning, history/diff commands, and enhanced audit queries ([2730ad0](https://github.com/ambicuity/KINDX/commit/2730ad0ee6cf5e65be746d23a87c3398644c39f3))
+* **audit:** add structured audit logging for tool policy denials ([b176620](https://github.com/ambicuity/KINDX/commit/b1766206648e3f5820ad6dd9c485dda201ebb8fc))
+* **catalogs:** add getConfigForIndex and listCollectionsForIndex helpers ([b76b583](https://github.com/ambicuity/KINDX/commit/b76b583afd6dad849b9942b41ae8669490b6eb28))
+* **engine:** add /ready endpoint with health checks ([63b3745](https://github.com/ambicuity/KINDX/commit/63b37456d2b70f4139843af64a8000647ed2ad6d))
+* **engine:** add DaemonManager for long-running process ([fc32aff](https://github.com/ambicuity/KINDX/commit/fc32aff4882846b97490158e287ab7729953a588))
+* **engine:** add HealthChecker with liveness and readiness probes ([1de8298](https://github.com/ambicuity/KINDX/commit/1de8298cd443e99526033f73f0b5fe54e91633a9))
+* **engine:** add HNSW index building for large corpora ANN ([e8c8070](https://github.com/ambicuity/KINDX/commit/e8c80700107c3762bcec0931e29c811e43bf95e7))
+* **engine:** add model integrity verification with SHA-256 checksums ([dd4e0da](https://github.com/ambicuity/KINDX/commit/dd4e0da81da532e552a4b547ebc754a9637e76c3))
+* **engine:** add PriorityQueue with priority-based shedding ([789762e](https://github.com/ambicuity/KINDX/commit/789762e00de74717fbf53293b5c8859e77639abd))
+* **engine:** add RetryableLLM wrapper with exponential backoff ([91135ad](https://github.com/ambicuity/KINDX/commit/91135adb34db81324c1bf44031226e8cea381c9e))
+* **engine:** re-export RetryableLLM and fix singleton test for retry wrapper ([e84ff61](https://github.com/ambicuity/KINDX/commit/e84ff6105e3d470cf2ae09dc1de19d93229486e6))
+* **engine:** rewrite preloader as ModelPreloader class ([364fb99](https://github.com/ambicuity/KINDX/commit/364fb999298b2e013dc977c6266718b945f95622))
+* **index:** add CLI index lifecycle commands (create, delete, list, migrate) ([95cf55b](https://github.com/ambicuity/KINDX/commit/95cf55bb3153bdbaedf15f6144dbc1d4820ff138))
+* **index:** add createStoreForIndex and indexName to Store type ([1377e5a](https://github.com/ambicuity/KINDX/commit/1377e5aac9b333eda232b74932cf63cebf0a207d))
+* **index:** add cross-index query federation with indexes parameter ([ce19823](https://github.com/ambicuity/KINDX/commit/ce19823762b895fa4d5b2adadaf3b8b0960ee8bb))
+* **index:** add index-manager with registry CRUD and tests ([45b9f24](https://github.com/ambicuity/KINDX/commit/45b9f24e87cccce956803871a20fbd293c860e37))
+* **index:** add MCP index lifecycle tools (list, create, delete, migrate) ([74feb1a](https://github.com/ambicuity/KINDX/commit/74feb1a61ac52944f3105122de74d087b6bfa6bf))
+* **ingestion:** add CSV ingestion with schema-aware chunking ([e26ed6c](https://github.com/ambicuity/KINDX/commit/e26ed6ce814cb1ead37da6d1ca5715326f228a7d))
+* **ingestion:** add image ingestion with vision model ([07c1e01](https://github.com/ambicuity/KINDX/commit/07c1e017adb4a9555a3b095150eaee277187de35))
+* **ingestion:** add JSON ingestion with schema-aware chunking ([a11224d](https://github.com/ambicuity/KINDX/commit/a11224df81aca75734410ba262fa6258a298274a))
+* **logging:** log config tier resolution for MCP servers ([e1042fb](https://github.com/ambicuity/KINDX/commit/e1042fbd5c0da427a52793940f6283beadc37107))
+* **memory:** add cross-prefix semantic deduplication ([895ea8f](https://github.com/ambicuity/KINDX/commit/895ea8ff5e07b5dab79ffbf4770d270b0605bf7e))
+* **memory:** add event-driven background lifecycle jobs ([0fd542f](https://github.com/ambicuity/KINDX/commit/0fd542fd38a70a008a430b9afc116dde369e7876))
+* **memory:** add feedback schema, functions, and MCP tool ([bdaa6ee](https://github.com/ambicuity/KINDX/commit/bdaa6eea8f2d9aeea0bf8ff950a0a958b3c5b6d0))
+* **memory:** add per-scope memory limits with LRU eviction ([78a97cf](https://github.com/ambicuity/KINDX/commit/78a97cf62ec4cfd1065aa74d4fc595bc47db5746))
+* **memory:** integrate feedback-based ranking bias into search ([58736f3](https://github.com/ambicuity/KINDX/commit/58736f358832620848c4c2cffb03ecaa9460ced5))
+* **memory:** refresh TTL on access, add ttl_seconds column ([c8033c0](https://github.com/ambicuity/KINDX/commit/c8033c04730f88161fdb323edd68cab18984ba05))
+* **memory:** support multiple embedding models via KINDX_EMBED_MODEL env var ([99929b4](https://github.com/ambicuity/KINDX/commit/99929b4c613fd3092754874d2b02a60110f29cbe))
+* **rbac:** add index-level scoping with allowedIndexes ([fee94a2](https://github.com/ambicuity/KINDX/commit/fee94a287b65fe31da7d88704e525b25a56be210))
+* **retrieval:** add content type metadata to hybrid search results ([73ccf3b](https://github.com/ambicuity/KINDX/commit/73ccf3b1553c1080bb1bcc5de07f35cc7079b73d))
+* **schema:** add schema storage for structured data ([7d93829](https://github.com/ambicuity/KINDX/commit/7d938292cb9cadee3c57a24822d59b0dba3b72ca))
+* **security:** add circuit breaker to prevent cascade failures ([859585a](https://github.com/ambicuity/KINDX/commit/859585a8b907dfe2e0195ef77a60402631598f51))
+* **security:** add configurable per-tool request quotas ([c6e98a9](https://github.com/ambicuity/KINDX/commit/c6e98a9101ae8ae7a55851f311a26fb20aa58690))
+* **security:** add per-session rate limiter to control plane ([3f228d0](https://github.com/ambicuity/KINDX/commit/3f228d0291b88aaa00f9dcd9e43af728974f9037))
+* **security:** integrate rate limiting, quotas, and circuit breakers ([826fe60](https://github.com/ambicuity/KINDX/commit/826fe600257cd398bf5f3e2789c68ce566c113cf))
+* **session:** add idle reaper, max session limit, and LLM pool shutdown ([711d54d](https://github.com/ambicuity/KINDX/commit/711d54d08f78874625e6c871dd24d3d373360da0))
+* sync local development work and prepare v1.3.6 release ([#168](https://github.com/ambicuity/KINDX/issues/168)) ([a69393b](https://github.com/ambicuity/KINDX/commit/a69393b257974070aae43ef31417a7971f8ecb02)), closes [#167](https://github.com/ambicuity/KINDX/issues/167)
+* **vision:** add vision model integration for image understanding ([d8e98f8](https://github.com/ambicuity/KINDX/commit/d8e98f82de9a8f24f6d0b3923ac886db86a4f851))
+
+
+### Bug Fixes
+
+* add NaN validation for env var parseInt and expose control plane instances ([6fbcb40](https://github.com/ambicuity/KINDX/commit/6fbcb40bc098e94dc1c32a0f35db6eb9ba55fe5e))
+* address type issue in protocol.ts for initialize request body id access ([26e3d17](https://github.com/ambicuity/KINDX/commit/26e3d179f9a434cd7dcb5b93ec48f1e1ec521b3d))
+* deduplicate SERVER_VERSION constant between capability-manifest and protocol ([0969bd5](https://github.com/ambicuity/KINDX/commit/0969bd56029cd1edc17b4153b00f84adc73f5827))
+* **engine:** call verifyModelIntegrity in resolveModel ([d648eb4](https://github.com/ambicuity/KINDX/commit/d648eb4abe4a125d246766a364a8590f8050fe16))
+* **engine:** integrate HNSW index with shard database system ([5161288](https://github.com/ambicuity/KINDX/commit/5161288455b952548700dfb0b62f33dded7ab6dd))
+* **engine:** integrate writeModelChecksum in pullModels ([5b7088c](https://github.com/ambicuity/KINDX/commit/5b7088cee33f58eefe130020b46078a53c02c46d))
+* extract logConfigResolved helper and harden tier logging tests ([7ae19fc](https://github.com/ambicuity/KINDX/commit/7ae19fc56cacb7942d2f60a497a49409a66c5244))
+* HNSW index quality fixes ([115794b](https://github.com/ambicuity/KINDX/commit/115794b0ddb78387e2ba7e75cbe2710e4a623875))
+* **index:** add RBAC enforcement to MCP tools and federated query ([11d25a9](https://github.com/ambicuity/KINDX/commit/11d25a9cf5177e710a8023b12030e1b963782105))
+* **index:** address code review issues — quietWarn on corrupt registry, YAML formatting, use registry.default ([d7665e0](https://github.com/ambicuity/KINDX/commit/d7665e093fb78f68f8fa43ff80de2a4209e01ea5))
+* **memory:** call initializeMemoryFeedbackSchema at startup ([1b3311a](https://github.com/ambicuity/KINDX/commit/1b3311a363754b8f726220430a8859a194bb5b07))
+* **memory:** call initializeMemoryScopeConfigSchema at startup ([5b2d43a](https://github.com/ambicuity/KINDX/commit/5b2d43a7fa10ab39368b9de6cfd923afab360c55))
+* priority queue spec compliance ([7fffd60](https://github.com/ambicuity/KINDX/commit/7fffd60634ca7a63d5bfc2ad7b646a3b5dc4699b))
+* **protocol:** replace /ready stubs with real state checks ([5354719](https://github.com/ambicuity/KINDX/commit/53547192f30d444852bd9b32148438913a19731a))
+* **quota:** add pruneExpired to ToolQuotaManager to prevent unbounded memory growth ([53f4bf0](https://github.com/ambicuity/KINDX/commit/53f4bf03c3dc08f0f9ca3b5bb199626a2bec15c5))
+* rename SessionRateLimiter to FixedWindowRateLimiter and add expiry pruning ([918b251](https://github.com/ambicuity/KINDX/commit/918b2514c21bd9e34a50feb84c4df767f74bbc79))
+* **repo C10:** also import validateLexQuery and validateSemanticQuery ([c030e33](https://github.com/ambicuity/KINDX/commit/c030e330f4d82c46da40b59a68d81b2fb549ad88))
+* RetryableLLM spec compliance — I/O patterns, modelExists retry, integration ([d425883](https://github.com/ambicuity/KINDX/commit/d425883ba943b7b32c4d1babb0c2735a59612c3e))
+* **security:** P0 quick wins — timing-safe auth, loopback guard, prompt sanitization ([81d4eae](https://github.com/ambicuity/KINDX/commit/81d4eae05a31b6612467ecf12e3a7b898f28d778))
+* **security:** prevent path traversal in MCP cache keys ([64d46c1](https://github.com/ambicuity/KINDX/commit/64d46c1f2d2162f0df679dee7d5fa31ed0960bd6))
+* **security:** wire up audit logging and add init rate limiting ([5dad766](https://github.com/ambicuity/KINDX/commit/5dad7665dbfb9787aba1876ca861e5236f6862b3))
+* **tests:** remove duplicates and use fake timers in hardening integration tests ([dd53e5a](https://github.com/ambicuity/KINDX/commit/dd53e5aaeb3f1ebe3255428a934bf3f0e223ccb5))
+* vision model integration issues ([14a76ba](https://github.com/ambicuity/KINDX/commit/14a76ba32994e1b793e6be3b6f8d5e9d77f9d609))
+* wire up modelsReady from buildOperationalStatus instead of hardcoding false ([17be2e3](https://github.com/ambicuity/KINDX/commit/17be2e35adf2dcd9344f054aa0425c674f2a9548))
+
 ## [1.3.6] - 2026-06-09
 
 ### Added
