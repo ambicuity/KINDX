@@ -14,12 +14,15 @@
  *   tsx tooling/benchmarks/runner.ts --all [--enforce] [--include-optional]
  *
  * Tracks:
- *   bm25-quality      → tooling/benchmarks/section6_bench.ts
- *   latency           → tooling/benchmark_warm_daemon.ts
  *   insert-regression → tooling/benchmark_release_regressions.ts
- *   daemon-load       → tooling/benchmark_concurrent_agents.ts
  *
- * Optional (only included with --include-optional):
+ * Optional (only included with --include-optional). These need downloaded
+ * IR corpora, a seeded index, and/or a running MCP HTTP daemon, so they
+ * cannot run on a bare CI runner; the perf-informational workflow covers
+ * warm-daemon in CI with proper corpus seeding and daemon startup:
+ *   bm25-quality        → tooling/benchmarks/section6_bench.ts
+ *   latency             → tooling/benchmark_warm_daemon.ts
+ *   daemon-load         → tooling/benchmark_concurrent_agents.ts
  *   release-hardening   → tooling/benchmark_release_hardening.ts
  *   llm-pool-contention → tooling/benchmark_llm_pool_contention.ts
  *
@@ -45,10 +48,14 @@ const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = pathResolve(dirname(__filename), "..", "..");
 
 const TRACKS: Track[] = [
-  { name: "bm25-quality", script: "tooling/benchmarks/section6_bench.ts" },
-  { name: "latency", script: "tooling/benchmark_warm_daemon.ts" },
   { name: "insert-regression", script: "tooling/benchmark_release_regressions.ts" },
-  { name: "daemon-load", script: "tooling/benchmark_concurrent_agents.ts" },
+  // Environment-dependent tracks: require downloaded IR corpora, a seeded
+  // index, and/or a running MCP HTTP daemon. Excluded from --all so the
+  // enforced CI gate stays self-contained; warm-daemon runs in CI via
+  // perf-informational.yml.
+  { name: "bm25-quality", script: "tooling/benchmarks/section6_bench.ts", optional: true },
+  { name: "latency", script: "tooling/benchmark_warm_daemon.ts", optional: true },
+  { name: "daemon-load", script: "tooling/benchmark_concurrent_agents.ts", optional: true },
   { name: "release-hardening", script: "tooling/benchmark_release_hardening.ts", optional: true },
   { name: "llm-pool-contention", script: "tooling/benchmark_llm_pool_contention.ts", optional: true },
 ];
