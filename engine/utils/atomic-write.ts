@@ -92,7 +92,13 @@ export function atomicWriteFile(
   let renamed = false;
   try {
     fd = ops.openSync(tempPath, "w", mode);
-    ops.writeSync(fd, data as any, null, "utf8" as any);
+    // writeSync has separate overloads for string and Buffer.
+    // The union type requires explicit handling for each case.
+    if (typeof data === "string") {
+      ops.writeSync(fd, data, null, "utf8");
+    } else {
+      ops.writeSync(fd, data);
+    }
     ops.fsyncSync(fd);
     ops.closeSync(fd);
     fd = null;

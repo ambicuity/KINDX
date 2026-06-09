@@ -25,7 +25,6 @@ export function maybeRunLifecycleJobs(db: Database, scope: string): void {
   _lifecycleOpsSinceLastRun += 1;
   if (_lifecycleOpsSinceLastRun < LIFECYCLE_EVERY_N_OPS) return;
   _lifecycleOpsSinceLastRun = 0;
-  if (Math.random() > 0.01) return;
   purgeExpiredMemories(db, scope);
   consolidateMemories(db, scope);
 }
@@ -129,6 +128,14 @@ function nowIso(): string {
 }
 
 function withTransaction<T>(db: Database, fn: () => T): T {
+  // Reentrancy: SQLite has no real nested transactions, only savepoints.
+  // When a caller is already inside a BEGIN (e.g. evictIfNeeded firing
+  // deleteMemory from within an upsert), opening another BEGIN fails with
+  // "cannot start a transaction within a transaction". Detect the case and
+  // run the callback inline — the outer commit/rollback will cover us.
+  if (db.inTransaction === true) {
+    return fn();
+  }
   db.exec("BEGIN IMMEDIATE");
   try {
     const value = fn();
@@ -373,7 +380,7 @@ function incrementCounters(db: Database, ids: number[]): void {
         last_accessed_at = ?,
         expires_at = CASE
           WHEN ttl_seconds IS NOT NULL
-          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ttl_seconds || ' seconds')
           ELSE expires_at
         END
     WHERE id IN (${placeholders})
@@ -417,8 +424,17 @@ function tryStoreEmbedding(db: Database, memoryId: number, vector?: number[] | F
       db.exec(`CREATE VIRTUAL TABLE memory_vectors_vec USING vec0(memory_id INTEGER PRIMARY KEY, embedding float[${dimensions}] distance_metric=cosine)`);
       db.exec(`INSERT OR IGNORE INTO memory_vectors_vec(memory_id, embedding) SELECT CAST(memory_id AS INTEGER), embedding FROM memory_embeddings`);
     }
-    db.prepare(`DELETE FROM memory_vectors_vec WHERE memory_id = CAST(? AS INTEGER)`).run(memoryId);
-    db.prepare(`INSERT INTO memory_vectors_vec (memory_id, embedding) VALUES (CAST(? AS INTEGER), ?)`).run(memoryId, new Float32Array(norm));
+    // DELETE/INSERT must commit together so an interrupted process can't leave
+    // the row missing from memory_vectors_vec while memory_embeddings still
+    // has it. better-sqlite3 auto-commits each .run() individually outside a
+    // transaction, so the two-statement form was racy with SIGINT/crash.
+    const delStmt = db.prepare(`DELETE FROM memory_vectors_vec WHERE memory_id = CAST(? AS INTEGER)`);
+    const insStmt = db.prepare(`INSERT INTO memory_vectors_vec (memory_id, embedding) VALUES (CAST(? AS INTEGER), ?)`);
+    const swap = db.transaction((id: number, embedding: Float32Array) => {
+      delStmt.run(id);
+      insStmt.run(id, embedding);
+    });
+    swap(memoryId, new Float32Array(norm));
   } catch (err) {
     // Vector persistence is best-effort; memory records remain valid without ANN acceleration.
     if (!_memoryVectorPersistWarningEmitted) {
@@ -733,30 +749,36 @@ export function getScopeMemoryLimit(db: Database, scope: string): number | null 
 
 export function evictIfNeeded(db: Database, scope: string, maxMemories: number): number {
   const normalizedScope = normalizeScope(scope);
-  const active = db.prepare(`
-    SELECT COUNT(*) AS cnt FROM memories
-    WHERE scope = ? AND superseded_by IS NULL
-      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  `).get(normalizedScope) as { cnt: number };
+  // withTransaction is reentrant: it inlines when an outer txn is open
+  // (insertNewMemory path) and BEGINs IMMEDIATE otherwise (external caller).
+  // The outer wrap is what prevents two concurrent writers from both passing
+  // the count check and exceeding max_memories.
+  return withTransaction(db, () => {
+    const active = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE scope = ? AND superseded_by IS NULL
+        AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    `).get(normalizedScope) as { cnt: number };
 
-  const count = Number(active.cnt);
-  if (count <= maxMemories) return 0;
+    const count = Number(active.cnt);
+    if (count <= maxMemories) return 0;
 
-  const toEvict = count - maxMemories;
-  const oldest = db.prepare(`
-    SELECT id FROM memories
-    WHERE scope = ? AND superseded_by IS NULL
-      AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    ORDER BY last_accessed_at ASC NULLS FIRST
-    LIMIT ?
-  `).all(normalizedScope, toEvict) as { id: number }[];
+    const toEvict = count - maxMemories;
+    const oldest = db.prepare(`
+      SELECT id FROM memories
+      WHERE scope = ? AND superseded_by IS NULL
+        AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      ORDER BY last_accessed_at ASC NULLS LAST
+      LIMIT ?
+    `).all(normalizedScope, toEvict) as { id: number }[];
 
-  let evicted = 0;
-  for (const row of oldest) {
-    const deleted = deleteMemory(db, normalizedScope, Number(row.id));
-    if (deleted) evicted++;
-  }
-  return evicted;
+    let evicted = 0;
+    for (const row of oldest) {
+      const deleted = deleteMemory(db, normalizedScope, Number(row.id));
+      if (deleted) evicted++;
+    }
+    return evicted;
+  });
 }
 
 async function computeMemoryVector(searchText: string, precomputedVector?: number[]): Promise<{ vector: number[]; model: string } | undefined> {
@@ -810,7 +832,7 @@ export async function upsertMemory(db: Database, input: UpsertMemoryInput): Prom
             appeared_count = ?,
             last_appeared_at = ?,
             search_text = ?,
-            expires_at = CASE WHEN ? IS NOT NULL THEN datetime('now', '+' || ? || ' seconds') ELSE expires_at END,
+            expires_at = CASE WHEN ? IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ? || ' seconds') ELSE expires_at END,
             ttl_seconds = CASE WHEN ? IS NOT NULL THEN ? ELSE ttl_seconds END
         WHERE id = ?
       `).run(mergedSource, confidence, Number(exact.appeared_count || 0) + 1, now, searchText,
@@ -1191,7 +1213,7 @@ export function markMemoryAccessed(db: Database, scopeInput: string, memoryId: n
         last_accessed_at = ?,
         expires_at = CASE
           WHEN ttl_seconds IS NOT NULL
-          THEN datetime('now', '+' || ttl_seconds || ' seconds')
+          THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+' || ttl_seconds || ' seconds')
           ELSE expires_at
         END
     WHERE id = ? AND scope = ?
@@ -1223,8 +1245,23 @@ export function deleteMemory(db: Database, scopeInput: string, memoryId: number)
     } catch { /* table may not exist */ }
     // Clean up links
     db.prepare(`DELETE FROM memory_links WHERE source_id = ? OR target_id = ?`).run(memoryId, memoryId);
-    // Nullify superseded_by references pointing to this memory
-    db.prepare(`UPDATE memories SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(memoryId);
+    // Heal supersession chain: any memory whose superseded_by points at the
+    // victim is rewritten to point at the victim's own superseded_by (which
+    // may be NULL — that's correct, those children become live again). The
+    // previous code unconditionally NULL'd the children, breaking A→B→C
+    // chains into three islands when B was deleted.
+    const victim = db.prepare(
+      `SELECT superseded_by, superseded_at FROM memories WHERE id = ?`
+    ).get(memoryId) as { superseded_by: number | null; superseded_at: string | null } | undefined;
+    if (victim?.superseded_by != null) {
+      db.prepare(
+        `UPDATE memories SET superseded_by = ?, superseded_at = ? WHERE superseded_by = ?`
+      ).run(victim.superseded_by, victim.superseded_at, memoryId);
+    } else {
+      db.prepare(
+        `UPDATE memories SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`
+      ).run(memoryId);
+    }
     // Delete the memory itself
     const run = db.prepare(`DELETE FROM memories WHERE id = ? AND scope = ?`).run(memoryId, scope);
     return Number(run.changes) > 0;

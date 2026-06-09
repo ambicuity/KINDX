@@ -22,6 +22,8 @@ import {
   getShardHealthSummary,
 } from "../sharding.js";
 import { c } from "../utils/ui.js";
+import { renderDiagnostics, fromLegacyChecks, overallStatus } from "../cli/renderers/diagnostics.js";
+import { jsonEnvelope, jsonEnvelopeEnabled } from "../cli/output.js";
 
 export interface DoctorDeps {
   getDb: () => Database;
@@ -90,18 +92,28 @@ export function runDoctorCommand(
     },
   ];
   const failed = checks.filter((check) => !check.ok);
+  const diagnosticChecks = fromLegacyChecks(checks);
 
   if (output === "json") {
-    console.log(JSON.stringify({
+    const legacy = {
       status: failed.length === 0 ? "ok" : "failed",
       checks,
-    }, null, 2));
-  } else {
-    console.log(`${c.bold}KINDX Doctor${c.reset}`);
-    for (const check of checks) {
-      const icon = check.ok ? `${c.green}✓${c.reset}` : `${c.yellow}!${c.reset}`;
-      console.log(`  ${icon} ${check.id}: ${check.detail}`);
+    };
+    if (jsonEnvelopeEnabled(process.env)) {
+      console.log(JSON.stringify(jsonEnvelope("doctor", {
+        status: overallStatus(diagnosticChecks),
+        checks: diagnosticChecks,
+      }), null, 2));
+    } else {
+      console.log(JSON.stringify(legacy, null, 2));
     }
+  } else {
+    const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
+    console.log(renderDiagnostics(diagnosticChecks, {
+      title: "KINDX Doctor",
+      color: useColor,
+      showSummary: false,
+    }));
     if (failed.length === 0) {
       console.log(`\n${c.green}All health checks passed.${c.reset}`);
     } else {

@@ -297,11 +297,14 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
   }));
   const vectorCount = vectors.length;
   if (vectorCount === 0) {
-    db.exec(`DELETE FROM ann_assignments`);
-    db.exec(`DELETE FROM ann_centroids`);
-    db.exec(`DELETE FROM ann_centroids_vec`);
-    db.prepare(`INSERT OR REPLACE INTO ann_state (id, version, dimensions, vector_count, centroid_count, built_at) VALUES (1, 1, ?, 0, 0, ?)`)
-      .run(dimensions, new Date().toISOString());
+    const clearEmpty = db.transaction(() => {
+      db.exec(`DELETE FROM ann_assignments`);
+      db.exec(`DELETE FROM ann_centroids`);
+      db.exec(`DELETE FROM ann_centroids_vec`);
+      db.prepare(`INSERT OR REPLACE INTO ann_state (id, version, dimensions, vector_count, centroid_count, built_at) VALUES (1, 1, ?, 0, 0, ?)`)
+        .run(dimensions, new Date().toISOString());
+    });
+    clearEmpty();
     return { centroidCount: 0, vectorCount: 0 };
   }
 
@@ -350,30 +353,38 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
     }
   }
 
-  db.exec(`DELETE FROM ann_assignments`);
-  db.exec(`DELETE FROM ann_centroids`);
-  db.exec(`DELETE FROM ann_centroids_vec`);
+  // Clear + bulk-rebuild + state stamp run in a single transaction so a
+  // crash (or SIGINT) mid-rebuild cannot leave the shard with empty
+  // centroids and stale assignments — which would otherwise make vector
+  // search return zero results until the next rebuild.
   const upsertAssign = db.prepare(`INSERT OR REPLACE INTO ann_assignments (hash_seq, centroid_id) VALUES (?, ?)`);
   const upsertCentroid = db.prepare(`INSERT OR REPLACE INTO ann_centroids (centroid_id, count, built_at) VALUES (?, ?, ?)`);
   const upsertCentroidVec = db.prepare(`INSERT OR REPLACE INTO ann_centroids_vec (centroid_id, embedding) VALUES (?, ?)`);
-  const builtAt = new Date().toISOString();
-  const counts = new Array<number>(centroidCount).fill(0);
-  for (let i = 0; i < vectorCount; i++) {
-    const hashSeq = vectors[i]?.hash_seq;
-    const centroidId = assignments[i] || 0;
-    if (!hashSeq) continue;
-    upsertAssign.run(hashSeq, centroidId);
-    counts[centroidId] = (counts[centroidId] || 0) + 1;
-  }
-  for (let c = 0; c < centroidCount; c++) {
-    const centroid = centroids[c] || new Float32Array(dimensions);
-    upsertCentroid.run(c, counts[c] || 0, builtAt);
-    upsertCentroidVec.run(String(c), centroid as any);
-  }
-  db.prepare(`
+  const upsertState = db.prepare(`
     INSERT OR REPLACE INTO ann_state (id, version, dimensions, vector_count, centroid_count, built_at)
     VALUES (1, 1, ?, ?, ?, ?)
-  `).run(dimensions, vectorCount, centroidCount, builtAt);
+  `);
+  const builtAt = new Date().toISOString();
+  const counts = new Array<number>(centroidCount).fill(0);
+  const rebuild = db.transaction(() => {
+    db.exec(`DELETE FROM ann_assignments`);
+    db.exec(`DELETE FROM ann_centroids`);
+    db.exec(`DELETE FROM ann_centroids_vec`);
+    for (let i = 0; i < vectorCount; i++) {
+      const hashSeq = vectors[i]?.hash_seq;
+      const centroidId = assignments[i] || 0;
+      if (!hashSeq) continue;
+      upsertAssign.run(hashSeq, centroidId);
+      counts[centroidId] = (counts[centroidId] || 0) + 1;
+    }
+    for (let c = 0; c < centroidCount; c++) {
+      const centroid = centroids[c] || new Float32Array(dimensions);
+      upsertCentroid.run(c, counts[c] || 0, builtAt);
+      upsertCentroidVec.run(String(c), centroid as unknown as Buffer);
+    }
+    upsertState.run(dimensions, vectorCount, centroidCount, builtAt);
+  });
+  rebuild();
 
   if (vectorCount > 10000) {
     try {
@@ -393,7 +404,14 @@ function rebuildShardAnnIndex(db: Database, dimensions: number): { centroidCount
 
 function ensureShardSchema(db: Database, dimensions: number): void {
   db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA synchronous = FULL"); // F-INT-1: Match main DB durability — prevent vector data loss on OS crash
+  // Shards intentionally pin synchronous=FULL even though the main DB now
+  // defaults to NORMAL (KINDX_SYNCHRONOUS=FULL opt-in there). Rationale:
+  // shard rebuilds are infrequent batch operations where every centroid
+  // represents minutes of GPU work, and we want group-commit durability
+  // against OS crashes / power loss. Main-DB row writes happen on every
+  // user keystroke and the per-commit fsync would be ~2-3x slower without
+  // changing the WAL crash-safety story.
+  db.exec("PRAGMA synchronous = FULL");
   db.exec("PRAGMA busy_timeout = 30000");
   db.exec(`
     CREATE TABLE IF NOT EXISTS shard_vectors (

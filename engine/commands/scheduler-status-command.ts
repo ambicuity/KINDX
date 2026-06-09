@@ -69,7 +69,18 @@ export function renderSchedulerStatus(args: {
 }): void {
   const { format, shard, checkpoint, queue, color } = args;
   if (format === "json") {
-    console.log(JSON.stringify({ shard, checkpoint, queue }, null, 2));
+    // When the new JSON envelope is enabled, wrap the payload so the shape
+    // matches every other command's JSON output. Otherwise emit the legacy
+    // bare object for backwards compatibility with existing scripts.
+    if (process.env.KINDX_JSON_ENVELOPE === "1" || process.env.KINDX_JSON_ENVELOPE === "true") {
+      console.log(JSON.stringify({
+        ok: true,
+        command: "scheduler",
+        data: { shard, checkpoint, queue },
+      }, null, 2));
+    } else {
+      console.log(JSON.stringify({ shard, checkpoint, queue }, null, 2));
+    }
     return;
   }
 

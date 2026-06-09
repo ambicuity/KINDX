@@ -16,7 +16,8 @@ import {
   getRBACStatus,
   type TenantRole,
 } from "../rbac.js";
-import { c } from "../utils/ui.js";
+import { paletteFor, glyphsFor } from "../cli/output.js";
+import { renderSubcommandList } from "../cli/help.js";
 import type { OutputFormat } from "../renderer.js";
 
 export function runTenantCommand(
@@ -25,6 +26,9 @@ export function runTenantCommand(
   output: OutputFormat,
 ): number {
   const sub = args[0];
+  const useColor = !process.env.NO_COLOR && Boolean(process.stdout?.isTTY);
+  const p = paletteFor(useColor);
+  const g = glyphsFor();
 
   switch (sub) {
     case "add": {
@@ -55,20 +59,20 @@ export function runTenantCommand(
             token: plaintextToken,
           }, null, 2));
         } else {
-          console.log(`${c.green}✓${c.reset} Tenant created: ${c.bold}${tenant.id}${c.reset}`);
+          console.log(`${p.green(g.ok)} Tenant created: ${p.bold(tenant.id)}`);
           console.log(`  Name:         ${tenant.name}`);
-          console.log(`  Role:         ${c.cyan}${tenant.role}${c.reset}`);
+          console.log(`  Role:         ${p.cyan(tenant.role)}`);
           console.log(`  Collections:  ${tenant.allowedCollections.join(", ") || "(none)"}`);
           console.log(`  Created:      ${tenant.createdAt}`);
           console.log();
-          console.log(`  ${c.bold}Token (shown once — save it now):${c.reset}`);
-          console.log(`  ${c.yellow}${plaintextToken}${c.reset}`);
+          console.log(`  ${p.bold("Token (shown once — save it now):")}`);
+          console.log(`  ${p.yellow(plaintextToken)}`);
           console.log();
-          console.log(`  ${c.dim}Use: Authorization: Bearer ${plaintextToken.slice(0, 8)}...${c.reset}`);
+          console.log(`  ${p.dim(`Use: Authorization: Bearer ${plaintextToken.slice(0, 8)}...`)}`);
         }
         return 0;
       } catch (err: any) {
-        console.error(`${c.yellow}!${c.reset} ${err.message}`);
+        console.error(`${p.yellow(g.warn)} ${err.message}`);
         return 1;
       }
     }
@@ -81,10 +85,10 @@ export function runTenantCommand(
         return 1;
       }
       if (removeTenant(id)) {
-        console.log(`${c.green}✓${c.reset} Tenant '${id}' removed`);
+        console.log(`${p.green(g.ok)} Tenant '${id}' removed`);
         return 0;
       }
-      console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+      console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
       return 1;
     }
 
@@ -97,17 +101,17 @@ export function runTenantCommand(
       }
 
       if (tenants.length === 0) {
-        console.log(`${c.dim}No tenants configured. KINDX is in single-tenant mode.${c.reset}`);
-        console.log(`${c.dim}Run 'kindx tenant add <id> --role admin' to enable multi-tenant RBAC.${c.reset}`);
+        console.log(p.dim("No tenants configured. KINDX is in single-tenant mode."));
+        console.log(p.dim("Run 'kindx tenant add <id> --role admin' to enable multi-tenant RBAC."));
         return 0;
       }
 
-      console.log(`${c.bold}Tenants (${tenants.length}):${c.reset}\n`);
+      console.log(`${p.bold(`Tenants (${tenants.length}):`)}\n`);
       for (const t of tenants) {
-        const status = t.active ? `${c.green}active${c.reset}` : `${c.yellow}disabled${c.reset}`;
-        const roleColor = t.role === "admin" ? c.magenta : t.role === "editor" ? c.cyan : c.dim;
-        console.log(`  ${c.bold}${t.id}${c.reset} ${c.dim}(${t.name})${c.reset}`);
-        console.log(`    Role:         ${roleColor}${t.role}${c.reset}`);
+        const status = t.active ? p.green("active") : p.yellow("disabled");
+        const roleColor = t.role === "admin" ? p.magenta : t.role === "editor" ? p.cyan : p.dim;
+        console.log(`  ${p.bold(t.id)} ${p.dim(`(${t.name})`)}`);
+        console.log(`    Role:         ${roleColor(t.role)}`);
         console.log(`    Status:       ${status}`);
         console.log(`    Collections:  ${t.allowedCollections.join(", ")}`);
         if (t.description) console.log(`    Description:  ${t.description}`);
@@ -124,7 +128,7 @@ export function runTenantCommand(
       }
       const tenant = getTenant(id);
       if (!tenant) {
-        console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+        console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
         return 1;
       }
 
@@ -134,8 +138,8 @@ export function runTenantCommand(
         return 0;
       }
 
-      const status = tenant.active ? `${c.green}active${c.reset}` : `${c.yellow}disabled${c.reset}`;
-      console.log(`${c.bold}Tenant: ${tenant.id}${c.reset}`);
+      const status = tenant.active ? p.green("active") : p.yellow("disabled");
+      console.log(`${p.bold(`Tenant: ${tenant.id}`)}`);
       console.log(`  Name:         ${tenant.name}`);
       console.log(`  Role:         ${tenant.role}`);
       console.log(`  Status:       ${status}`);
@@ -157,14 +161,14 @@ export function runTenantCommand(
         if (output === "json") {
           console.log(JSON.stringify({ id, token: newToken }, null, 2));
         } else {
-          console.log(`${c.green}✓${c.reset} Token rotated for tenant '${id}'`);
+          console.log(`${p.green(g.ok)} Token rotated for tenant '${id}'`);
           console.log();
-          console.log(`  ${c.bold}New token (shown once — save it now):${c.reset}`);
-          console.log(`  ${c.yellow}${newToken}${c.reset}`);
+          console.log(`  ${p.bold("New token (shown once — save it now):")}`);
+          console.log(`  ${p.yellow(newToken)}`);
         }
         return 0;
       } catch (err: any) {
-        console.error(`${c.yellow}!${c.reset} ${err.message}`);
+        console.error(`${p.yellow(g.warn)} ${err.message}`);
         return 1;
       }
     }
@@ -177,10 +181,10 @@ export function runTenantCommand(
         return 1;
       }
       if (grantCollections(id, collections)) {
-        console.log(`${c.green}✓${c.reset} Granted access to [${collections.join(", ")}] for tenant '${id}'`);
+        console.log(`${p.green(g.ok)} Granted access to [${collections.join(", ")}] for tenant '${id}'`);
         return 0;
       }
-      console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+      console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
       return 1;
     }
 
@@ -192,10 +196,10 @@ export function runTenantCommand(
         return 1;
       }
       if (revokeCollections(id, collections)) {
-        console.log(`${c.green}✓${c.reset} Revoked access to [${collections.join(", ")}] for tenant '${id}'`);
+        console.log(`${p.green(g.ok)} Revoked access to [${collections.join(", ")}] for tenant '${id}'`);
         return 0;
       }
-      console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+      console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
       return 1;
     }
 
@@ -206,10 +210,10 @@ export function runTenantCommand(
         return 1;
       }
       if (updateTenant(id, { active: false })) {
-        console.log(`${c.green}✓${c.reset} Tenant '${id}' disabled`);
+        console.log(`${p.green(g.ok)} Tenant '${id}' disabled`);
         return 0;
       }
-      console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+      console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
       return 1;
     }
 
@@ -220,10 +224,10 @@ export function runTenantCommand(
         return 1;
       }
       if (updateTenant(id, { active: true })) {
-        console.log(`${c.green}✓${c.reset} Tenant '${id}' enabled`);
+        console.log(`${p.green(g.ok)} Tenant '${id}' enabled`);
         return 0;
       }
-      console.error(`${c.yellow}!${c.reset} Tenant '${id}' not found`);
+      console.error(`${p.yellow(g.warn)} Tenant '${id}' not found`);
       return 1;
     }
 
@@ -233,8 +237,8 @@ export function runTenantCommand(
         console.log(JSON.stringify(status, null, 2));
         return 0;
       }
-      console.log(`${c.bold}RBAC Status${c.reset}`);
-      console.log(`  Enabled:  ${status.enabled ? c.green + "yes" + c.reset : c.dim + "no (single-tenant)" + c.reset}`);
+      console.log(p.bold("RBAC Status"));
+      console.log(`  Enabled:  ${status.enabled ? p.green("yes") : p.dim("no (single-tenant)")}`);
       console.log(`  Tenants:  ${status.tenantCount} active`);
       console.log(`  Roles:    admin=${status.roles.admin} editor=${status.roles.editor} viewer=${status.roles.viewer}`);
       return 0;
@@ -242,30 +246,14 @@ export function runTenantCommand(
 
     case "help":
     case undefined: {
-      console.log("Usage: kindx tenant <subcommand> [options]");
+      console.log(renderSubcommandList("tenant", { color: useColor }) ?? "Usage: kindx tenant <subcommand> [options]");
+      // Role taxonomy stays inline — it's a tenant-specific concept that
+      // doesn't fit the generic SubcommandSpec shape.
       console.log();
-      console.log("Subcommands:");
-      console.log("  add <id> [collections...] --role <role>  Create tenant (shows token once)");
-      console.log("  remove <id>                              Remove tenant");
-      console.log("  list                                     List all tenants");
-      console.log("  show <id>                                Show tenant details");
-      console.log("  rotate <id>                              Rotate tenant token");
-      console.log("  grant <id> <col1> [col2 ...]             Grant collection access");
-      console.log("  revoke <id> <col1> [col2 ...]            Revoke collection access");
-      console.log("  disable <id>                             Disable tenant (reject auth)");
-      console.log("  enable <id>                              Re-enable tenant");
-      console.log("  status                                   Show RBAC status summary");
-      console.log();
-      console.log("Roles:");
+      console.log(`${p.bold("Roles:")}`);
       console.log("  admin   Full access to all collections and operations");
       console.log("  editor  Read + write to assigned collections");
       console.log("  viewer  Read-only access to assigned collections");
-      console.log();
-      console.log("Examples:");
-      console.log("  kindx tenant add ci-bot --role viewer notes docs");
-      console.log("  kindx tenant add team-lead --role editor --name 'Team Lead'");
-      console.log("  kindx tenant grant ci-bot meetings");
-      console.log("  kindx tenant rotate ci-bot");
       return 0;
     }
 

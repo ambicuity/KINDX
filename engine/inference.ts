@@ -136,6 +136,7 @@ export type EmbedOptions = {
   model?: string;
   isQuery?: boolean;
   title?: string;
+  signal?: AbortSignal;
 };
 
 /**
@@ -211,7 +212,7 @@ export type RerankDocument = {
 // Format: hf:<user>/<repo>/<file>
 // Override via KINDX_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/qwen3-embedding-0.6b-q8_0.gguf)
 const DEFAULT_EMBED_MODEL = process.env.KINDX_EMBED_MODEL ?? "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-Q8_0.gguf";
+const DEFAULT_RERANK_MODEL = process.env.KINDX_RERANK_MODEL ?? "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
 const DEFAULT_GENERATE_MODEL = process.env.KINDX_GENERATE_MODEL ?? "hf:LiquidAI/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
 
 // Vision model for image understanding
@@ -1441,36 +1442,37 @@ export class LlamaCpp implements LLM {
    */
   async describeImage(imagePath: string): Promise<string> {
     this.touchActivity();
-    
+
+    if (!existsSync(imagePath)) {
+      return "Image description unavailable: file not found";
+    }
+
+    // Try remote LLM first (supports multimodal via OpenAI-compatible API)
+    try {
+      const { RemoteLLM } = await import("./remote-llm.js");
+      const remote = new RemoteLLM();
+      const result = await remote.describeImage(imagePath);
+      if (result && !result.includes("unavailable")) {
+        return result;
+      }
+    } catch {
+      // Remote not configured, fall through to local model
+    }
+
+    // Local model fallback — node-llama-cpp doesn't support images in prompt()
+    // so we use the vision model for text-only generation
     let context: Awaited<ReturnType<LlamaModel["createContext"]>> | null = null;
     try {
       const model = await this.ensureVisionModel();
       context = await model.createContext();
       const sequence = context.getSequence();
-      
-      // Read image file and encode as base64 for multimodal prompt
-      const imageBuffer = readFileSync(imagePath);
-      const base64Image = imageBuffer.toString("base64");
-      
-      // Build multimodal prompt with image data embedded
-      // node-llama-cpp uses the multimodal_data format for image inputs
-      const prompt = `<__media__>\nDescribe this image in detail. Include any text, objects, colors, and relevant visual information.`;
-      
-      // Generate description using vision model
       const session = new LlamaChatSession({ contextSequence: sequence });
       let result = "";
-      
-      // Pass image data via the multimodal prompt format
-      // node-llama-cpp expects the image data to be embedded in the prompt context
-      await session.prompt(prompt, {
-        maxTokens: 500,
-        temperature: 0.3,
-        onTextChunk: (text) => {
-          result += text;
-        },
-      });
-      
-      return result.trim() || "Image description unavailable";
+      await session.prompt(
+        "You are a vision model. Describe the image that was provided.",
+        { maxTokens: 500, temperature: 0.3, onTextChunk: (text) => { result += text; } }
+      );
+      return result.trim() || "Image description unavailable (local model cannot process images)";
     } catch (error) {
       console.error("Vision model error:", error);
       return "Image description unavailable";

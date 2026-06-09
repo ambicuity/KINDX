@@ -6,7 +6,9 @@
  * difference is the import path.
  */
 
-export const isBun = typeof (globalThis as any).Bun !== "undefined";
+// Detect Bun runtime without importing bun:sqlite at compile time.
+// globalThis.Bun is set by the Bun runtime; checking with typeof avoids ReferenceError on Node.
+export const isBun = typeof (globalThis as Record<string, unknown>).Bun !== "undefined";
 
 let _Database: any;
 let _sqliteVecLoad: (db: any) => void;
@@ -133,7 +135,12 @@ if (isBun) {
  */
 export function openDatabase(path: string): Database {
   const db = withSuppressedSqliteStdoutNoise(() => new _Database(path) as Database);
-  db.exec("PRAGMA busy_timeout = 15000;");
+  // 30000ms matches the documented storage-layer baseline (see initializeDatabase
+  // and ensureShardSchema). The previous 15000ms default left memory-only
+  // callers, raw shard openers, and test helpers with half the lock-wait
+  // budget of the main store — visible as flaky SQLITE_BUSY under
+  // concurrent watcher writes.
+  db.exec("PRAGMA busy_timeout = 30000;");
   const key = process.env.KINDX_ENCRYPTION_KEY?.trim();
   if (key) {
     // Tier-1: validate the key shape before SQL interpolation. The key is
@@ -207,6 +214,12 @@ export function supportsSqlCipherPragma(db: Database): boolean {
 
 /**
  * Common subset of the Database interface used throughout KINDX.
+ *
+ * `open` and `inTransaction` are exposed so callers don't have to `as any`
+ * to inspect connection lifecycle (used by withTransaction reentrancy and
+ * the WAL/SHM sidecar cleanup guard). Both better-sqlite3 and bun:sqlite
+ * surface these properties on the instance; declared optional so future
+ * drivers without them are still type-compatible.
  */
 export interface Database {
   exec(sql: string): void;
@@ -220,6 +233,8 @@ export interface Database {
   transaction<T extends (...args: any[]) => any>(fn: T): T;
   loadExtension(path: string): void;
   close(): void;
+  readonly open?: boolean;
+  readonly inTransaction?: boolean;
 }
 
 export interface Statement {

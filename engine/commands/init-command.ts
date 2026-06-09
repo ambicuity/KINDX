@@ -21,6 +21,25 @@ export async function runInitCommand(
   values: Record<string, unknown>,
   deps: InitDeps,
 ): Promise<void> {
+  // CI / non-interactive guard. `kindx init` is a setup flow that, while it
+  // does not currently *prompt*, is intentionally restricted to terminals so
+  // an automation script that accidentally runs it gets an explicit error
+  // (with the equivalent non-interactive recipe) instead of mutating state
+  // silently.
+  const ci = process.env.CI === "true" || process.env.CI === "1";
+  const yes = Boolean(values.yes) || Boolean(values.confirm);
+  if ((!process.stdin.isTTY || ci) && !yes) {
+    process.stderr.write(
+      "kindx init requires an interactive terminal.\n" +
+      "  why: avoids silently mutating the index in CI/automation runs\n" +
+      "  fix: re-run with --yes to confirm, or use the explicit recipe:\n" +
+      "       kindx collection add <path> [--name <name>]\n" +
+      "       kindx update\n" +
+      "       kindx embed\n",
+    );
+    process.exit(2);
+  }
+
   const pwd = args[0] || process.cwd();
   const resolvedPwd = pwd === '.' ? process.cwd() : resolve(pwd);
   const globPattern = (values.mask as string) || deps.defaultGlob;

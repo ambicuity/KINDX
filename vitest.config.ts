@@ -6,5 +6,22 @@ export default defineConfig({
         exclude: ["specs/test-src/**", "node_modules/**", "dist/**"],
         testTimeout: 120_000,
         hookTimeout: 120_000,
+        pool: "forks",
+        fileParallelism: true,
+        coverage: {
+            provider: "v8",
+            reporter: ["text", "json", "html", "lcov"],
+            include: ["engine/**/*.ts"],
+            exclude: [
+                "engine/**/*.d.ts",
+                "engine/benchmarks.ts",
+            ],
+            thresholds: {
+                statements: 54,
+                branches: 46,
+                functions: 67,
+                lines: 55,
+            },
+        },
     },
 });

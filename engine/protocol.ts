@@ -62,7 +62,10 @@ import {
   type SessionScopeContext,
 } from "./session.js";
 import { getShardHealthSummary } from "./sharding.js";
-import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary } from "./audit.js";
+import { initializeAuditSchema, recordAudit, queryAuditLog, getAuditSummary, purgeOldAuditEntries } from "./audit.js";
+import { collectBody, BodyTooLargeError } from "./http/body.js";
+import { parseBearer } from "./http/bearer.js";
+import { getDocumentVersions } from "./repository/content.js";
 import { loadLayeredInstructions } from "./instruction-layering.js";
 import {
   CircuitBreaker,
@@ -82,6 +85,8 @@ import type {
   ResolvedMcpServerControl,
   ToolQuotaConfig,
 } from "./mcp-control-plane.js";
+import { getArchConfig, getArchStatus, buildAndDistillArch } from "./integrations/arch/adapter.js";
+import { selectArchHints } from "./integrations/arch/augment.js";
 
 // =============================================================================
 // Types for structured content
@@ -160,6 +165,9 @@ const KINDX_MCP_TOOL_NAMES = [
   "multi_get",
   "memory_put",
   "memory_search",
+  "document_history",
+  "document_diff",
+  "audit_log",
 ] as const;
 
 type QueryTimings = {
@@ -542,10 +550,14 @@ function stableHash(value: unknown): string {
 function raceWithTimeout<T>(
   promiseOrFn: Promise<T> | ((signal: AbortSignal) => Promise<T>),
   timeoutMs: number,
-  code: string
+  code: string,
+  sessionSignal?: AbortSignal
 ): Promise<T> {
   const ac = new AbortController();
-  const getPromise = () => typeof promiseOrFn === "function" ? promiseOrFn(ac.signal) : promiseOrFn;
+  const signals = [ac.signal];
+  if (sessionSignal && !sessionSignal.aborted) signals.push(sessionSignal);
+  const composed = signals.length > 1 ? AbortSignal.any(signals) : ac.signal;
+  const getPromise = () => typeof promiseOrFn === "function" ? promiseOrFn(composed) : promiseOrFn;
   if (timeoutMs <= 0) return getPromise();
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -581,14 +593,118 @@ const MEMORY_PREFETCH_LIMIT = 3;
 const MEMORY_PREFETCH_LINE_MAX_CHARS = 120;
 const MEMORY_PREFETCH_TOTAL_MAX_CHARS = 360;
 
+// =============================================================================
+// Auto-invocation contract — appears at top of MCP `initialize.instructions`.
+// Rewording this changes how aggressively every MCP-aware agent picks up kindx.
+// Snapshot-tested in specs/protocol-instructions.test.ts; update snapshots
+// deliberately, with a one-line rationale in the commit message.
+// =============================================================================
+export const AUTO_INVOCATION_CONTRACT = [
+  "## When to call KINDX (auto-invocation contract)",
+  "",
+  "Before answering any user turn that is not a greeting, a pure code-generation request",
+  "with no reference to user files, or a trivial yes/no, call `query` first.",
+  "Auto-invoke is default-on. Skip only when:",
+  "  (a) the user explicitly says \"don't search\",",
+  "  (b) you already have results from a query this turn, or",
+  "  (c) the request is exclusively about writing new code with no need to consult prior notes.",
+  "",
+  "Decision table:",
+  "  | User turn shape                                          | First call                       |",
+  "  |----------------------------------------------------------|----------------------------------|",
+  "  | \"what did I write about X\" / \"find …\" / \"show me …\"     | `query` (lex+vec)                |",
+  "  | \"open <path>\" / mentions a specific file                 | `get`                            |",
+  "  | Question that could be answered by existing notes        | `query` (vec+hyde)               |",
+  "  | New code, no file reference                              | skip kindx                       |",
+  "  | Greeting / chitchat                                      | skip kindx                       |",
+  "  | Memory-related (\"remember\", \"what did we decide\")        | `memory_search` then `memory_put`|",
+  "",
+  "Cost: default `query` returns top 3 snippets (~600 tokens). Pull bodies with `get`",
+  "only for snippets that look relevant. Set `KINDX_AUTO_INVOKE=off` on the server to disable.",
+].join("\n");
+
+const MAX_INSTRUCTIONS_BYTES = 8 * 1024;
+const TRUNCATION_MARKER = "\n\n[instructions truncated — see kindx://capabilities]";
+
+export function isAutoInvokeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.KINDX_AUTO_INVOKE ?? "").trim().toLowerCase();
+  return v !== "off" && v !== "0" && v !== "false";
+}
+
+/**
+ * Extract the trigger source from a tool-call request's `_meta.kindx.trigger`.
+ * Returns "agent-auto" / "user-explicit" if recognized, "unknown" otherwise.
+ *
+ * Telemetry must never throw — any unexpected shape collapses to "unknown".
+ */
+export function extractTriggerFromMeta(extra: unknown): "user-explicit" | "agent-auto" | "unknown" {
+  try {
+    const meta = (extra as { _meta?: unknown })?._meta;
+    const kindx = (meta as { kindx?: unknown } | undefined)?.kindx;
+    const trig = (kindx as { trigger?: unknown } | undefined)?.trigger;
+    if (trig === "agent-auto" || trig === "user-explicit") return trig;
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Best-effort insert into `mcp_query_log`. Swallows every error so telemetry
+ * failure never blocks a tool call. The table is created by
+ * `initializeCoreSchema`; the try/catch also covers stores whose schema
+ * predates the table.
+ */
+export function recordToolTrigger(
+  store: Store,
+  tool: string,
+  trigger: "user-explicit" | "agent-auto" | "unknown",
+): void {
+  try {
+    store.db
+      .prepare(`INSERT INTO mcp_query_log (tool, trigger, ts) VALUES (?, ?, ?)`)
+      .run(tool, trigger, Date.now());
+  } catch {
+    // Swallow — telemetry must not affect tool behaviour.
+  }
+}
+
 function buildInstructions(store: Store, session?: KindxSession): string {
   const status = store.getStatus();
   const lines: string[] = [];
 
-  // --- What is this? ---
+  // --- Identity (always first) ---
+  const collectionNames = status.collections.map((c) => `"${c.name}"`).join(", ");
+  const collectionsClause = collectionNames ? ` across collections: ${collectionNames}` : "";
+  lines.push(
+    `KINDX is your local search index over ${status.totalDocuments} markdown documents${collectionsClause}.`,
+  );
   const globalCtx = getGlobalContext();
-  lines.push(`KINDX is your local search engine over ${status.totalDocuments} markdown documents.`);
   if (globalCtx) lines.push(`Context: ${globalCtx}`);
+
+  // --- Auto-invocation contract (load-bearing) ---
+  if (status.collections.length === 0) {
+    lines.push("");
+    lines.push("kindx is installed but has no collections — run `kindx collection add <path>` to enable auto-search.");
+  } else if (isAutoInvokeEnabled()) {
+    lines.push("");
+    lines.push(AUTO_INVOCATION_CONTRACT);
+    if (!status.hasVectorIndex) {
+      lines.push("");
+      lines.push("Note: lex-only mode — vector index not built. Do not call `vec`/`hyde`. Run `kindx embed` to enable semantic search.");
+    } else if (status.needsEmbedding > 0) {
+      lines.push("");
+      lines.push(`Note: ${status.needsEmbedding} documents need re-embedding. Run \`kindx embed\` to update.`);
+    }
+  } else if (!status.hasVectorIndex) {
+    lines.push("");
+    lines.push("Note: No vector embeddings yet. Run `kindx embed` to enable semantic search (vec/hyde).");
+  } else if (status.needsEmbedding > 0) {
+    lines.push("");
+    lines.push(`Note: ${status.needsEmbedding} documents need embedding. Run \`kindx embed\` to update.`);
+  }
+
+  // --- Layered project instructions (AGENTS.md / SOUL.md / CLAUDE.md) ---
   const layered = loadLayeredInstructions({
     cwd: process.cwd(),
     globalFiles: [resolve(homedir(), ".codex", "AGENTS.md")],
@@ -607,7 +723,7 @@ function buildInstructions(store: Store, session?: KindxSession): string {
     lines.push(layered.text);
   }
 
-  // --- What's searchable? ---
+  // --- Collections list (detail) ---
   if (status.collections.length > 0) {
     lines.push("");
     lines.push("Collections (scope with `collection` parameter):");
@@ -619,28 +735,15 @@ function buildInstructions(store: Store, session?: KindxSession): string {
     }
   }
 
-  // --- Capability gaps ---
-  if (!status.hasVectorIndex) {
-    lines.push("");
-    lines.push("Note: No vector embeddings yet. Run `kindx embed` to enable semantic search (vec/hyde).");
-  } else if (status.needsEmbedding > 0) {
-    lines.push("");
-    lines.push(`Note: ${status.needsEmbedding} documents need embedding. Run \`kindx embed\` to update.`);
-  }
-
-  // --- Memory prefetch: surface top-accessed workspace memories inline ---
-  // This avoids a separate memory_search tool call at the start of every session.
-  // We only surface memories when we have a scope to resolve against.
+  // --- Workspace memory prefetch (unchanged behaviour, kept) ---
   const workspaceScope = session?.scopeContext?.workspaceScope;
   if (workspaceScope) {
     try {
       const stats = getMemoryStats(store.db, workspaceScope);
       let topMemories = stats.topAccessed.slice(0, MEMORY_PREFETCH_LIMIT);
       if (topMemories.length === 0) {
-        // Fallback for fresh scopes where no entry has been marked as accessed yet.
         const recentRows = store.db.prepare(`
-          SELECT value
-          FROM memories
+          SELECT value FROM memories
           WHERE scope = ? AND superseded_by IS NULL
           ORDER BY accessed_count DESC, appeared_count DESC, id DESC
           LIMIT ?
@@ -660,37 +763,26 @@ function buildInstructions(store: Store, session?: KindxSession): string {
           remainingChars -= line.length;
         }
       }
-    } catch {
-      // Memory prefetch is best-effort — never block startup
-    }
+    } catch { /* best-effort */ }
   }
 
-  // --- Search tool ---
-  lines.push("");
-  lines.push("Search: Use `query` with sub-queries (lex/vec/hyde):");
-  lines.push("  - type:'lex' — BM25 keyword search (exact terms, fast)");
-  lines.push("  - type:'vec' — semantic vector search (meaning-based)");
-  lines.push("  - type:'hyde' — hypothetical document (write what the answer looks like)");
-  lines.push("");
-  lines.push("Examples:");
-  lines.push("  Quick keyword lookup: [{type:'lex', query:'error handling'}]");
-  lines.push("  Semantic search: [{type:'vec', query:'how to handle errors gracefully'}]");
-  lines.push("  Best results: [{type:'lex', query:'error'}, {type:'vec', query:'error handling best practices'}]");
+  // --- Condensed search/retrieval reference (long examples now live in tool descriptions) ---
+  if (status.collections.length > 0) {
+    lines.push("");
+    lines.push("Tools: `query` (lex/vec/hyde sub-queries), `get` (path or #docid), `multi_get` (glob/list). Use `minScore: 0.5` to filter low-confidence results. File paths in results are collection-relative.");
+  }
 
-  // --- Retrieval workflow ---
-  lines.push("");
-  lines.push("Retrieval:");
-  lines.push("  - `get` — single document by path or docid (#abc123). Supports line offset (`file.md:100`).");
-  lines.push("  - `multi_get` — batch retrieve by glob (`journals/2025-05*.md`) or comma-separated list.");
-
-  // --- Non-obvious things that prevent mistakes ---
-  lines.push("");
-  lines.push("Tips:");
-  lines.push("  - File paths in results are relative to their collection.");
-  lines.push("  - Use `minScore: 0.5` to filter low-confidence results.");
-  lines.push("  - Results include a `context` field describing the content type.");
-
-  return lines.join("\n");
+  // --- Hard ceiling (byte-accurate, UTF-8 safe) ---
+  let out = lines.join("\n");
+  const outBuf = Buffer.from(out, "utf8");
+  if (outBuf.length > MAX_INSTRUCTIONS_BYTES) {
+    const markerLen = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+    let end = MAX_INSTRUCTIONS_BYTES - markerLen;
+    // Walk back to a UTF-8 boundary: continuation bytes are 10xxxxxx.
+    while (end > 0 && (outBuf[end] & 0xc0) === 0x80) end--;
+    out = outBuf.subarray(0, end).toString("utf8") + TRUNCATION_MARKER;
+  }
+  return out;
 }
 
 /**
@@ -699,6 +791,66 @@ function buildInstructions(store: Store, session?: KindxSession): string {
  */
 export function buildInstructionsForTest(store: Store, session?: KindxSession): string {
   return buildInstructions(store, session);
+}
+
+/**
+ * Test hook: enumerate every tool that createMcpServer registers, together
+ * with its description and raw zod inputSchema (not JSON-Schema-converted).
+ *
+ * Uses a minimal stub Store so no real SQLite database is required. The stub
+ * is only used during server/tool registration — tool handlers are never
+ * invoked by this helper.
+ *
+ * Call sites should set KINDX_ENABLE_MAINTENANCE_TOOLS=1 before invoking if
+ * they want maintenance tools (status, memory_stats, etc.) to appear in the
+ * returned list.
+ */
+export function listRegisteredToolsForTest(): Array<{
+  name: string;
+  description: string;
+  inputSchema: any;
+}> {
+  // Minimal stub Store — buildInstructions only needs getStatus() (for
+  // collections-length check) and store.db (for memory prefetch, which is
+  // skipped when no session is provided). Tool handlers are not invoked
+  // during registration, so nothing else needs to be real.
+  const stubStore = {
+    db: { prepare: () => ({ all: () => [], get: () => null }) } as any,
+    dbPath: ":memory:",
+    indexName: "test",
+    getStatus: () => ({
+      totalDocuments: 0,
+      needsEmbedding: 0,
+      hasVectorIndex: false,
+      capabilities: {},
+      ann: { enabled: false, mode: "exact" as const, state: "missing" as const, probeCount: 0, shortlistLimit: 0, details: [] },
+      encryption: { encrypted: false, keyConfigured: false, bytes: 0 },
+      ingestion: { warnedDocuments: 0, byFormat: [], byWarning: [] },
+      collections: [],
+      shards: { enabledCollections: [], checkpointPath: "", checkpointExists: false, warnings: [] },
+    }),
+  } as unknown as Store;
+
+  const defs: Array<{ name: string; description: string; inputSchema: any }> = [];
+  createMcpServer(stubStore, undefined, undefined, {
+    onRegister: (name: string, def: any) => {
+      defs.push({ name, description: def.description, inputSchema: def.inputSchema });
+    },
+  });
+  return defs;
+}
+
+/**
+ * Test hook: spin up a real McpServer backed by the given on-disk SQLite DB.
+ * Designed for in-process pairing with InMemoryTransport so tests can exercise
+ * the full initialize handshake without stdio.
+ *
+ * @param opts.dbPath   - Path to an existing KINDX SQLite database.
+ * @param opts.indexName - Index name (must match the catalog YAML file name).
+ */
+export function startMcpServerForTest(opts?: { dbPath?: string; indexName?: string }): McpServer {
+  const store = createStore(opts?.dbPath, opts?.indexName);
+  return createMcpServer(store);
 }
 
 /**
@@ -715,9 +867,12 @@ function createMcpServer(
   getSession?: () => KindxSession | null,
   options?: {
     mcpControl?: ResolvedMcpServerControl;
+    /** Test-only hook: called after every successful tool registration. */
+    onRegister?: (name: string, def: any) => void;
   },
 ): McpServer {
   const mcpControl = options?.mcpControl;
+  const onRegister = options?.onRegister;
   const registeredToolDefs: ToolRegistration[] = [];
   const server = new McpServer(
     { name: "kindx", version: SERVER_VERSION },
@@ -728,10 +883,12 @@ function createMcpServer(
     def: any,
     handler: any,
   ): void => {
-    if (mcpControl && !isToolEnabledByPolicy(mcpControl, name)) {
+    if (mcpControl && !isToolEnabledByPolicy(mcpControl, name, {
+      audit: (entry) => { try { recordAudit(store.db, { ...entry, action: entry.action as any }); } catch {} }
+    })) {
       return;
     }
-    
+
     // Dynamic Tool Scoping: Prune maintenance tools to save token overhead unless explicitly requested.
     const maintenanceTools = [
       "status",
@@ -751,7 +908,33 @@ function createMcpServer(
       readOnly: def.annotations?.readOnlyHint ?? false,
       inputSchema: def.inputSchema ?? {},
     });
-    server.registerTool(name, def, handler);
+
+    // Wrap the handler so we can record the trigger source for every tool
+    // call. Telemetry is best-effort: any error here is swallowed; the call
+    // proceeds to the real handler regardless.
+    //
+    // The SDK passes handlers as (args, extra) when an inputSchema is
+    // present, or (extra) when there isn't one. Detect by arity.
+    const wrappedHandler =
+      handler.length >= 2
+        ? async (args: any, extra: any) => {
+            try {
+              const trigger = extractTriggerFromMeta(extra);
+              recordToolTrigger(store, name, trigger);
+            } catch { /* never block on telemetry */ }
+            return handler(args, extra);
+          }
+        : async (extra: any) => {
+            try {
+              const trigger = extractTriggerFromMeta(extra);
+              recordToolTrigger(store, name, trigger);
+            } catch { /* never block on telemetry */ }
+            return handler(extra);
+          };
+
+    server.registerTool(name, def, wrappedHandler as any);
+    // Notify test hook after successful registration.
+    onRegister?.(name, def);
   };
 
   function resolveToolScope(args: any): { scope?: string; errorText?: string } {
@@ -892,31 +1075,25 @@ function createMcpServer(
     "query",
     {
       title: "Query",
-      description: `Search the knowledge base using a query document — one or more typed sub-queries combined for best recall.
+      description: `Call this first whenever the user asks a question, references their notes/docs/codebase, or you need context grounded in the user's local knowledge.
 
-## Query Types
+## When to use
+- User asks "what did I write about ...", "find ...", "show me ..."
+- User asks a factual question whose answer might live in their notes
+- You need background context before answering or editing
+- Skip: greetings, pure code-generation with no file reference, trivial yes/no
+
+## How to call
+One or more typed sub-queries combined for best recall.
 
 **lex** — BM25 keyword search. Fast, exact, no LLM needed.
-Full lex syntax:
 - \`term\` — prefix match ("perf" matches "performance")
 - \`"exact phrase"\` — phrase must appear verbatim
-- \`-term\` or \`-"phrase"\` — exclude documents containing this
+- \`-term\` or \`-"phrase"\` — exclude documents
 
-Good lex examples:
-- \`"connection pool" timeout -redis\`
-- \`"machine learning" -sports -athlete\`
-- \`handleError async typescript\`
+**vec** — Semantic vector search. Write a natural-language question.
 
-**vec** — Semantic vector search. Write a natural language question. Finds documents by meaning, not exact words.
-- \`how does the rate limiter handle burst traffic?\`
-- \`what is the tradeoff between consistency and availability?\`
-
-**hyde** — Hypothetical document. Write 50-100 words that look like the answer. Often the most powerful for nuanced topics.
-- \`The rate limiter uses a token bucket algorithm. When a client exceeds 100 req/min, subsequent requests return 429 until the window resets.\`
-
-## Strategy
-
-Combine types for best results. First sub-query gets 2× weight — put your strongest signal first.
+**hyde** — Hypothetical document. Write 50–100 words that look like the answer. Often the most powerful for nuanced topics.
 
 | Goal | Approach |
 |------|----------|
@@ -924,29 +1101,14 @@ Combine types for best results. First sub-query gets 2× weight — put your str
 | Concept search | \`vec\` only |
 | Best recall | \`lex\` + \`vec\` |
 | Complex/nuanced | \`lex\` + \`vec\` + \`hyde\` |
-| Unknown vocabulary | Use a standalone natural-language query (no typed lines) so the server can auto-expand it |
 
-## Examples
+Defaults to top 3 snippets (~600 tokens). Pull bodies with \`get\` for any snippet that looks relevant. First sub-query gets 2× weight — put your strongest signal first.
 
-Simple lookup:
-\`\`\`json
-[{ "type": "lex", "query": "CAP theorem" }]
-\`\`\`
-
-Best recall on a technical topic:
+Example:
 \`\`\`json
 [
-  { "type": "lex", "query": "\\"connection pool\\" timeout -redis" },
-  { "type": "vec", "query": "why do database connections time out under load" },
-  { "type": "hyde", "query": "Connection pool exhaustion occurs when all connections are in use and new requests must wait. This typically happens under high concurrency when queries run longer than expected." }
-]
-\`\`\`
-
-Intent-aware lex (C++ performance, not sports):
-\`\`\`json
-[
-  { "type": "lex", "query": "\\"C++ performance\\" optimization -sports -athlete" },
-  { "type": "vec", "query": "how to optimize C++ program performance" }
+  { "type": "lex", "query": "\\"connection pool\\" timeout" },
+  { "type": "vec", "query": "why do database connections time out under load" }
 ]
 \`\`\``,
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -954,7 +1116,7 @@ Intent-aware lex (C++ performance, not sports):
         searches: z.array(subSearchSchema).min(1).max(10).describe(
           "Typed sub-queries to execute (lex/vec/hyde). First gets 2x weight."
         ),
-        limit: z.number().max(200).optional().default(10).describe("Max results (default: 10, max: 200)"),
+        limit: z.number().max(200).optional().default(3).describe("Max results (default: 3 for tight triage, max: 200). Use `get` to expand a snippet rather than raising this."),
         minScore: z.number().optional().default(0).describe("Min relevance 0-1 (default: 0)"),
         candidateLimit: z.number().optional().describe(
           "Maximum candidates to rerank (default: 40, lower = faster but may miss results)"
@@ -981,8 +1143,8 @@ Intent-aware lex (C++ performance, not sports):
           "Retrieval routing profile: fast (lower latency), balanced (default), max_precision (higher recall/precision)."
         ),
         collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
-        maxSnippetLines: z.number().optional().describe(
-          "Maximum lines per result snippet. Truncates to the most relevant excerpt. Reduces token usage for agents with limited context windows."
+        maxSnippetLines: z.number().optional().default(4).describe(
+          "Maximum lines per result snippet (default: 4). Reduces token usage; use `get` to read the full body of a promising result."
         ),
         indexes: z.array(z.string()).optional().describe(
           "Named indexes to query (cross-index federation). Omit to use current index."
@@ -1226,7 +1388,9 @@ Intent-aware lex (C++ performance, not sports):
     "get",
     {
       title: "Get Document",
-      description: "Retrieve the full content of a document by its file path or docid. Use paths or docids (#abc123) from search results. Suggests similar files if not found.",
+      description: `Call after \`query\` to read the full body of a result that looked promising in a snippet. Also call when the user mentions a specific file path or docid.
+
+Use paths or docids (#abc123) from search results. Supports line offset via "file.md:100" or the \`fromLine\` param. Suggests similar files if not found.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         file: z.string().describe("File path or docid from search results (e.g., 'pages/meeting.md', '#abc123', or 'pages/meeting.md:100' to start at line 100)"),
@@ -1347,7 +1511,7 @@ Intent-aware lex (C++ performance, not sports):
     "multi_get",
     {
       title: "Multi-Get Documents",
-      description: "Retrieve multiple documents by glob pattern (e.g., 'journals/2025-05*.md') or comma-separated list. Skips files larger than maxBytes.",
+      description: `Call when you need multiple related docs at once — e.g., a glob like 'journals/2025-05*.md' or a comma-separated list of paths returned by a prior \`query\`. Skips files larger than maxBytes (default 10 KB).`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         pattern: z.string().describe("Glob pattern or comma-separated list of file paths"),
@@ -1466,7 +1630,7 @@ Intent-aware lex (C++ performance, not sports):
     "status",
     {
       title: "Index Status",
-      description: "Show the status of the KINDX index: collections, document counts, and health information.",
+      description: `Call once per session if \`instructions\` did not list collections — surfaces what's actually indexed, vector readiness, and scale metrics. Rarely needed mid-turn.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {},
     },
@@ -1579,7 +1743,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_put",
     {
       title: "Memory Put",
-      description: "Create or update a scoped memory record.",
+      description: "Call after the user states a preference, decision, or fact you'll need next session. Do not echo memory back; just persist with the smallest appropriate scope (session > workspace > global).",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1628,7 +1792,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_search",
     {
       title: "Memory Search",
-      description: "Search scoped memories using semantic or text mode.",
+      description: `Call at the start of any turn that says "we", "earlier", "you remember", "the project", or that resumes ongoing work. Searches workspace and session memory; returns ranked entries with their scope.`,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1662,7 +1826,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_history",
     {
       title: "Memory History",
-      description: "Show historical values for a key in one scope.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Show historical values for a key in one scope.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1690,7 +1854,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_stats",
     {
       title: "Memory Stats",
-      description: "Get memory statistics for a scope.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Get memory statistics for a scope.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1717,7 +1881,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_mark_accessed",
     {
       title: "Memory Mark Accessed",
-      description: "Increment accessed counter for a scoped memory id.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Increment accessed counter for a scoped memory id.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1751,7 +1915,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_delete",
     {
       title: "Memory Delete",
-      description: "Delete a memory record by its ID. Removes associated tags, embeddings, and links.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Delete a memory record by its ID. Removes associated tags, embeddings, and links.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -1798,7 +1962,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_bulk",
     {
       title: "Memory Bulk Operations",
-      description: "Batch execute multiple memory insertions and deletions efficiently. Highly recommended when summarizing blocks or migrating multiple related facts at once.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Batch execute multiple memory insertions and deletions efficiently. Highly recommended when summarizing blocks or migrating multiple related facts at once.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Fallback memory scope if not specified per item. Resolved as explicit > session > workspace > default."),
@@ -2037,14 +2201,17 @@ Intent-aware lex (C++ performance, not sports):
           };
         }
 
-        dstDb.exec(`ATTACH DATABASE '${srcDbPath}' AS src`);
+        dstDb.prepare(`ATTACH DATABASE ? AS src`).run(srcDbPath);
         dstDb.prepare(`INSERT OR IGNORE INTO main.content SELECT * FROM src.content WHERE collection = ?`).run(collection);
         dstDb.prepare(`INSERT OR IGNORE INTO main.documents SELECT * FROM src.documents WHERE collection = ?`).run(collection);
         dstDb.prepare(
           `INSERT OR IGNORE INTO main.content_vectors SELECT cv.* FROM src.content_vectors cv WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = cv.hash AND c.collection = ?)`
         ).run(collection);
         dstDb.prepare(
-          `INSERT OR IGNORE INTO main.documents_fts SELECT * FROM src.documents_fts WHERE docid IN (SELECT docid FROM src.documents WHERE collection = ?)`
+          `INSERT OR IGNORE INTO main.document_links SELECT dl.* FROM src.document_links dl WHERE EXISTS (SELECT 1 FROM src.content c WHERE c.hash = dl.hash AND c.collection = ?)`
+        ).run(collection);
+        dstDb.prepare(
+          `INSERT OR IGNORE INTO main.document_ingest SELECT di.* FROM src.document_ingest di WHERE EXISTS (SELECT 1 FROM src.documents d WHERE d.docid = di.docid AND d.collection = ?)`
         ).run(collection);
         dstDb.prepare(`DETACH DATABASE src`).run();
 
@@ -2071,7 +2238,7 @@ Intent-aware lex (C++ performance, not sports):
     "memory_feedback",
     {
       title: "Memory Feedback",
-      description: "Record satisfaction feedback on memory search results.",
+      description: "Diagnostic — only call when the user asks about memory itself, not in normal answer flow. Record satisfaction feedback on memory search results.",
       annotations: { readOnlyHint: false, openWorldHint: false },
       inputSchema: {
         scope: z.string().optional().describe("Memory scope. Resolved as explicit > session > workspace > default."),
@@ -2099,6 +2266,19 @@ Intent-aware lex (C++ performance, not sports):
         };
       }
 
+      // Validate result IDs exist in scope
+      const validIds = new Set(
+        (store.db.prepare(`SELECT id FROM memories WHERE scope = ?`).all(resolved.scope) as any[])
+          .map(r => r.id)
+      );
+      const invalidIds = results.map((r: any) => r.id).filter((id: number) => !validIds.has(id));
+      if (invalidIds.length > 0) {
+        return {
+          content: [{ type: "text", text: `Invalid result IDs: ${invalidIds.join(", ")}` }],
+          isError: true,
+        };
+      }
+
       const recorded = recordFeedback(store.db, resolved.scope, query, results, source);
       recordAudit(store.db, {
         action: "memory_feedback",
@@ -2112,6 +2292,209 @@ Intent-aware lex (C++ performance, not sports):
       };
     }
   );
+
+  // ---------------------------------------------------------------------------
+  // Tool: document_history
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "document_history",
+    {
+      title: "Document History",
+      description: "Show version history of a document with timestamps and hashes.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        file: z.string().describe("File path, docid, or virtual path (kindx://collection/path)"),
+        limit: z.number().int().positive().optional().describe("Max versions to return"),
+      },
+    },
+    async ({ file, limit }: any) => {
+      try {
+        const found = store.findDocument(file, { includeBody: false });
+        if ("error" in found) {
+          return {
+            content: [{ type: "text", text: `Document not found: ${file}` }],
+            isError: true,
+          };
+        }
+        const versions = getDocumentVersions(store.db, found.collectionName, found.filepath);
+        const limited = limit ? versions.slice(0, limit) : versions;
+        return {
+          content: [{ type: "text", text: JSON.stringify(limited, null, 2) }],
+          structuredContent: { versions: limited, total: versions.length },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `document_history_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: document_diff
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "document_diff",
+    {
+      title: "Document Diff",
+      description: "Show what changed between two versions of a document.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        file: z.string().describe("File path, docid, or virtual path"),
+        from: z.number().int().positive().optional().describe("From version number (1-based, default: 2 = previous)"),
+        to: z.number().int().positive().optional().describe("To version number (1-based, default: 1 = current)"),
+      },
+    },
+    async ({ file, from, to }: any) => {
+      try {
+        const found = store.findDocument(file, { includeBody: false });
+        if ("error" in found) {
+          return {
+            content: [{ type: "text", text: `Document not found: ${file}` }],
+            isError: true,
+          };
+        }
+        const versions = getDocumentVersions(store.db, found.collectionName, found.filepath);
+        if (versions.length < 2) {
+          return {
+            content: [{ type: "text", text: "Document has fewer than 2 versions, cannot diff." }],
+            isError: true,
+          };
+        }
+        const fromIdx = (from ? from - 1 : 1);
+        const toIdx = (to ? to - 1 : 0);
+        if (fromIdx < 0 || fromIdx >= versions.length || toIdx < 0 || toIdx >= versions.length) {
+          return {
+            content: [{ type: "text", text: `Invalid version numbers. Document has ${versions.length} versions (1-based).` }],
+            isError: true,
+          };
+        }
+        const fromVer = versions[fromIdx];
+        const toVer = versions[toIdx];
+        const fromBody = store.db.prepare(`SELECT content FROM content WHERE hash = ?`).get(fromVer.hash) as any;
+        const toBody = store.db.prepare(`SELECT content FROM content WHERE hash = ?`).get(toVer.hash) as any;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              from: { version: fromIdx + 1, hash: fromVer.hash, createdAt: fromVer.createdAt },
+              to: { version: toIdx + 1, hash: toVer.hash, createdAt: toVer.createdAt },
+              fromContent: fromBody?.content || null,
+              toContent: toBody?.content || null,
+            }, null, 2)
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `document_diff_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tool: audit_log
+  // ---------------------------------------------------------------------------
+  maybeRegisterTool(
+    "audit_log",
+    {
+      title: "Audit Log",
+      description: "Query the audit log for security and operations events.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        action: z.string().optional().describe("Filter by action type (e.g. query, auth_failure, tool_denied)"),
+        since: z.string().optional().describe("ISO timestamp start (e.g. 2026-01-01T00:00:00Z)"),
+        until: z.string().optional().describe("ISO timestamp end"),
+        limit: z.number().int().positive().optional().describe("Max entries (default 100, max 1000)"),
+      },
+    },
+    async ({ action, since, until, limit }: any) => {
+      try {
+        const entries = queryAuditLog(store.db, {
+          action,
+          since,
+          until,
+          limit: limit || 100,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+          structuredContent: { entries, count: entries.length },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `audit_log_failed: ${error instanceof Error ? error.message : error}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // Tools: arch_* (Architecture integration)
+  // ---------------------------------------------------------------------------
+
+  const archConfig = getArchConfig();
+  if (archConfig.enabled) {
+    maybeRegisterTool(
+      "arch_status",
+      {
+        title: "Arch Status",
+        description: "Show Arch integration status and metadata. Returns configuration, repository check, and last build manifest.",
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        inputSchema: {
+          path: z.string().optional().describe("Source root path (defaults to current directory)"),
+        },
+      },
+      async ({ path }: any) => {
+        try {
+          const sourceRoot = path || process.cwd();
+          const status = getArchStatus(archConfig, sourceRoot);
+          return {
+            content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+            structuredContent: status,
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `arch_status_failed: ${error instanceof Error ? error.message : error}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    maybeRegisterTool(
+      "arch_query",
+      {
+        title: "Arch Query",
+        description: "Query architecture hints for a given search. Runs the Arch pipeline if needed and returns relevant architectural insights.",
+        annotations: { readOnlyHint: true, openWorldHint: false },
+        inputSchema: {
+          query: z.string().describe("Search query to find relevant architecture hints"),
+          path: z.string().optional().describe("Source root path (defaults to current directory)"),
+          maxHints: z.number().optional().describe("Maximum number of hints to return (default: 3)"),
+        },
+      },
+      async ({ query, path, maxHints }: any) => {
+        try {
+          const sourceRoot = path || process.cwd();
+          const effectiveMaxHints = maxHints || archConfig.maxHints;
+          const result = await buildAndDistillArch(sourceRoot, archConfig);
+          const hints = selectArchHints(query, result.artifact.hintsPath, effectiveMaxHints);
+          return {
+            content: [{ type: "text", text: JSON.stringify({ query, hints, artifact: { nodeCount: result.artifact.nodeCount, edgeCount: result.artifact.edgeCount, communityCount: result.artifact.communityCount } }, null, 2) }],
+            structuredContent: { query, hints, artifact: { nodeCount: result.artifact.nodeCount, edgeCount: result.artifact.edgeCount, communityCount: result.artifact.communityCount } },
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `arch_query_failed: ${error instanceof Error ? error.message : error}` }],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
 
   return server;
 }
@@ -2657,38 +3040,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     return Number.isFinite(raw) && raw > 0 ? raw : 16 * 1024 * 1024;
   })();
 
-  class BodyTooLargeError extends Error {
-    readonly limitBytes: number;
-    constructor(limitBytes: number) {
-      super(`request body exceeds ${limitBytes} bytes`);
-      this.name = "BodyTooLargeError";
-      this.limitBytes = limitBytes;
-    }
-  }
-
   function parseTimeout(raw: string | undefined, fallbackMs: number): number {
     const v = parseInt(raw || "", 10);
     return Number.isFinite(v) && v >= 0 ? v : fallbackMs;
-  }
-
-  async function collectBody(req: IncomingMessage): Promise<string> {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for await (const chunk of req) {
-      const buf = chunk as Buffer;
-      total += buf.length;
-      if (total > HTTP_MAX_BODY_BYTES) {
-        // Stop reading further chunks but do NOT destroy the socket here —
-        // the outer catch needs to write a 413 response. Pause the stream so
-        // the rest of the body is back-pressured rather than buffered. The
-        // catch handler will write the 413 + Connection: close header and
-        // end the response, after which the kernel closes the socket.
-        try { req.pause(); } catch { /* noop */ }
-        throw new BodyTooLargeError(HTTP_MAX_BODY_BYTES);
-      }
-      chunks.push(buf);
-    }
-    return Buffer.concat(chunks).toString();
   }
 
   function accountAndWorkspace(headers: Record<string, string>, scope?: MemoryScopeContext): {
@@ -2875,7 +3229,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       let requestIdentity: import("./rbac.js").ResolvedIdentity | null = null;
       {
         const authHeader = nodeReq.headers["authorization"];
-        const bearerToken = authHeader?.replace(/^Bearer\s+/i, "").trim() || null;
+        const bearerToken = parseBearer(authHeader ?? null);
         const { isMultiTenantEnabled, resolveTokenToIdentity } = await import("./rbac.js");
 
         if (isMultiTenantEnabled()) {
@@ -2946,7 +3300,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       // REST endpoint: POST /query (alias: /search) — structured search without MCP protocol
       if ((pathname === "/query" || pathname === "/search") && nodeReq.method === "POST") {
         await withConcurrencyPolicy(requestIdentity, async () => {
-          const rawBody = await collectBody(nodeReq);
+          const rawBody = await collectBody(nodeReq, HTTP_MAX_BODY_BYTES);
           const params = JSON.parse(rawBody);
 
         // RBAC: enforce query permission
@@ -3005,7 +3359,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         const dedupeKey = stableHash({
           searches: subSearches,
           collections: effectiveCollections,
-          limit: params.limit ?? 10,
+          limit: params.limit ?? 3,
           minScore: params.minScore ?? 0,
           candidateLimit: params.candidateLimit,
           maxRerankCandidates: params.maxRerankCandidates,
@@ -3024,7 +3378,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
             effectiveCollections,
             sessionKey,
             {
-              limit: params.limit ?? 10,
+              limit: params.limit ?? 3,
               minScore: params.minScore ?? 0,
               candidateLimit: params.candidateLimit,
               maxRerankCandidates: params.maxRerankCandidates,
@@ -3084,7 +3438,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
       // -----------------------------------------------------------------------
       if (pathname === "/query/stream" && nodeReq.method === "POST") {
         await withConcurrencyPolicy(requestIdentity, async () => {
-          const rawBody = await collectBody(nodeReq);
+          const rawBody = await collectBody(nodeReq, HTTP_MAX_BODY_BYTES);
           const params = JSON.parse(rawBody);
 
           // RBAC: enforce query permission
@@ -3153,7 +3507,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
               () => raceWithTimeout(
                 (signal) => structuredSearchWithDiagnostics(store, subSearches, {
                   collections: effectiveCollections.length > 0 ? effectiveCollections : undefined,
-                  limit: params.limit ?? 10,
+                  limit: params.limit ?? 3,
                   minScore: params.minScore ?? 0,
                   candidateLimit: profilePolicy.candidateLimit,
                   maxRerankCandidates: params.maxRerankCandidates,
@@ -3268,7 +3622,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
           return;
         }
 
-        const rawBody = await collectBody(nodeReq);
+        const rawBody = await collectBody(nodeReq, HTTP_MAX_BODY_BYTES);
         const body = JSON.parse(rawBody);
         const label = describeRequest(body);
         const url = `http://localhost:${port}${pathname}`;
@@ -3357,7 +3711,9 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
 
         if (body?.method === "tools/call") {
           const toolName = typeof body?.params?.name === "string" ? body.params.name : "";
-          if (!toolName || !isToolEnabledByPolicy(mcpControl, toolName)) {
+          if (!toolName || !isToolEnabledByPolicy(mcpControl, toolName, {
+            audit: (entry) => { try { recordAudit(store.db, { ...entry, action: entry.action as any }); } catch {} }
+          })) {
             nodeRes.writeHead(403, { "Content-Type": "application/json" });
             nodeRes.end(JSON.stringify({
               jsonrpc: "2.0",
@@ -3632,7 +3988,7 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
         }
 
         const url = `http://localhost:${port}${pathname}`;
-        const rawBody = nodeReq.method !== "GET" && nodeReq.method !== "HEAD" ? await collectBody(nodeReq) : undefined;
+        const rawBody = nodeReq.method !== "GET" && nodeReq.method !== "HEAD" ? await collectBody(nodeReq, HTTP_MAX_BODY_BYTES) : undefined;
         const request = new Request(url, { method: nodeReq.method || "GET", headers, ...(rawBody ? { body: rawBody } : {}) });
         const response = await requestScopeContext.run(
           existingSession.context,
@@ -3732,6 +4088,21 @@ export async function startMcpHttpServer(port: number, options?: { quiet?: boole
     });
     // Start idle session reaper for HTTP transport
     SessionRegistry.startReaper();
+    // Warn if running in zero-auth mode
+    if (!process.env.KINDX_MCP_TOKEN && !process.env.KINDX_TENANTS_CONFIG) {
+      process.stderr.write(
+        '[KINDX] WARNING: No KINDX_MCP_TOKEN or tenants.yml configured. ' +
+        'Running in zero-auth mode (loopback only). ' +
+        'Set KINDX_MCP_TOKEN for production deployments.\n'
+      );
+    }
+    // Purge old audit log entries on startup
+    try {
+      const purged = purgeOldAuditEntries(store.db);
+      if (purged > 0) {
+        process.stderr.write(`[KINDX] Purged ${purged} old audit entries\n`);
+      }
+    } catch { /* audit purge must never fail startup */ }
   } catch (err) {
     emitStartupEvent("mcp_startup_failure", {
       phase: "binding",

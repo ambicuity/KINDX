@@ -549,12 +549,15 @@ export function extractSnippet(body: string, query: string, maxLen = 500, chunkP
   const linesAfter = totalLines - (absoluteStart + snippetLineCount - 1);
 
   // Format with diff-style header: @@ -start,count @@ (linesBefore before, linesAfter after)
+  // Kept for JSON/CSV/MD/XML callers that already include this in their payload.
   const header = `@@ -${absoluteStart},${snippetLineCount} @@ (${linesBefore} before, ${linesAfter} after)`;
   const snippet = `${header}\n${snippetText}`;
 
   return {
     line: lineOffset + bestLine + 1,
     snippet,
+    body: snippetText,
+    bodyStartLine: absoluteStart,
     linesBefore,
     linesAfter,
     snippetLines: snippetLineCount,

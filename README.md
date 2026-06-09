@@ -308,16 +308,46 @@ npm run kindx -- multi-get "docs/**/*.md"
 
 ## CLI Commands
 
-Run `kindx --help` or `npm run kindx -- --help` for the full command reference.
+Run `kindx --help` for grouped overview; `kindx <command> --help` for per-command details.
 
-Common commands:
+Quickstart:
+
+```bash
+kindx init ~/notes               # register + index + embed in one shot (interactive)
+kindx search "query"             # full-text BM25 search
+kindx query "how does auth work" # hybrid search with reranking
+kindx tui                         # interactive search UI
+kindx status --format json        # machine-readable health snapshot
+```
+
+### Output formats
+
+Every command takes a `--format` flag with one of:
+
+| Format | Description |
+| --- | --- |
+| `pretty` (default on TTY) | Colored terminal output. |
+| `cards` | Search-only: stacked result cards with snippet and metadata. |
+| `table` | Search-only: one row per result. |
+| `lines` | Search-only: fzf-style one line per hit. |
+| `plain` | ANSI-stripped text (default off-TTY). |
+| `json` | Structured JSON; see [`docs/json-schemas.md`](docs/json-schemas.md). |
+| `csv` / `md` / `xml` / `files` | Legacy formats for scripts. |
+
+Legacy boolean flags (`--json`, `--csv`, `--md`, `--xml`, `--files`) still work; on conflict `--format` wins.
+
+Useful global flags: `--no-color`, `--color`, `--verbose`, `--quiet`, `--debug`, `--trace`, `--dry-run`, `--yes`, `--limit <n>`, `-c <collection>`, `--profile <name>`, `--timeout <ms>`.
+
+### Common commands
 
 | Command | Description |
 | --- | --- |
+| `kindx init [path]` | Guided setup (collection → index → embed). Refuses to prompt in CI. |
 | `kindx query <query>` | Hybrid search with expansion and reranking. |
 | `kindx query $'lex: ...\nvec: ...'` | Structured query document with typed subqueries. |
 | `kindx search <query>` | BM25/FTS full-text search. |
 | `kindx vsearch <query>` | Vector similarity search. |
+| `kindx tui` | Interactive search UI (requires a real TTY). |
 | `kindx get <file>[:line]` | Retrieve one document by path or docid. |
 | `kindx multi-get <pattern>` | Retrieve multiple documents by glob or comma-separated list. |
 | `kindx collection add <path> [--name <name>] [--mask <glob>]` | Register a collection. |
@@ -327,17 +357,22 @@ Common commands:
 | `kindx update [--pull]` | Re-index configured collections. |
 | `kindx embed [-f] [--resume]` | Generate or refresh vector embeddings. |
 | `kindx watch [collections...]` | Run the incremental indexing daemon. |
-| `kindx status` | Show index and collection health. |
+| `kindx status [--format json]` | Show index and collection health. |
 | `kindx pull [--refresh]` | Download or check default local GGUF models. |
 | `kindx cleanup` | Clear caches and vacuum the database. |
-| `kindx doctor` | Run deterministic health diagnostics. |
+| `kindx doctor [--format json]` | Run deterministic health diagnostics. |
 | `kindx repair --check-only` | Dry-run integrity and repair checks. |
 | `kindx backup <create\|verify\|restore> [path]` | Manage SQLite backups. |
-| `kindx scheduler status` | Show shard sync checkpoint and queue status. |
-| `kindx verify-wipe` | Scan for residual local index artifacts. |
+| `kindx scheduler status [--format json]` | Show shard sync checkpoint and queue status. |
+| `kindx verify-wipe [--format json]` | Scan for residual local index artifacts. |
 | `kindx memory <subcommand>` | Manage scoped agent memories. |
+| `kindx mcp [--http] [--daemon] [--port N]` | Run MCP server (stdio default). |
+| `kindx mcp status [--format json]` | Show transport, endpoints, daemon PID, masked token. |
+| `kindx mcp stop` | Stop the MCP HTTP daemon. |
 | `kindx migrate chroma <path>` | Migrate a ChromaDB SQLite file. |
 | `kindx migrate openclaw <path>` | Migrate an OpenClaw repository to use KINDX. |
+
+See [`docs/cli.md`](docs/cli.md) for the full reference, [`docs/tui.md`](docs/tui.md) for the TUI, [`docs/json-schemas.md`](docs/json-schemas.md) for stable JSON contracts, and [`docs/troubleshooting.md`](docs/troubleshooting.md) for error messages and recovery.
 
 ## Build
 
@@ -382,6 +417,7 @@ Index data is stored in SQLite. By default, the database path is under `~/.cache
 | `KINDX_MAX_CONCURRENCY_PER_TENANT` | No | Maximum concurrent HTTP requests per tenant. Default: `10`. |
 | `KINDX_RATE_LIMIT_BURST` | No | Per-tenant rate-limit burst size. Default: `100`. |
 | `KINDX_RATE_LIMIT_MS` | No | Rate-limit window in milliseconds. Default: `1000`. |
+| `KINDX_AUTO_INVOKE` | No | Auto-invocation contract delivered in MCP `initialize.instructions`. Default: on. Set to `off` (or `0` / `false`) to suppress the contract block. |
 | `KINDX_SQLITE_DRIVER` | No | Forces a SQLite driver module. By default KINDX tries `better-sqlite3-multiple-ciphers`, then `better-sqlite3`. |
 | `KINDX_ENCRYPTION_KEY` | No | Enables keyed SQLCipher runtime support when using a compatible SQLite driver. |
 | `KINDX_LLM_BACKEND` | No | Set to `remote` to use the OpenAI-compatible backend; otherwise local `node-llama-cpp` is used. |
@@ -487,6 +523,37 @@ The server registers these core tools:
 Additional maintenance tools are registered only when `KINDX_ENABLE_MAINTENANCE_TOOLS` is set: `status`, `memory_history`, `memory_stats`, `memory_mark_accessed`, `memory_delete`, and `memory_bulk`.
 
 The TypeScript client exposes helpers for `/query`, `get`, `multi_get`, `status`, `memory_put`, `memory_search`, `memory_history`, and `memory_mark_accessed`.
+
+## YAML Configuration
+
+By default, collection settings are stored in `~/.config/kindx/index.yml`. The config directory is resolved as `KINDX_CONFIG_DIR` (if set), then `XDG_CONFIG_HOME/kindx` (if set), then `~/.config/kindx`. Named indexes use `~/.config/kindx/{indexName}.yml` (default: `index.yml`). You can edit this file directly to configure `ignore` patterns and glob rules for files that should be skipped during indexing and search.
+
+### Example
+
+```yaml
+collections:
+  docs:
+    path: ~/work/docs
+    pattern: "**/*.md"
+    ignore:
+      - "archive/**"
+      - "sessions/**"
+      - "**/*.draft.md"
+```
+
+### How it works
+
+- `pattern` defines which files are included
+- `ignore` excludes matching files and directories
+- A file must match `pattern` **and not match any `ignore` rule** to be indexed
+- Ignored files are skipped during indexing and will not appear in search results
+
+### Notes
+
+- `ignore` is configured in YAML (no CLI support currently)
+- Patterns are evaluated relative to the collection `path`.
+- By default, `node_modules`, `.git`, `.cache`, `vendor`, `dist`, and `build` are already ignored; `ignore` adds custom exclusions.
+- After editing `index.yml`, run `kindx update` to re-index with the updated rules.
 
 ## Docker
 

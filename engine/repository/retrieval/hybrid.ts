@@ -21,6 +21,7 @@ import {
   type RerankDropPolicy,
   getCollectionRerankSettings,
 } from "../rerank-queue.js";
+import type { SelectedArchHint } from "../../integrations/arch/augment.js";
 // Store type still lives in engine/repository.ts. Type-only import avoids any
 // runtime cycle. Constants (DEFAULT_EMBED_MODEL, RERANK_CANDIDATE_LIMIT,
 // STRONG_SIGNAL_*) are imported back lazily — Node ESM resolves them on first
@@ -33,7 +34,7 @@ import {
   STRONG_SIGNAL_MIN_GAP,
 } from "../../repository.js";
 
-function detectContentType(body: string, filepath: string): 'text' | 'image' | 'csv' | 'json' {
+export function detectContentType(body: string, filepath: string): 'text' | 'image' | 'csv' | 'json' {
   const ext = filepath.split('.').pop()?.toLowerCase() || '';
 
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'tif'].includes(ext)) {
@@ -48,7 +49,7 @@ function detectContentType(body: string, filepath: string): 'text' | 'image' | '
   return 'text';
 }
 
-function extractSchemaFromBody(body: string): Record<string, string> | undefined {
+export function extractSchemaFromBody(body: string): Record<string, string> | undefined {
   const schemaMatch = body.match(/Schema:\s*([^\n]+)/);
   if (!schemaMatch) return undefined;
 
@@ -122,6 +123,7 @@ export interface StructuredSearchDiagnostics {
     state: "ready" | "stale" | "missing" | "degraded" | "n/a";
   };
   staleFiles: string[];
+  archHints?: SelectedArchHint[];
   throughput: {
     queue: {
       depth: number;

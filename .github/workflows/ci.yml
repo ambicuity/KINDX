@@ -38,11 +38,15 @@ permissions: read-all
 
 jobs:
   node:
-    name: Node 22 Build, Test, and Pack
+    name: Node ${{ matrix.node-version }} Build, Test, and Pack
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20', '22']
 
     steps:
       - name: Checkout repository
@@ -51,7 +55,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node-version }}
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
@@ -67,10 +71,35 @@ jobs:
       - name: Build SDK packages
         run: npm run build:packages
 
-      - name: Run unit and integration tests
-        run: npm test
+      # Coverage thresholds are enforced on Node 22 only: V8 coverage
+      # instrumentation differs across Node versions and reports ~5% lower
+      # numbers on Node 20 for an identical test run.
+      - name: Run unit and integration tests with coverage and JUnit
+        if: matrix.node-version == '22'
+        run: npm run test:ci
         env:
           CI: 'true'
+
+      - name: Run unit and integration tests with JUnit (no coverage)
+        if: matrix.node-version != '22'
+        run: npx vitest run --reporter=verbose --reporter=junit --outputFile.junit=test-results/junit.xml specs/
+        env:
+          CI: 'true'
+
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == '22'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-node-${{ matrix.node-version }}
+          path: test-results/
 
       - name: Run SDK package tests
         run: npm run test:packages
@@ -78,15 +107,59 @@ jobs:
           CI: 'true'
 
       - name: Set up Python
+        if: matrix.node-version == '22'
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Run kindx-langchain tests
+        if: matrix.node-version == '22'
         run: python -m unittest discover -s python/kindx-langchain/tests -v
 
       - name: Verify publishable package contents
         run: npm pack --dry-run
+
+  benchmarks:
+    name: Enforced Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: node
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Run enforced benchmarks
+        run: npm run bench:all
+        env:
+          CI: 'true'
+
+  docker-smoke:
+    name: Docker Image Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: node
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t kindx-smoke .
+      - name: Smoke test - version check
+        run: docker run --rm kindx-smoke node dist/kindx.js --version
+      - name: Smoke test - help output
+        run: docker run --rm kindx-smoke node dist/kindx.js --help
 
   sqlcipher-smoke:
     name: SQLCipher Runtime Smoke

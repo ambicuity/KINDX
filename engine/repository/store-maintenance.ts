@@ -48,11 +48,34 @@ export function walCheckpointTruncate(db: Database): boolean {
   }
 }
 
-export function cleanupSqliteSidecars(dbPath: string): {
+/**
+ * Removes the SQLite -wal / -shm sidecars for a database file.
+ *
+ * Safety: SQLite explicitly forbids deleting these while a connection is
+ * open against the same database, because they encode the WAL frame state
+ * other readers/writers depend on. Callers must close every handle pointing
+ * at `dbPath` before invoking this.
+ *
+ * The caller MAY pass an `openDb` reference; if so we check `inTransaction`
+ * and `open` properties and refuse to proceed when the handle is still
+ * active. This catches the most common misuse — calling cleanup as part of
+ * a "reset" flow without closing first — and downgrades it to a no-op with
+ * a warning instead of corruption.
+ */
+export function cleanupSqliteSidecars(
+  dbPath: string,
+  opts?: { openDb?: { readonly open?: boolean; readonly inTransaction?: boolean } },
+): {
   walRemoved: boolean;
   shmRemoved: boolean;
   lockedFiles: string[];
 } {
+  if (opts?.openDb && opts.openDb.open === true) {
+    process.stderr.write(
+      `[KINDX] ⚠ cleanupSqliteSidecars refused: db handle for ${dbPath} is still open. Close it before removing sidecars.\n`
+    );
+    return { walRemoved: false, shmRemoved: false, lockedFiles: [`${dbPath}-wal`, `${dbPath}-shm`] };
+  }
   const lockedFiles: string[] = [];
   const walPath = `${dbPath}-wal`;
   const shmPath = `${dbPath}-shm`;

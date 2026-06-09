@@ -138,6 +138,15 @@ import {
   syncCollectionShardsFromMainDb,
 } from "./sharding.js";
 import { recordDirectUsage, flushAiUsageQueue } from "./ai-usage.js";
+import { getArchConfig, getArchStatus, buildAndDistillArch } from "./integrations/arch/adapter.js";
+import { KindxError, toKindxError, errorEnvelope } from "./cli/errors.js";
+import { jsonEnvelopeEnabled, resolveOutputMode, glyphsFor, paletteFor } from "./cli/output.js";
+import { renderSearchResults } from "./cli/renderers/search.js";
+import { createProgressReporter, type ProgressReporter } from "./cli/progress.js";
+import { renderMcpStatus, redactedMcpStatus, type McpStatusData } from "./cli/renderers/mcp-status.js";
+import { renderMemorySearch, renderMemoryEntry } from "./cli/renderers/memory.js";
+import { renderRootHelp, renderCommandHelp, renderSubcommandList, renderSubcommandHelp } from "./cli/help.js";
+import { suggestCommandNames } from "./cli/registry.js";
 
 // Enable production mode - allows using default database path
 // Tests must set INDEX_PATH or use createStore() with explicit path
@@ -212,26 +221,63 @@ import {
 } from "./utils/ui.js";
 
 const isTTY = process.stderr.isTTY;
-const useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+// Module-level default. The actual `useColor` value is *recomputed* inside
+// main() after parseCLI() so the parsed --color / --no-color flags take
+// precedence (today they are ignored when stdout isn't a TTY). Keep a sane
+// default for code paths that touch `useColor` before main() runs — e.g.
+// the top-level error handler installed at module load.
+let useColor = !process.env.NO_COLOR && process.stdout.isTTY;
+
+// Lazy module-level progress reporter. Built from resolveOutputMode() on first
+// access so its paint mode reflects the actual CLI invocation (TTY, --quiet,
+// --format=json, etc.). Tests can override it via setProgressReporter().
+let _reporter: ProgressReporter | null = null;
+let _reporterFormatHint: string | undefined;
+function getReporter(): ProgressReporter {
+  if (_reporter) return _reporter;
+  const resolved = resolveOutputMode({ format: _reporterFormatHint, quiet: _reporterQuietHint });
+  _reporter = createProgressReporter({
+    mode: resolved.progress,
+    color: resolved.color,
+    glyphs: glyphsFor(),
+  });
+  return _reporter;
+}
+/** Inform the lazy reporter of the active --format before first use. */
+export function setReporterFormatHint(format: string | undefined, opts: { quiet?: boolean } = {}): void {
+  _reporterFormatHint = format;
+  _reporterQuietHint = !!opts.quiet;
+  _reporter = null; // force rebuild on next access
+}
+let _reporterQuietHint = false;
+export function setProgressReporter(reporter: ProgressReporter | null): void {
+  if (_reporter && _reporter !== reporter) _reporter.done();
+  _reporter = reporter;
+}
 
 
 // Check index health and print warnings/tips
 function checkIndexHealth(db: Database): void {
   const { needsEmbedding, totalDocs, daysStale } = getIndexHealth(db);
+  const reporter = getReporter();
 
   // Warn if many docs need embedding
   if (needsEmbedding > 0) {
     const pct = Math.round((needsEmbedding / totalDocs) * 100);
-    if (pct >= 10) {
-      process.stderr.write(`${c.yellow}Warning: ${needsEmbedding} documents (${pct}%) need embeddings. Run 'kindx embed' for better results.${c.reset}\n`);
-    } else {
-      process.stderr.write(`${c.dim}Tip: ${needsEmbedding} documents need embeddings. Run 'kindx embed' to index them.${c.reset}\n`);
-    }
+    reporter.warn(
+      "missing-embeddings",
+      `${needsEmbedding} documents (${pct}%) need embeddings. Run 'kindx embed' for better results.`,
+      { count: needsEmbedding, totalDocs, pct },
+    );
   }
 
   // Check if most recent document update is older than 2 weeks
   if (daysStale !== null && daysStale >= 14) {
-    process.stderr.write(`${c.dim}Tip: Index last updated ${daysStale} days ago. Run 'kindx update' to refresh.${c.reset}\n`);
+    reporter.warn(
+      "stale-index",
+      `Index last updated ${daysStale} days ago. Run 'kindx update' to refresh.`,
+      { daysStale },
+    );
   }
 }
 
@@ -1855,10 +1901,17 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
 async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean = false, resume: boolean = false): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
+  const reporter = getReporter();
+  const palette = paletteFor(useColor);
+  // Decide once whether this invocation wants visual chrome (spinners, progress
+  // bar, banner lines) or just structured/silent stderr.
+  const visualUi = _reporterFormatHint !== "json" && _reporterFormatHint !== "csv" &&
+                   _reporterFormatHint !== "md"   && _reporterFormatHint !== "xml"   &&
+                   _reporterFormatHint !== "files" && !_reporterQuietHint;
 
   // If force, clear all vectors
   if (force) {
-    console.log(`${c.yellow}Force re-indexing: clearing all vectors...${c.reset}`);
+    reporter.warn("force-reindex", "Force re-indexing: clearing all vectors");
     clearAllEmbeddings(db);
   }
 
@@ -1866,7 +1919,8 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   const hashesToEmbed = getHashesForEmbedding(db);
 
   if (hashesToEmbed.length === 0) {
-    console.log(`${c.green}✓ All content hashes already have embeddings.${c.reset}`);
+    if (visualUi) console.log(`${palette.green("✓")} All content hashes already have embeddings.`);
+    reporter.done();
     closeDb();
     return;
   }
@@ -1877,7 +1931,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   let multiChunkDocs = 0;
 
   // Chunk all documents using actual token counts
-  process.stderr.write(`Chunking ${hashesToEmbed.length} documents by token count...\n`);
+  reporter.start("chunk", `Chunking ${hashesToEmbed.length} documents by token count`);
   for (const item of hashesToEmbed) {
     const encoder = new TextEncoder();
     const bodyBytes = encoder.encode(item.body).length;
@@ -1904,7 +1958,9 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   }
 
   if (allChunks.length === 0) {
-    console.log(`${c.green}✓ No non-empty documents to embed.${c.reset}`);
+    reporter.end("chunk");
+    if (visualUi) console.log(`${palette.green("✓")} No non-empty documents to embed.`);
+    reporter.done();
     closeDb();
     return;
   }
@@ -1913,33 +1969,45 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
   const totalChunks = allChunks.length;
   const totalDocs = hashesToEmbed.length;
 
-  console.log(`${c.bold}Embedding ${totalDocs} documents${c.reset} ${c.dim}(${totalChunks} chunks, ${formatBytes(totalBytes)})${c.reset}`);
-  if (multiChunkDocs > 0) {
-    console.log(`${c.dim}${multiChunkDocs} documents split into multiple chunks${c.reset}`);
-  }
-  console.log(`${c.dim}Model: ${model}${c.reset}\n`);
+  reporter.end("chunk", { detail: { docs: totalDocs, chunks: totalChunks, bytes: totalBytes, multiChunkDocs } });
 
-  // Hide cursor during embedding
-  cursor.hide();
+  if (visualUi) {
+    console.log(`${palette.bold(`Embedding ${totalDocs} documents`)} ${palette.dim(`(${totalChunks} chunks, ${formatBytes(totalBytes)})`)}`);
+    if (multiChunkDocs > 0) {
+      console.log(palette.dim(`${multiChunkDocs} documents split into multiple chunks`));
+    }
+    console.log(palette.dim(`Model: ${model}`) + "\n");
+    // Hide cursor during embedding for the in-place progress bar.
+    cursor.hide();
+  }
 
   // Wrap all LLM embedding operations in a session for lifecycle management
   // Use 30 minute timeout for large collections
   await withLLMSession(async (session) => {
     // Get embedding dimensions from first chunk
     progress.indeterminate();
-    const initSpinner = spinner("Loading embedding model and connecting to GPU/CPU...").start();
+    reporter.start("model-load", "Loading embedding model and connecting to GPU/CPU");
+    const initSpinner = visualUi ? spinner("Loading embedding model and connecting to GPU/CPU...").start() : null;
     const firstChunk = allChunks[0];
     if (!firstChunk) {
-      initSpinner.fail("No chunks available");
+      initSpinner?.fail("No chunks available");
+      reporter.error("model-load", "No chunks available");
       throw new Error("No chunks available to embed");
     }
     const firstText = formatDocForEmbedding(firstChunk.text, firstChunk.title);
     const firstResult = await session.embed(firstText);
     if (!firstResult) {
-      initSpinner.fail("Model loading failed");
+      initSpinner?.fail("Model loading failed");
+      reporter.error("model-load", `Model loading failed: ${model}`);
       throw new Error(`Failed to embed first chunk. The embedding model may not be available or failed to load.\n  Model: ${model}\n  Check the model exists and you have network access for the initial download.`);
     }
-    initSpinner.succeed("Model loaded successfully");
+    initSpinner?.succeed("Model loaded successfully");
+    reporter.end("model-load");
+    // The embed loop renders its own progress bar via renderProgressBar()
+    // each batch (see below, ~line 2140). Pass bar: true so the reporter
+    // records the phase but does not animate a competing spinner that
+    // would overwrite the bar 12× per second.
+    reporter.start("embed", `Embedding ${totalDocs} documents (${totalChunks} chunks)`, { bar: true });
     ensureVecTable(db, firstResult.embedding.length);
 
     let chunksEmbedded = 0, errors = 0, bytesProcessed = 0;
@@ -1998,7 +2066,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
             }
           } else {
             errors++;
-            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}${c.reset}`);
+            reporter.warn("embed-failed", `Error embedding "${chunk.displayName}" chunk ${chunk.seq}`, { hash: chunk.hash, seq: chunk.seq });
           }
           bytesProcessed += chunk.bytes;
         }
@@ -2049,7 +2117,7 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
             }
           } catch (innerErr) {
             errors++;
-            console.error(`\n${c.yellow}⚠ Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}${c.reset}`);
+            reporter.warn("embed-failed", `Error embedding "${chunk.displayName}" chunk ${chunk.seq}: ${innerErr}`, { hash: chunk.hash, seq: chunk.seq });
           }
           bytesProcessed += chunk.bytes;
         }
@@ -2064,60 +2132,68 @@ async function vectorIndex(model: string = DEFAULT_EMBED_MODEL, force: boolean =
       const etaSec = remainingBytes / bytesPerSec;
 
       const throughput = `${formatBytes(bytesPerSec)}/s`;
-      const errStr = errors > 0 ? ` ${c.red}${errors} err${c.reset}` : "";
-      const suffix = `${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}${errStr} ${c.dim}${throughput}${c.reset}`;
-      
+      const errStr = errors > 0 ? ` ${palette.red(`${errors} err`)}` : "";
+      const suffix = `${palette.dim(`${chunksEmbedded}/${totalChunks}`)}${errStr} ${palette.dim(throughput)}`;
+
       const bar = renderProgressBar(percent, 40, {
         etaSeconds: elapsed > 2 ? etaSec : undefined,
         suffix: suffix
       });
 
-      if (isTTY) {
+      if (visualUi && isTTY) {
         cursor.clearLine();
         process.stderr.write(`${bar}`);
       }
     }
 
     progress.clear();
-    cursor.show();
+    if (visualUi) cursor.show();
     const totalTimeSec = (Date.now() - startTime) / 1000;
     const avgThroughput = formatBytes(totalBytes / totalTimeSec);
 
-    if (isTTY) {
-      cursor.clearLine();
-      console.log(renderProgressBar(100, 40, { suffix: `${c.dim}${chunksEmbedded}/${totalChunks}${c.reset}` }));
-    } else {
-      console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks from ${c.bold}${totalDocs}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
+    if (visualUi) {
+      if (isTTY) {
+        cursor.clearLine();
+        console.log(renderProgressBar(100, 40, { suffix: palette.dim(`${chunksEmbedded}/${totalChunks}`) }));
+        console.log(`${palette.green("✓ Done!")} Embedded ${palette.bold(`${chunksEmbedded}`)} chunks in ${palette.bold(formatETA(totalTimeSec))} ${palette.dim(`(${avgThroughput}/s)`)}`);
+      } else {
+        console.log(`\n${palette.green("✓ Done!")} Embedded ${palette.bold(`${chunksEmbedded}`)} chunks from ${palette.bold(`${totalDocs}`)} documents in ${palette.bold(formatETA(totalTimeSec))} ${palette.dim(`(${avgThroughput}/s)`)}`);
+      }
+      if (errors > 0) {
+        console.log(palette.red(`✖ ${errors} chunks failed`));
+      }
     }
-    if (isTTY) {
-      console.log(`${c.green}✓ Done!${c.reset} Embedded ${c.bold}${chunksEmbedded}${c.reset} chunks in ${c.bold}${formatETA(totalTimeSec)}${c.reset} ${c.dim}(${avgThroughput}/s)${c.reset}`);
-    }
-    if (errors > 0) {
-      console.log(`${c.red}✖ ${errors} chunks failed${c.reset}`);
-    }
+    reporter.end("embed", { durationMs: Math.round(totalTimeSec * 1000), detail: { chunks: chunksEmbedded, errors, throughputBytesPerSec: Math.round(totalBytes / totalTimeSec) } });
   }, { maxDuration: 30 * 60 * 1000, name: 'embed-command' });
 
   // Phase 2: optional per-collection shard sync with resumable checkpointing.
   const shardStatus = getShardRuntimeStatus(getDbPath());
   if (shardStatus.enabledCollections.length > 0) {
-    console.log(`\n${c.bold}Shard Sync${c.reset}`);
+    reporter.start("shard-sync", "Syncing collection shards");
+    if (visualUi) console.log(`\n${palette.bold("Shard Sync")}`);
     const shardResult = await syncCollectionShardsFromMainDb(db, getDbPath(), {
       resume,
       onProgress: ({ collection, processed, total }) => {
         if (processed % 250 === 0 || processed === total) {
-          process.stderr.write(`\r${c.dim}Syncing shards ${collection}: ${processed}/${total}${c.reset}   `);
+          if (visualUi && isTTY) {
+            process.stderr.write(`\r${palette.dim(`Syncing shards ${collection}: ${processed}/${total}`)}   `);
+          }
         }
       },
     });
-    process.stderr.write(`\n`);
-    for (const item of shardResult.collections) {
-      console.log(`  ${c.green}✓${c.reset} ${item.collection}: ${item.processed}/${item.total} vectors synced across ${item.shardCount} shards`);
+    if (visualUi && isTTY) process.stderr.write(`\n`);
+    if (visualUi) {
+      for (const item of shardResult.collections) {
+        console.log(`  ${palette.green("✓")} ${item.collection}: ${item.processed}/${item.total} vectors synced across ${item.shardCount} shards`);
+      }
+      if (shardResult.collections.length > 0) {
+        console.log(`  Checkpoint: ${shardResult.checkpointPath}`);
+      }
     }
-    if (shardResult.collections.length > 0) {
-      console.log(`  Checkpoint: ${shardResult.checkpointPath}`);
-    }
+    reporter.end("shard-sync", { detail: { collections: shardResult.collections.map(c => ({ collection: c.collection, processed: c.processed, total: c.total, shardCount: c.shardCount })) } });
   }
 
+  reporter.done();
   closeDb();
 }
 
@@ -2181,6 +2257,14 @@ type OutputOptions = {
   rerankConcurrency?: number; // Parallel rerank workers
   rerankDropPolicy?: "timeout_fallback" | "wait"; // Queue backpressure policy
   vectorFanoutWorkers?: number; // Vector fanout worker cap
+  /**
+   * Pretty layout selected via `--format cards|table|lines`. When set, the
+   * `format` field above stays `"cli"` (so existing code paths are
+   * unaffected) and the renderer reads `layout` to switch presentation.
+   */
+  layout?: "cards" | "table" | "lines";
+  showMetadata?: boolean;
+  showScores?: boolean;
 };
 
 // Highlight query terms in text (skip short words < 3 chars)
@@ -2206,6 +2290,32 @@ function formatScore(score: number): string {
 
 function formatExplainNumber(value: number): string {
   return value.toFixed(4);
+}
+
+// Build the per-row explain block as plain (un-dimmed) lines. The snippets
+// renderer applies palette.dim when emitting; keeping this function ANSI-free
+// means it round-trips cleanly through stripAnsi() in tests.
+function formatExplainBlockLines(explain: HybridQueryExplain): string[] {
+  const lines: string[] = [];
+  const ftsScores = explain.ftsScores.length > 0
+    ? explain.ftsScores.map(formatExplainNumber).join(", ")
+    : "none";
+  const vecScores = explain.vectorScores.length > 0
+    ? explain.vectorScores.map(formatExplainNumber).join(", ")
+    : "none";
+  const contribSummary = explain.rrf.contributions
+    .slice()
+    .sort((a, b) => b.rrfContribution - a.rrfContribution)
+    .slice(0, 3)
+    .map(c => `${c.source}/${c.queryType}#${c.rank}:${formatExplainNumber(c.rrfContribution)}`)
+    .join(" | ");
+  lines.push(`Explain: fts=[${ftsScores}] vec=[${vecScores}]`);
+  lines.push(`  RRF: total=${formatExplainNumber(explain.rrf.totalScore)} base=${formatExplainNumber(explain.rrf.baseScore)} bonus=${formatExplainNumber(explain.rrf.topRankBonus)} rank=${explain.rrf.rank}`);
+  lines.push(`  Blend: ${Math.round(explain.rrf.weight * 100)}%*${formatExplainNumber(explain.rrf.positionScore)} + ${Math.round((1 - explain.rrf.weight) * 100)}%*${formatExplainNumber(explain.rerankScore)} = ${formatExplainNumber(explain.blendedScore)}`);
+  if (contribSummary.length > 0) {
+    lines.push(`  Top RRF contributions: ${contribSummary}`);
+  }
+  return lines;
 }
 
 // Shorten directory path for display - relative to $HOME (used for context paths, not documents)
@@ -2268,6 +2378,64 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
   // Helper to create kindx:// URI from displayPath
   const toQmdPath = (displayPath: string) => `kindx://${displayPath}`;
 
+  // Unified pretty dispatch: every pretty layout (snippets|cards|table|lines)
+  // routes to engine/cli/renderers/search.ts. The renderer chooses snippets
+  // when no layout is specified, preserving today's default look.
+  if (opts.format === "cli") {
+    const layout = (opts.layout ?? "snippets") as "snippets" | "cards" | "table" | "lines";
+    const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+    const rows = filtered.map((r, i) => {
+      const extracted = extractSnippet(r.body, query, layout === "snippets" ? 500 : 240, r.chunkPos);
+      const { line, snippet, body: snippetBodyOnly, bodyStartLine } = extracted;
+      // Match-gate the :line suffix exactly like the legacy snippets path did.
+      const lowerBody = snippetBodyOnly.toLowerCase();
+      const hasMatch = queryTerms.some(t => lowerBody.includes(t));
+      const docid = r.docid || (r.hash ? r.hash.slice(0, 6) : undefined);
+
+      let rowBody: string | undefined;
+      let rowBodyStartLine: number | undefined;
+      if (layout === "snippets") {
+        // New default: pass the bare body + start line; renderer composes
+        // the human header and the line-number gutter. Highlighting still
+        // happens here so the renderer stays pure.
+        const baseBody = opts.lineNumbers ? addLineNumbers(snippetBodyOnly, bodyStartLine) : snippetBodyOnly;
+        rowBody = highlightTerms(baseBody, query);
+        rowBodyStartLine = bodyStartLine;
+      } else {
+        rowBody = snippet;
+      }
+
+      const totalLines = r.body ? r.body.split("\n").length : undefined;
+      const row: import("./cli/renderers/search.js").SearchRenderRow = {
+        rank: i + 1,
+        docid,
+        displayPath: r.displayPath,
+        absolutePath: r.file,
+        title: r.title || undefined,
+        context: r.context,
+        score: r.score,
+        snippet: rowBody,
+        bodyStartLine: rowBodyStartLine,
+        totalLines,
+        matchedLine: hasMatch ? line : undefined,
+      };
+
+      if (layout === "snippets" && opts.explain && r.explain) {
+        row.explainLines = formatExplainBlockLines(r.explain);
+      }
+      return row;
+    });
+    process.stdout.write(renderSearchResults(rows, {
+      layout,
+      color: useColor,
+      showMetadata: !!opts.showMetadata,
+      showScores: !!opts.showScores,
+      query,
+      showHints: layout !== "snippets",
+    }) + "\n");
+    return;
+  }
+
   if (opts.format === "json") {
     // JSON output for LLM consumption
     const output = filtered.map(row => {
@@ -2296,67 +2464,6 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       const docid = row.docid || (row.hash ? row.hash.slice(0, 6) : "");
       const ctx = row.context ? `,"${row.context.replace(/"/g, '""')}"` : "";
       console.log(`#${docid},${row.score.toFixed(2)},${toQmdPath(row.displayPath)}${ctx}`);
-    }
-  } else if (opts.format === "cli") {
-    for (let i = 0; i < filtered.length; i++) {
-      const row = filtered[i];
-      if (!row) continue;
-      const { line, snippet } = extractSnippet(row.body, query, 500, row.chunkPos);
-      const docid = row.docid || (row.hash ? row.hash.slice(0, 6) : undefined);
-
-      // Line 1: filepath with docid
-      const path = toQmdPath(row.displayPath);
-      // Only show :line if we actually found a term match in the snippet body (exclude header line).
-      const snippetBody = snippet.split("\n").slice(1).join("\n").toLowerCase();
-      const hasMatch = query.toLowerCase().split(/\s+/).some(t => t.length > 0 && snippetBody.includes(t));
-      const lineInfo = hasMatch ? `:${line}` : "";
-      const docidStr = docid ? ` ${c.dim}#${docid}${c.reset}` : "";
-      console.log(`${c.cyan}${path}${c.dim}${lineInfo}${c.reset}${docidStr}`);
-
-      // Line 2: Title (if available)
-      if (row.title) {
-        console.log(`${c.bold}Title: ${row.title}${c.reset}`);
-      }
-
-      // Line 3: Context (if available)
-      if (row.context) {
-        console.log(`${c.dim}Context: ${row.context}${c.reset}`);
-      }
-
-      // Line 4: Score
-      const score = formatScore(row.score);
-      console.log(`Score: ${c.bold}${score}${c.reset}`);
-      if (opts.explain && row.explain) {
-        const explain = row.explain;
-        const ftsScores = explain.ftsScores.length > 0
-          ? explain.ftsScores.map(formatExplainNumber).join(", ")
-          : "none";
-        const vecScores = explain.vectorScores.length > 0
-          ? explain.vectorScores.map(formatExplainNumber).join(", ")
-          : "none";
-        const contribSummary = explain.rrf.contributions
-          .slice()
-          .sort((a, b) => b.rrfContribution - a.rrfContribution)
-          .slice(0, 3)
-          .map(c => `${c.source}/${c.queryType}#${c.rank}:${formatExplainNumber(c.rrfContribution)}`)
-          .join(" | ");
-
-        console.log(`${c.dim}Explain: fts=[${ftsScores}] vec=[${vecScores}]${c.reset}`);
-        console.log(`${c.dim}  RRF: total=${formatExplainNumber(explain.rrf.totalScore)} base=${formatExplainNumber(explain.rrf.baseScore)} bonus=${formatExplainNumber(explain.rrf.topRankBonus)} rank=${explain.rrf.rank}${c.reset}`);
-        console.log(`${c.dim}  Blend: ${Math.round(explain.rrf.weight * 100)}%*${formatExplainNumber(explain.rrf.positionScore)} + ${Math.round((1 - explain.rrf.weight) * 100)}%*${formatExplainNumber(explain.rerankScore)} = ${formatExplainNumber(explain.blendedScore)}${c.reset}`);
-        if (contribSummary.length > 0) {
-          console.log(`${c.dim}  Top RRF contributions: ${contribSummary}${c.reset}`);
-        }
-      }
-      console.log();
-
-      // Snippet with highlighting (diff-style header included)
-      let displaySnippet = opts.lineNumbers ? addLineNumbers(snippet, line) : snippet;
-      const highlighted = highlightTerms(displaySnippet, query);
-      console.log(highlighted);
-
-      // Double empty line between results
-      if (i < filtered.length - 1) console.log('\n');
     }
   } else if (opts.format === "md") {
     for (let i = 0; i < filtered.length; i++) {
@@ -2532,19 +2639,41 @@ function search(query: string, opts: OutputOptions): void {
   outputResults(resultsWithContext, query, opts);
 }
 
-// Log query expansion as a tree to stderr (CLI progress feedback)
-function logExpansionTree(originalQuery: string, expanded: ExpandedQuery[]): void {
+/**
+ * Estimate rerank phase duration so the progress spinner can show
+ * `Reranking N candidates (~Ts expected)`. The pretty-tty reporter also uses
+ * this to recolor the spinner yellow when actual elapsed exceeds expected.
+ *
+ * Model: a fixed overhead (model warmup, batching) plus a per-candidate cost.
+ * Numbers tuned against observed traces on the current Qwen3-0.6B rerank
+ * model. Recalibrate by running `estimateRerankMs(N)` against real timings:
+ * the goal is for 80% of queries to complete within 1.5× the estimate.
+ */
+function estimateRerankMs(candidates: number): number {
+  // 400ms model warmup + ~500ms per candidate on a cold rerank session.
+  // Once warm the per-item cost drops to ~22ms, but we estimate cold by
+  // default because that's the worst-case path for first-query feedback.
+  // Per-candidate latency scales sublinearly past 20 (batched).
+  const overhead = 400;
+  const perCandidate = candidates <= 20 ? 500 : 500 - Math.min(300, (candidates - 20) * 5);
+  return Math.round(overhead + perCandidate * candidates);
+}
+
+// Build query-expansion tree lines (rendered under the "Expanding query" phase
+// by the active ProgressReporter). Returned as plain strings; ANSI dimming is
+// applied by the reporter via its palette.
+function buildExpansionTreeLines(originalQuery: string, expanded: ExpandedQuery[]): string[] {
   const lines: string[] = [];
-  lines.push(`${c.dim}├─ ${originalQuery}${c.reset}`);
+  lines.push(`├─ ${originalQuery}`);
   for (const q of expanded) {
     let preview = q.text.replace(/\n/g, ' ');
     if (preview.length > 72) preview = preview.substring(0, 69) + '...';
-    lines.push(`${c.dim}├─ ${q.type}: ${preview}${c.reset}`);
+    lines.push(`├─ ${q.type}: ${preview}`);
   }
   if (lines.length > 0) {
     lines[lines.length - 1] = lines[lines.length - 1]!.replace('├─', '└─');
   }
-  for (const line of lines) process.stderr.write(line + '\n');
+  return lines;
 }
 
 async function vectorSearch(query: string, opts: OutputOptions, _model: string = DEFAULT_EMBED_MODEL): Promise<void> {
@@ -2565,8 +2694,9 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
       minScore: opts.minScore || 0.3,
       hooks: {
         onExpand: (original, expanded) => {
-          logExpansionTree(original, expanded);
-          process.stderr.write(`${c.dim}Searching ${expanded.length + 1} vector queries...${c.reset}\n`);
+          const reporter = getReporter();
+          reporter.detail(buildExpansionTreeLines(original, expanded));
+          reporter.start("search", `Searching ${expanded.length + 1} vector queries`);
         },
       },
     });
@@ -2627,18 +2757,20 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
     let results;
     let structuredDiagnostics: { degradedMode?: boolean; fallbackReasons?: string[]; scaleWarnings?: string[] } | undefined;
 
+    const reporter = getReporter();
     if (structuredQueries) {
       // Structured search — user provided their own query expansions
       const typeLabels = structuredQueries.map(s => s.type).join('+');
-      process.stderr.write(`${c.dim}Structured search: ${structuredQueries.length} queries (${typeLabels})${c.reset}\n`);
-
-      // Log each sub-query
-      for (const s of structuredQueries) {
+      reporter.start("structured", `Structured search: ${structuredQueries.length} queries (${typeLabels})`);
+      const lines: string[] = [];
+      for (let i = 0; i < structuredQueries.length; i++) {
+        const s = structuredQueries[i]!;
         let preview = s.query.replace(/\n/g, ' ');
         if (preview.length > 72) preview = preview.substring(0, 69) + '...';
-        process.stderr.write(`${c.dim}├─ ${s.type}: ${preview}${c.reset}\n`);
+        const prefix = i === structuredQueries.length - 1 ? '└─' : '├─';
+        lines.push(`${prefix} ${s.type}: ${preview}`);
       }
-      process.stderr.write(`${c.dim}└─ Searching...${c.reset}\n`);
+      reporter.detail(lines);
 
       const withDiagnostics = await structuredSearchWithDiagnostics(store, structuredQueries, {
         collections: singleCollection ? [singleCollection] : undefined,
@@ -2650,11 +2782,11 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         explain: !!opts.explain,
         hooks: {
           onEmbedStart: (count) => {
-            process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
+            reporter.start("embed", `Embedding ${count} ${count === 1 ? 'query' : 'queries'}`);
           },
           onEmbedDone: (ms) => {
             timings.embed_ms += ms;
-            process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+            reporter.end("embed", { durationMs: ms });
           },
           onRetrievalDone: (ms) => {
             timings.retrieval_ms = ms;
@@ -2663,13 +2795,16 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
-            process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
+            {
+              const expectedMs = estimateRerankMs(chunkCount);
+              reporter.start("rerank", `Reranking ${chunkCount} candidates (~${formatMs(expectedMs)} expected)`, { expectedDurationMs: expectedMs });
+            }
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
             timings.rerank_ms += ms;
             progress.clear();
-            process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+            reporter.end("rerank", { durationMs: ms });
           },
         },
       });
@@ -2687,23 +2822,23 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         explain: !!opts.explain,
         hooks: {
           onStrongSignal: (score) => {
-            process.stderr.write(`${c.dim}Strong BM25 signal (${score.toFixed(2)}) — skipping expansion${c.reset}\n`);
+            reporter.warn("strong-bm25", `Strong BM25 signal (${score.toFixed(2)}) — skipping expansion`, { score });
           },
           onExpandStart: () => {
-            process.stderr.write(`${c.dim}Expanding query...${c.reset}`);
+            reporter.start("expand", "Expanding query");
           },
           onExpand: (original, expanded, ms) => {
             timings.expand_ms += ms;
-            process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
-            logExpansionTree(original, expanded);
-            process.stderr.write(`${c.dim}Searching ${expanded.length + 1} queries...${c.reset}\n`);
+            reporter.detail(buildExpansionTreeLines(original, expanded));
+            reporter.end("expand", { durationMs: ms, detail: { variants: expanded.length + 1 } });
+            reporter.start("search", `Searching ${expanded.length + 1} queries`);
           },
           onEmbedStart: (count) => {
-            process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
+            reporter.start("embed", `Embedding ${count} ${count === 1 ? 'query' : 'queries'}`);
           },
           onEmbedDone: (ms) => {
             timings.embed_ms += ms;
-            process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+            reporter.end("embed", { durationMs: ms });
           },
           onRetrievalDone: (ms) => {
             timings.retrieval_ms = ms;
@@ -2712,13 +2847,16 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
             timings.rerank_init_ms += ms;
           },
           onRerankStart: (chunkCount) => {
-            process.stderr.write(`${c.dim}Reranking ${chunkCount} chunks...${c.reset}`);
+            {
+              const expectedMs = estimateRerankMs(chunkCount);
+              reporter.start("rerank", `Reranking ${chunkCount} candidates (~${formatMs(expectedMs)} expected)`, { expectedDurationMs: expectedMs });
+            }
             progress.indeterminate();
           },
           onRerankDone: (ms) => {
             timings.rerank_ms += ms;
             progress.clear();
-            process.stderr.write(`${c.dim} (${formatMs(ms)})${c.reset}\n`);
+            reporter.end("rerank", { durationMs: ms });
           },
         },
       });
@@ -2759,19 +2897,20 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
 
     if (structuredDiagnostics?.degradedMode) {
       const reasons = (structuredDiagnostics.fallbackReasons || []).join(", ") || "unknown";
-      process.stderr.write(`${c.yellow}KINDX degraded mode:${c.reset} ${reasons}\n`);
-      const warnings = structuredDiagnostics.scaleWarnings || [];
-      if (warnings.length > 0 && opts.explain) {
-        process.stderr.write(`${c.dim}scale warnings: ${warnings.join(", ")}${c.reset}\n`);
-      }
+      reporter.warn("degraded-mode", `KINDX degraded mode: ${reasons}`, {
+        fallbackReasons: structuredDiagnostics.fallbackReasons,
+        scaleWarnings: structuredDiagnostics.scaleWarnings,
+      });
     }
 
     timings.total_ms = Date.now() - totalStart;
     if (opts.explain) {
+      const palette = paletteFor(useColor);
       process.stderr.write(
-        `${c.dim}timings: expand=${formatMs(timings.expand_ms)}, embed=${formatMs(timings.embed_ms)}, retrieval=${formatMs(timings.retrieval_ms)}, rerank_init=${formatMs(timings.rerank_init_ms)}, rerank=${formatMs(timings.rerank_ms)}, total=${formatMs(timings.total_ms)}${c.reset}\n`
+        palette.dim(`timings: expand=${formatMs(timings.expand_ms)}, embed=${formatMs(timings.embed_ms)}, retrieval=${formatMs(timings.retrieval_ms)}, rerank_init=${formatMs(timings.rerank_init_ms)}, rerank=${formatMs(timings.rerank_ms)}, total=${formatMs(timings.total_ms)}`) + "\n"
       );
     }
+    reporter.done();
     }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' })
   );
 }
@@ -2829,6 +2968,25 @@ function parseCLI() {
       "rerank-concurrency": { type: "string" },
       "rerank-drop-policy": { type: "string" },
       "vector-fanout-workers": { type: "string" },
+      // Global output revamp flags (additive)
+      format: { type: "string" },
+      plain: { type: "boolean" },
+      "no-color": { type: "boolean" },
+      color: { type: "boolean" },
+      verbose: { type: "boolean" },
+      quiet: { type: "boolean", short: "q" },  // Suppress progress output (stderr)
+      debug: { type: "boolean" },
+      trace: { type: "boolean" },
+      profile: { type: "string" },
+      timeout: { type: "string" },
+      confirm: { type: "boolean" },
+      yes: { type: "boolean", short: "y" },
+      "dry-run": { type: "boolean" },
+      limit: { type: "string" },
+      interactive: { type: "boolean", short: "i" },
+      "show-scores": { type: "boolean" },
+      "show-metadata": { type: "boolean" },
+      open: { type: "boolean" },
       // Memory options
       scope: { type: "string" },
       key: { type: "string" },
@@ -2843,6 +3001,7 @@ function parseCLI() {
       http: { type: "boolean" },
       daemon: { type: "boolean" },
       port: { type: "string" },
+      "health-check": { type: "boolean" },
       "log-format": { type: "string" },
       "log-level": { type: "string" },
       "check-only": { type: "boolean" },
@@ -2851,6 +3010,12 @@ function parseCLI() {
       path: { type: "string" },
       resume: { type: "boolean" },
       description: { type: "string" },
+      // Telemetry — surfaces auto-invocation contract trigger counts.
+      "auto-invoke-rate": { type: "boolean" },
+      // init (MCP client wiring) options
+      "client": { type: "string", multiple: true }, // --client claude-code --client cursor
+      "project": { type: "string" },                // --project <path>
+      "global": { type: "boolean" },                // --global (skip project file)
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -2871,13 +3036,45 @@ function parseCLI() {
   if (logFormat === "text") process.env.KINDX_LOG_JSON = "0";
   configureLogger({ level: logLevel, format: logFormat });
 
-  // Determine output format
+  // Determine output format.
+  // Precedence (highest first):
+  //   1. --format <value>
+  //   2. legacy boolean flags --json/--csv/--md/--xml/--files
+  //   3. default "cli"
+  // The new --format cards|table|lines values map to format=cli with a
+  // `layout` field so existing rendering paths keep working unchanged.
   let format: OutputFormat = "cli";
-  if (values.csv) format = "csv";
-  else if (values.md) format = "md";
-  else if (values.xml) format = "xml";
-  else if (values.files) format = "files";
-  else if (values.json) format = "json";
+  let layout: "cards" | "table" | "lines" | undefined;
+  const formatFlag = typeof values.format === "string" ? values.format.trim().toLowerCase() : "";
+  if (formatFlag) {
+    switch (formatFlag) {
+      case "json": format = "json"; break;
+      case "csv": format = "csv"; break;
+      case "md": format = "md"; break;
+      case "xml": format = "xml"; break;
+      case "files": format = "files"; break;
+      case "plain":
+      case "pretty":
+        format = "cli"; break;
+      case "cards":
+      case "table":
+      case "lines":
+        format = "cli";
+        layout = formatFlag as "cards" | "table" | "lines";
+        break;
+      default:
+        // Unknown --format: fall through to legacy booleans / cli default.
+        break;
+    }
+  }
+  if (format === "cli" && !layout) {
+    if (values.csv) format = "csv";
+    else if (values.md) format = "md";
+    else if (values.xml) format = "xml";
+    else if (values.files) format = "files";
+    else if (values.json) format = "json";
+    else if (values.plain) format = "cli"; // plain == cli without color
+  }
 
   // Default limit: 20 for --files/--json, 5 otherwise
   // --all means return all results (use very large limit)
@@ -2900,6 +3097,9 @@ function parseCLI() {
     rerankDropPolicy: values["rerank-drop-policy"] === "wait" ? "wait" : values["rerank-drop-policy"] === "timeout_fallback" ? "timeout_fallback" : undefined,
     vectorFanoutWorkers: values["vector-fanout-workers"] ? parseInt(String(values["vector-fanout-workers"]), 10) : undefined,
     explain: !!values.explain,
+    layout,
+    showMetadata: !!values["show-metadata"],
+    showScores: !!values["show-scores"],
   };
 
   return {
@@ -3198,11 +3398,52 @@ function installSkill(): void {
   console.log(`✓ KINDX skill successfully installed to ${destPath}`);
 }
 
+async function runArchCommand(subcommand: string, args: string[]): Promise<void> {
+  const config = getArchConfig();
+
+  if (!config.enabled) {
+    console.log("Arch integration is disabled. Set KINDX_ARCH_ENABLED=1 to enable.");
+    return;
+  }
+
+  const sourceRoot = args[0] || process.cwd();
+
+  switch (subcommand) {
+    case "status": {
+      const status = getArchStatus(config, sourceRoot);
+      console.log(JSON.stringify(status, null, 2));
+      break;
+    }
+    case "build": {
+      console.log(`Building arch artifacts for ${sourceRoot}...`);
+      const result = await buildAndDistillArch(sourceRoot, config);
+      console.log(`✓ Built arch artifacts:`);
+      console.log(`  Nodes: ${result.artifact.nodeCount}`);
+      console.log(`  Edges: ${result.artifact.edgeCount}`);
+      console.log(`  Communities: ${result.artifact.communityCount}`);
+      console.log(`  Hints: ${result.artifact.files.length} files generated`);
+      break;
+    }
+    case "refresh": {
+      console.log(`Refreshing arch artifacts for ${sourceRoot}...`);
+      await buildAndDistillArch(sourceRoot, config);
+      console.log(`✓ Refreshed arch artifacts`);
+      break;
+    }
+    default:
+      console.error(`Unknown arch subcommand: ${subcommand}`);
+      console.log("Usage: kindx arch <status|build|refresh> [path]");
+      process.exit(1);
+  }
+}
+
 function showHelp(): void {
-  console.log("kindx -- Knowledge INDexer");
+  // New grouped help comes from the declarative registry. The reference
+  // material that follows (query grammar, architecture diagram, storage
+  // schema) is preserved verbatim so users who relied on it still find it.
+  console.log(renderRootHelp({ color: useColor }));
   console.log("");
-  console.log("Usage:");
-  console.log("  kindx <command> [options]");
+  console.log("───── Reference ─────");
   console.log("");
   console.log("Primary commands:");
   console.log("  kindx query <query>             - Hybrid search with auto expansion + reranking (recommended)");
@@ -3526,30 +3767,88 @@ if (isMain) {
   // load time.
   registerCursorCleanup();
 
-  // Global error handlers — catch unhandled errors with user-friendly messages
-  process.on('uncaughtException', (err: any) => {
-    const code = err?.code;
-    if (code === 'SQLITE_NOTADB') {
+  // Global error handlers — catch unhandled errors with user-friendly messages.
+  //
+  // The default path emits the legacy single-line "Error: …" output so existing
+  // scripts and test golden files keep working. When KINDX_JSON_ENVELOPE=1 or
+  // --format json is in effect, we instead emit the stable JSON error envelope
+  // documented in docs/json-schemas.md so machine consumers can recover.
+  const reportTopLevelError = (raw: unknown): never => {
+    const wantsJson = jsonEnvelopeEnabled(process.env)
+      || process.argv.includes("--format=json")
+      || (process.argv.includes("--format") && process.argv[process.argv.indexOf("--format") + 1] === "json");
+    const err = toKindxError(raw);
+
+    if (wantsJson) {
+      process.stdout.write(JSON.stringify(errorEnvelope(err)) + "\n");
+      process.exit(err.exitCode);
+    }
+
+    // Legacy-compatible pretty output for the well-known SQLite codes that
+    // already had bespoke messages, plus the generic fallback.
+    const sqliteCode = (raw as { code?: string } | undefined)?.code;
+    if (sqliteCode === "SQLITE_NOTADB") {
       console.error(`Error: Index file is corrupted or not a valid database.`);
       console.error(`Path: ${process.env.INDEX_PATH || '~/.cache/kindx/index.sqlite'}`);
       console.error(`Try removing the file and re-indexing your collections.`);
-    } else if (code === 'SQLITE_CANTOPEN') {
+    } else if (sqliteCode === "SQLITE_CANTOPEN") {
       console.error(`Error: Cannot open database file. Check that the path exists and is writable.`);
       console.error(`Path: ${process.env.INDEX_PATH || '~/.cache/kindx/index.sqlite'}`);
-    } else if (code === 'SQLITE_BUSY') {
+    } else if (sqliteCode === "SQLITE_BUSY") {
       console.error(`Error: Database is locked by another process. Retry in a moment.`);
+    } else if (raw instanceof KindxError) {
+      console.error(`Error: ${err.what}`);
+      if (err.why) console.error(`  why: ${err.why}`);
+      if (err.fix) console.error(`  fix: ${err.fix}`);
+      if (err.examples) {
+        for (const ex of err.examples) console.error(`       ${ex}`);
+      }
     } else {
-      console.error(`Error: ${err?.message || err}`);
+      console.error(`Error: ${err.what}`);
     }
-    process.exit(1);
-  });
+    process.exit(err.exitCode);
+  };
 
-  process.on('unhandledRejection', (reason: any) => {
-    console.error(`Error: ${reason instanceof Error ? reason.message : reason}`);
-    process.exit(1);
-  });
+  process.on('uncaughtException', reportTopLevelError);
+  process.on('unhandledRejection', reportTopLevelError);
 
   const cli = parseCLI();
+
+  // Recompute the module-level `useColor` from the parsed flags so --color /
+  // --no-color actually win against TTY auto-detection. resolveOutputMode()
+  // already encodes the documented precedence (flag > NO_COLOR > TTY).
+  {
+    const v = cli.values as Record<string, unknown>;
+    const resolved = resolveOutputMode({
+      format: typeof v.format === "string" ? v.format : undefined,
+      color: v.color as boolean | undefined,
+      noColor: v["no-color"] as boolean | undefined,
+      json: v.json as boolean | undefined,
+      plain: v.plain as boolean | undefined,
+      csv: v.csv as boolean | undefined,
+      md: v.md as boolean | undefined,
+      xml: v.xml as boolean | undefined,
+      files: v.files as boolean | undefined,
+      quiet: v.quiet as boolean | undefined,
+    });
+    useColor = resolved.color;
+  }
+
+  // Set the progress-mode hint as early as possible so the lazy reporter
+  // (built on first checkIndexHealth/hook call) picks the right paint mode.
+  // We map the legacy --json/--csv/--md/--xml/--files booleans + --format to
+  // a single format string here.
+  {
+    const v = cli.values as Record<string, unknown>;
+    let fmt: string | undefined;
+    if (typeof v.format === "string") fmt = v.format;
+    else if (v.json) fmt = "json";
+    else if (v.csv) fmt = "csv";
+    else if (v.md) fmt = "md";
+    else if (v.xml) fmt = "xml";
+    else if (v.files) fmt = "files";
+    setReporterFormatHint(fmt, { quiet: !!v.quiet });
+  }
 
   if (cli.values.version) {
     await showVersion();
@@ -3562,6 +3861,30 @@ if (isMain) {
   }
 
   if (!cli.command || cli.values.help) {
+    // Per-command / per-subcommand help.
+    //   `kindx <cmd> <sub> --help` → renderSubcommandHelp (detail block)
+    //   `kindx <cmd> --help`       → renderSubcommandList if available,
+    //                                else renderCommandHelp (regular block)
+    if (cli.command && cli.values.help) {
+      const sub = cli.args[0];
+      if (sub) {
+        const subHelp = renderSubcommandHelp(cli.command, sub, { color: useColor });
+        if (subHelp) {
+          console.log(subHelp);
+          process.exit(0);
+        }
+      }
+      const subList = renderSubcommandList(cli.command, { color: useColor });
+      if (subList) {
+        console.log(subList);
+        process.exit(0);
+      }
+      const help = renderCommandHelp(cli.command, { color: useColor });
+      if (help) {
+        console.log(help);
+        process.exit(0);
+      }
+    }
     showHelp();
     process.exit(cli.values.help ? 0 : 1);
   }
@@ -3898,10 +4221,14 @@ if (isMain) {
           if (cli.opts.format === "json") {
             outputMemoryPayload({ scope, memory }, "json");
           } else {
-            console.log(`${c.green}✓${c.reset} Stored memory in scope '${scope}'`);
-            console.log(`  id: ${memory.id}`);
-            console.log(`  key: ${memory.key}`);
-            console.log(`  value: ${memory.value}`);
+            console.log(renderMemoryEntry({
+              id: memory.id,
+              key: memory.key,
+              value: memory.value,
+              tags: (memory as any).tags,
+              createdAt: (memory as any).createdAt,
+              updatedAt: (memory as any).updatedAt,
+            }, { color: useColor, scope, action: "Stored" }));
           }
           break;
         }
@@ -3923,13 +4250,21 @@ if (isMain) {
           if (cli.opts.format === "json") {
             outputMemoryPayload({ scope, mode, query, results }, "json");
           } else {
-            console.log(`${c.bold}Memory ${mode} search${c.reset} (${results.length} result${results.length === 1 ? "" : "s"})`);
-            for (const r of results) {
-              const score = r.similarity != null
-                ? `sim=${r.similarity.toFixed(3)}`
-                : (r.hitRate != null ? `hit=${r.hitRate.toFixed(3)}` : "");
-              console.log(`- #${r.id} ${score} ${r.key}: ${r.value}`);
-            }
+            console.log(renderMemorySearch(
+              { scope, mode, query, totalResults: results.length },
+              results.map((r) => ({
+                id: r.id,
+                key: r.key,
+                value: r.value,
+                similarity: r.similarity,
+                hitRate: r.hitRate,
+                createdAt: (r as any).createdAt,
+                updatedAt: (r as any).updatedAt,
+                lastAccessedAt: (r as any).lastAccessedAt,
+                tags: (r as any).tags,
+              })),
+              { color: useColor },
+            ));
           }
           break;
         }
@@ -4037,9 +4372,49 @@ if (isMain) {
       break;
     }
 
-    case "status":
-      await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir });
+    case "status": {
+      // --auto-invoke-rate short-circuits the regular status output and
+      // emits only the trigger-source counters aggregated from the
+      // mcp_query_log table. Designed for scripts that want to verify the
+      // auto-invocation contract is causing agent-auto calls locally.
+      if (cli.values["auto-invoke-rate"]) {
+        const db = getDb();
+        const counts = { totalCalls: 0, agentAuto: 0, userExplicit: 0, unknown: 0 };
+        try {
+          const rows = db
+            .prepare(`SELECT trigger, COUNT(*) as n FROM mcp_query_log GROUP BY trigger`)
+            .all() as Array<{ trigger: string | null; n: number }>;
+          for (const r of rows) {
+            counts.totalCalls += r.n;
+            if (r.trigger === "agent-auto") counts.agentAuto += r.n;
+            else if (r.trigger === "user-explicit") counts.userExplicit += r.n;
+            else counts.unknown += r.n;
+          }
+        } catch {
+          // Table absent (older index) — fall through with zero counts.
+        }
+        const data = { autoInvocation: counts };
+        if (cli.opts.format === "json") {
+          // Match the surrounding command pattern: emit the JSON envelope
+          // when KINDX_JSON_ENVELOPE is set, otherwise the bare payload.
+          const { jsonEnvelope, jsonEnvelopeEnabled } = await import("./cli/output.js");
+          if (jsonEnvelopeEnabled(process.env)) {
+            console.log(JSON.stringify(jsonEnvelope("status", data), null, 2));
+          } else {
+            console.log(JSON.stringify(data, null, 2));
+          }
+        } else {
+          console.log(
+            `Auto-invoke rate: ${counts.agentAuto}/${counts.totalCalls} agent-auto, ` +
+            `${counts.userExplicit} user-explicit, ${counts.unknown} unknown.`,
+          );
+        }
+        closeDb();
+        break;
+      }
+      await runStatusCommand({ getDb, getDbPath, closeDb, getKindxCacheDir }, { format: cli.opts.format });
       break;
+    }
 
     case "scheduler": {
       const code = runSchedulerStatusCommand({
@@ -4180,7 +4555,64 @@ if (isMain) {
       break;
     }
 
+    case "tui": {
+      // Lazy-load so the TUI module (and its key/readline plumbing) is only
+      // pulled in when explicitly requested. Keeps the cold-start cost of
+      // `kindx search` and `kindx mcp` unchanged.
+      const { runTui } = await import("./cli/tui/app.js");
+      const collectionFilter = Array.isArray(cli.values.collection)
+        ? (cli.values.collection[0] as string | undefined)
+        : (cli.values.collection as string | undefined);
+      const code = await runTui({
+        initialQuery: cli.args.join(" "),
+        initialCollection: collectionFilter ?? null,
+        runSearch: async (q, runOpts) => {
+          // BM25 search powers the live results panel — fast, deterministic,
+          // and works without local models. Future iteration can dispatch by
+          // runOpts.mode (lex/vec/hyde/hybrid) once async cancellation is in.
+          void runOpts;
+          const db = getDb();
+          const colNames = collectionFilter ? [collectionFilter] : [];
+          const single = colNames.length === 1 ? colNames[0] : undefined;
+          const hits = filterByCollections(searchFTS(db, q, 20, single), colNames);
+          return hits.slice(0, 12).map((r, i) => ({
+            rank: i + 1,
+            displayPath: r.displayPath,
+            title: r.title || undefined,
+            score: r.score,
+            snippet: (r.body || "").slice(0, 240),
+          }));
+        },
+      });
+      closeDb();
+      process.exit(code);
+    }
+
     case "init": {
+      // If --client (or --global/--project without positional args) is present,
+      // route to the MCP client-wiring init flow (Phase B).
+      if (cli.values.client !== undefined || cli.values.global === true) {
+        const { runInit } = await import("./init/index.js");
+        const clients = (cli.values.client as string[] | undefined) ?? ["auto"];
+        const result = runInit({
+          clients,
+          projectPath: (cli.values.project as string | undefined) ?? process.cwd(),
+          globalOnly: Boolean(cli.values.global),
+          dryRun: Boolean(cli.values["dry-run"]),
+          force: Boolean(cli.values.force),
+        });
+        console.log("KINDX init summary");
+        console.log("──────────────────────────────────────────────────");
+        for (const r of result.clientResults) {
+          const tag = r.outcome === "skipped" ? "skip" : r.outcome;
+          console.log(`  [${tag.padEnd(7)}] ${r.label.padEnd(18)}  ${r.configPath}${r.reason ? "  — " + r.reason : ""}`);
+        }
+        if (result.projectFile) {
+          console.log(`  [${result.projectFile.outcome.padEnd(7)}] Project AGENTS.md   ${result.projectFile.path}`);
+        }
+        process.exit(0);
+      }
+      // Default: existing DB/collection setup flow.
       await runInitCommand(cli.args, cli.values as Record<string, unknown>, {
         updateCollections,
         vectorIndex,
@@ -4233,6 +4665,28 @@ if (isMain) {
     }
 
     case "search":
+      if (cli.values.interactive) {
+        const { runTui } = await import("./cli/tui/app.js");
+        const code = await runTui({
+          initialQuery: cli.query,
+          initialCollection: Array.isArray(cli.opts.collection) ? cli.opts.collection[0] ?? null : (cli.opts.collection ?? null),
+          runSearch: async (q) => {
+            const db = getDb();
+            const colNames = Array.isArray(cli.opts.collection) ? cli.opts.collection : (cli.opts.collection ? [cli.opts.collection] : []);
+            const single = colNames.length === 1 ? colNames[0] : undefined;
+            const hits = filterByCollections(searchFTS(db, q, 20, single), colNames as string[]);
+            return hits.slice(0, 12).map((r, i) => ({
+              rank: i + 1,
+              displayPath: r.displayPath,
+              title: r.title || undefined,
+              score: r.score,
+              snippet: (r.body || "").slice(0, 240),
+            }));
+          },
+        });
+        closeDb();
+        process.exit(code);
+      }
       if (!cli.query) {
         console.error("Usage: kindx search [options] <query>");
         process.exit(1);
@@ -4295,6 +4749,19 @@ if (isMain) {
     }
 
     case "mcp": {
+      if (cli.values["health-check"]) {
+        try {
+          const store = createStore();
+          const status = store.getStatus();
+          try { store.close?.(); } catch { /* ignore */ }
+          console.log(JSON.stringify({ ok: true, totalDocuments: status.totalDocuments, collections: status.collections.length }));
+          process.exit(0);
+        } catch (err: any) {
+          console.error(JSON.stringify({ ok: false, error: String(err?.message ?? err) }));
+          process.exit(1);
+        }
+      }
+
       const sub = cli.args[0]; // stop | status | undefined
 
       // Cache dir for PID/log files — same dir as the index
@@ -4303,8 +4770,14 @@ if (isMain) {
 
       // Subcommands take priority over flags
       if (sub === "stop") {
+        const wantsJson = cli.opts.format === "json";
         if (!existsSync(pidPath)) {
-          console.log("Not running (no PID file).");
+          if (wantsJson) {
+            const payload = { ok: true, command: "mcp", data: { stopped: false, reason: "not_running" } };
+            console.log(JSON.stringify(payload));
+          } else {
+            console.log("Not running (no PID file).");
+          }
           process.exit(0);
         }
         const pid = parseInt(readFileSync(pidPath, "utf-8").trim());
@@ -4312,10 +4785,61 @@ if (isMain) {
           process.kill(pid, 0); // alive?
           process.kill(pid, "SIGTERM");
           unlinkSync(pidPath);
-          console.log(`Stopped KINDX MCP server (PID ${pid}).`);
+          if (wantsJson) {
+            console.log(JSON.stringify({ ok: true, command: "mcp", data: { stopped: true, pid } }));
+          } else {
+            console.log(`Stopped KINDX MCP server (PID ${pid}).`);
+          }
         } catch {
           unlinkSync(pidPath);
-          console.log("Cleaned up stale PID file (server was not running).");
+          if (wantsJson) {
+            console.log(JSON.stringify({ ok: true, command: "mcp", data: { stopped: false, reason: "stale_pid" } }));
+          } else {
+            console.log("Cleaned up stale PID file (server was not running).");
+          }
+        }
+        process.exit(0);
+      }
+
+      // `kindx mcp status` (or `--format json` on the bare `mcp` command):
+      // report transport, endpoints, daemon pid/log, masked-token info.
+      if (sub === "status" || (cli.opts.format === "json" && !cli.values.http)) {
+        const port = Number(cli.values.port) || 8181;
+        const logPath = resolve(cacheDir, "mcp.log");
+        let pidAlive: number | undefined;
+        if (existsSync(pidPath)) {
+          const pid = parseInt(readFileSync(pidPath, "utf-8").trim());
+          try { process.kill(pid, 0); pidAlive = pid; } catch { /* stale */ }
+        }
+        const token = process.env.KINDX_AUTH_TOKEN || process.env.MCP_AUTH_TOKEN;
+        const data: McpStatusData = pidAlive ? {
+          transport: "daemon",
+          host: "localhost",
+          port,
+          authMode: token ? "bearer" : "none",
+          token,
+          pid: pidAlive,
+          pidPath,
+          logPath,
+          mcpEndpoint: `http://localhost:${port}/mcp`,
+          healthEndpoint: `http://localhost:${port}/health`,
+          metricsEndpoint: `http://localhost:${port}/metrics`,
+          stopCommand: "kindx mcp stop",
+        } : {
+          transport: "stdio",
+          authMode: token ? "bearer" : "none",
+          token,
+          stopCommand: "kindx mcp stop",
+        };
+        if (cli.opts.format === "json") {
+          const redacted = redactedMcpStatus(data);
+          if (jsonEnvelopeEnabled(process.env)) {
+            console.log(JSON.stringify({ ok: true, command: "mcp", data: redacted }, null, 2));
+          } else {
+            console.log(JSON.stringify(redacted, null, 2));
+          }
+        } else {
+          console.log(renderMcpStatus(data, { color: useColor }));
         }
         process.exit(0);
       }
@@ -4357,8 +4881,31 @@ if (isMain) {
           closeSync(logFd); // parent's copy; child inherited the fd
 
           writeFileSync(pidPath, String(child.pid));
-          console.log(`Started on http://localhost:${port}/mcp (PID ${child.pid})`);
-          console.log(`Logs: ${logPath}`);
+          const token = process.env.KINDX_AUTH_TOKEN || process.env.MCP_AUTH_TOKEN;
+          const data: McpStatusData = {
+            transport: "daemon",
+            host: "localhost",
+            port,
+            authMode: token ? "bearer" : "none",
+            token,
+            pid: child.pid,
+            pidPath,
+            logPath,
+            mcpEndpoint: `http://localhost:${port}/mcp`,
+            healthEndpoint: `http://localhost:${port}/health`,
+            metricsEndpoint: `http://localhost:${port}/metrics`,
+            stopCommand: "kindx mcp stop",
+          };
+          if (cli.opts.format === "json") {
+            const redacted = redactedMcpStatus(data);
+            if (jsonEnvelopeEnabled(process.env)) {
+              console.log(JSON.stringify({ ok: true, command: "mcp", data: redacted }, null, 2));
+            } else {
+              console.log(JSON.stringify(redacted, null, 2));
+            }
+          } else {
+            console.log(renderMcpStatus(data, { color: useColor }));
+          }
           process.exit(0);
         }
 
@@ -4377,7 +4924,20 @@ if (isMain) {
           throw e;
         }
       } else {
-        // Default: stdio transport
+        // Default: stdio transport.
+        // If a real user ran `kindx mcp` from a terminal (stdin is a TTY rather
+        // than a pipe from an MCP client), print a one-line hint to stderr so
+        // they don't think the silent process is broken. Goes to stderr so it
+        // never pollutes the JSON-RPC stdout protocol that real MCP clients
+        // read from this process.
+        if (process.stdin.isTTY) {
+          process.stderr.write(
+            "kindx mcp is running in stdio mode and waiting for an MCP client on stdin/stdout.\n" +
+            "To auto-wire it into your local agents (Claude Code, Cursor, Codex, etc.), press Ctrl+C and run:\n" +
+            "    kindx init --client auto\n" +
+            "Or run `kindx mcp --http` to talk to it over HTTP, or `kindx mcp --health-check` to verify it works.\n\n"
+          );
+        }
         const { startMcpServer } = await import("./protocol.js");
         await startMcpServer(storeDbPathOverride);
       }
@@ -4459,7 +5019,15 @@ if (isMain) {
       const report = verifyWipe();
       const status = report.residualFiles.length === 0 ? "fully_wiped" : "residual_artifacts_found";
       if (cli.opts.format === "json") {
-        console.log(JSON.stringify({ status, ...report }, null, 2));
+        if (jsonEnvelopeEnabled(process.env)) {
+          console.log(JSON.stringify({
+            ok: true,
+            command: "verify-wipe",
+            data: { status, ...report },
+          }, null, 2));
+        } else {
+          console.log(JSON.stringify({ status, ...report }, null, 2));
+        }
       } else if (report.residualFiles.length === 0) {
         console.log(`${c.green}✓${c.reset} No residual index artifacts found.`);
       } else {
@@ -4474,10 +5042,24 @@ if (isMain) {
       break;
     }
 
-    default:
-      console.error(`Unknown command: ${cli.command}`);
+    case "arch": {
+      const subcommand = cli.args[0] || "status";
+      await runArchCommand(subcommand, cli.args.slice(1));
+      break;
+    }
+
+    default: {
+      const cmd = cli.command ?? "";
+      const suggestions = suggestCommandNames(cmd);
+      console.error(`Unknown command: ${cmd}`);
+      if (suggestions.length === 1) {
+        console.error(`  Did you mean: ${suggestions[0]}?`);
+      } else if (suggestions.length > 1) {
+        console.error(`  Did you mean one of: ${suggestions.join(", ")}?`);
+      }
       console.error("Run 'kindx --help' for usage.");
       process.exit(1);
+    }
   }
 
   if (cli.command !== "mcp") {

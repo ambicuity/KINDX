@@ -46,4 +46,25 @@ describe("ModelIntegrity", () => {
     const hash = createHash("sha256").update("test model content").digest("hex");
     expect(readFileSync(checksumPath, "utf-8").trim()).toBe(hash);
   });
+
+  it("streams hash correctly for a file larger than the read-stream chunk size", async () => {
+    // computeFileHash() uses createReadStream + hash.update per chunk; the default
+    // highWaterMark is 64 KB. Pick a payload larger than any reasonable chunk
+    // boundary so the streaming path is exercised end-to-end.
+    const payload = Buffer.alloc(2 * 1024 * 1024); // 2 MB
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] = i & 0xff; // deterministic non-uniform content
+    }
+    writeFileSync(modelPath, payload);
+
+    const expected = createHash("sha256").update(payload).digest("hex");
+    writeFileSync(checksumPath, expected + "\n");
+
+    await expect(verifyModelIntegrity(modelPath)).resolves.toBe(true);
+
+    // And the reverse path: writeModelChecksum should produce the same digest.
+    unlinkSync(checksumPath);
+    await writeModelChecksum(modelPath);
+    expect(readFileSync(checksumPath, "utf-8").trim()).toBe(expected);
+  });
 });

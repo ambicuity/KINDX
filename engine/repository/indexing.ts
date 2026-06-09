@@ -9,6 +9,7 @@ import { createHash } from "crypto";
 import type { Database } from "../runtime.js";
 import { ingestFile } from "../ingestion.js";
 import { extractInternalLinks } from "../link-extractor.js";
+import { storeDocumentSchema } from "../schema.js";
 import {
   extractTitle,
   findActiveDocument,
@@ -67,7 +68,22 @@ export async function indexSingleFile(
     try {
       insertContent(db, hash, content, now);
       if (activeDoc) {
-        // Delete old vectors if hash changed
+        // Delete old vectors if hash changed — both the metadata row in
+        // content_vectors AND the matching ANN entries in vectors_vec. Dropping
+        // only content_vectors leaves stale rows in vectors_vec pointing at a
+        // hash that no longer exists, which causes parity drift and stale
+        // matches in vector search.
+        const hasVecTable = db.prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
+        ).get();
+        if (hasVecTable) {
+          db.prepare(`
+            DELETE FROM vectors_vec
+            WHERE hash_seq IN (
+              SELECT hash || '_' || seq FROM content_vectors WHERE hash = ?
+            )
+          `).run(activeDoc.hash);
+        }
         db.prepare(`DELETE FROM content_vectors WHERE hash = ?`).run(activeDoc.hash);
         updateDocument(db, activeDoc.id, title, hash, modifiedAt);
       } else {
@@ -81,6 +97,23 @@ export async function indexSingleFile(
         extractedAt: now,
       });
       upsertDocumentLinks(db, collectionName, path, links);
+
+      // Store schema for CSV/JSON files
+      if (ingested.metadata.format === "csv" || ingested.metadata.format === "json") {
+        try {
+          const schemaMatch = ingested.text.match(/Schema:\s*([^\n]+)/);
+          if (schemaMatch && schemaMatch[1]) {
+            const schema: Record<string, string> = {};
+            for (const pair of schemaMatch[1].split(",")) {
+              const [key, type] = pair.split(":").map(s => s.trim());
+              if (key && type) schema[key] = type;
+            }
+            if (Object.keys(schema).length > 0) {
+              storeDocumentSchema(db, collectionName, path, schema);
+            }
+          }
+        } catch { /* schema storage is best-effort */ }
+      }
 
       db.exec("COMMIT");
       return "embedded"; // Properly enqueued for BM25 and embedding

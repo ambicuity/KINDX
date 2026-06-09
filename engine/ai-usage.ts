@@ -170,6 +170,13 @@ export function flushAiUsageQueue() {
   _usageQueue.length = 0;
 
   for (const [db, events] of dbGroups) {
+    // Drop events targeting a closed handle silently. The queue can outlive
+    // the database (test teardown, daemon restart) — the previous code
+    // bubbled a noisy "database connection is not open" error every flush.
+    // better-sqlite3 exposes `open: boolean`; if the property isn't present
+    // (e.g. bun:sqlite) we fall through to the try/catch.
+    const openProbe = (db as unknown as { open?: boolean }).open;
+    if (openProbe === false) continue;
     try {
       const stmt = getInsertStmt(db);
       const transaction = db.transaction((evs: AiUsageEvent[]) => {
@@ -195,7 +202,11 @@ export function flushAiUsageQueue() {
       });
       transaction(events);
     } catch (err) {
-      process.stderr.write(`[kindx:ai-usage] ERROR: Failed to batch record usage: ${err}\n`);
+      const msg = err instanceof Error ? err.message : String(err);
+      // "database connection is not open" / "The database connection is not open"
+      // is a benign race we just guarded above; skip the noisy log on those.
+      if (/database connection is not open/i.test(msg)) continue;
+      process.stderr.write(`[kindx:ai-usage] ERROR: Failed to batch record usage: ${msg}\n`);
     }
   }
 }

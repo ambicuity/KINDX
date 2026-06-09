@@ -22,13 +22,19 @@ export function deleteInactiveDocuments(db: Database): number {
 }
 
 /**
- * Remove orphaned content hashes that are not referenced by any active document.
- * Returns the number of orphaned content hashes deleted.
+ * Remove orphaned content hashes that are not referenced by any document
+ * (active OR inactive) and not referenced by any archived version.
+ *
+ * Inactive rows must be preserved: documents.hash carries ON DELETE CASCADE,
+ * so deleting a still-referenced content row would also delete the inactive
+ * documents row pointing at it — silently destroying recoverable history
+ * when a deactivated path is later reactivated.
  */
 export function cleanupOrphanedContent(db: Database): number {
   const result = db.prepare(`
     DELETE FROM content
-    WHERE hash NOT IN (SELECT DISTINCT hash FROM documents WHERE active = 1)
+    WHERE hash NOT IN (SELECT DISTINCT hash FROM documents)
+      AND hash NOT IN (SELECT DISTINCT hash FROM document_versions)
   `).run();
   return result.changes;
 }
@@ -59,8 +65,10 @@ export function cleanupOrphanedVectors(db: Database): number {
     return 0;
   }
 
-  // Delete from vectors_vec first
-  db.exec(`
+  // Both deletes must commit together — otherwise a crash between them
+  // leaves vectors_vec and content_vectors out of parity, which is exactly
+  // what ensureVectorIndexIntegrity now refuses to silently auto-repair.
+  const deleteVec = db.prepare(`
     DELETE FROM vectors_vec WHERE hash_seq IN (
       SELECT cv.hash || '_' || cv.seq FROM content_vectors cv
       WHERE NOT EXISTS (
@@ -68,13 +76,16 @@ export function cleanupOrphanedVectors(db: Database): number {
       )
     )
   `);
-
-  // Delete from content_vectors
-  db.exec(`
+  const deleteContentVec = db.prepare(`
     DELETE FROM content_vectors WHERE hash NOT IN (
       SELECT hash FROM documents WHERE active = 1
     )
   `);
+  const runBoth = db.transaction(() => {
+    deleteVec.run();
+    deleteContentVec.run();
+  });
+  runBoth();
 
   return countResult.c;
 }
@@ -135,6 +146,24 @@ export function insertContent(db: Database, hash: string, content: string, creat
 }
 
 /**
+ * Throw if the documents_fts trigger contract is about to be violated.
+ *
+ * The AI/AU triggers read content.doc via a sub-SELECT keyed on the hash
+ * being inserted/updated; if that row is missing the FTS body is silently
+ * persisted as NULL and no later trigger fixes it. This guard makes the
+ * misuse loud at the call site instead of leaking into search results.
+ */
+function assertContentExists(db: Database, hash: string): void {
+  const row = db.prepare(`SELECT 1 AS x FROM content WHERE hash = ?`).get(hash) as { x: number } | undefined;
+  if (!row) {
+    throw new Error(
+      `repository: content row for hash ${hash.slice(0, 12)}… is missing — insertContent must run before insert/updateDocument. ` +
+      `If the content was orphan-cleaned, re-insert it before reactivating the document.`
+    );
+  }
+}
+
+/**
  * Insert a new document into the documents table.
  * When an existing document's content changes (hash differs), the previous
  * version is preserved in document_versions before the update.
@@ -148,6 +177,7 @@ export function insertDocument(
   createdAt: string,
   modifiedAt: string
 ): void {
+  assertContentExists(db, hash);
   // Snapshot the current record (if any) before the upsert.
   const existing = db.prepare(
     `SELECT id, title, hash, created_at FROM documents WHERE collection = ? AND path = ?`
@@ -267,6 +297,7 @@ export function updateDocument(
   hash: string,
   modifiedAt: string
 ): void {
+  assertContentExists(db, hash);
   // Snapshot the current record before the update.
   const existing = db.prepare(
     `SELECT id, collection, path, title, hash, created_at FROM documents WHERE id = ?`
@@ -286,17 +317,20 @@ export function updateDocument(
 
 /**
  * Deactivate a document (mark as inactive but don't delete).
+ *
+ * Cleanup of orphaned vectors runs inline. The previous setTimeout(0)
+ * variant ran cleanup against a Database handle the caller might already
+ * have closed (test teardown, watcher restart), and the deferred work fell
+ * outside any transaction the caller had open at the call site — racing
+ * with other writers.
  */
 export function deactivateDocument(db: Database, collectionName: string, path: string): void {
   const res = db.prepare(`UPDATE documents SET active = 0 WHERE collection = ? AND path = ? AND active = 1`)
     .run(collectionName, path);
 
   if (res.changes > 0) {
-    // Schedule asynchronous GC for unreferenced vectors to prevent index bloat.
-    setTimeout(() => {
-      try { cleanupOrphanedVectors(db); }
-      catch (e) { quietWarn("repository.cleanup_orphaned_vectors_failed", { err: errString(e) }); }
-    }, 0);
+    try { cleanupOrphanedVectors(db); }
+    catch (e) { quietWarn("repository.cleanup_orphaned_vectors_failed", { err: errString(e) }); }
   }
 }
 

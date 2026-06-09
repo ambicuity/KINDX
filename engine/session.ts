@@ -32,11 +32,23 @@ export type SessionScopeContext = {
 };
 
 /**
+ * Whether a tool call was triggered by the agent automatically (per the
+ * auto-invocation contract), by an explicit user request, or undetermined.
+ * Default is "unknown" when the MCP client did not pass _meta.kindx.trigger.
+ */
+export type TriggerSource = "user-explicit" | "agent-auto" | "unknown";
+
+/**
  * A single query turn log entry for context enrichment.
  */
 export type QueryLogEntry = {
   query: string;
   ts: number; // Unix ms timestamp
+  /**
+   * Origin of the tool call that produced this query, if known.
+   * Recorded from `params._meta.kindx.trigger` on the MCP request.
+   */
+  trigger?: TriggerSource;
 };
 
 // =============================================================================
@@ -149,7 +161,7 @@ export class KindxSession {
     let result: EmbeddingResult | null = null;
     try {
       const formatted = isQuery ? formatQueryForEmbedding(text) : text;
-      result = await llm.embed(formatted);
+      result = await llm.embed(formatted, { signal: this.signal });
     } catch (err) {
       process.stderr.write(
         `[KindxSession] embed failed for session ${this.sessionId}: ${err}\n`
@@ -186,10 +198,15 @@ export class KindxSession {
   /**
    * Record a query text in the session's query log.
    * Oldest entries are evicted when the log reaches QUERY_LOG_MAX.
+   *
+   * @param query - The query text
+   * @param trigger - Optional trigger source ("agent-auto" | "user-explicit" | "unknown")
    */
-  logQuery(query: string): void {
+  logQuery(query: string, trigger?: TriggerSource): void {
     this.lastActivityAt = Date.now();
-    this._queryLog.push({ query, ts: Date.now() });
+    const entry: QueryLogEntry = { query, ts: Date.now() };
+    if (trigger !== undefined) entry.trigger = trigger;
+    this._queryLog.push(entry);
     if (this._queryLog.length > KindxSession.QUERY_LOG_MAX) {
       this._queryLog.shift();
     }
@@ -244,121 +261,104 @@ export class KindxSession {
  *   SessionRegistry.get(sessionId)
  *   SessionRegistry.delete(sessionId)
  */
-export const SessionRegistry = {
-  _sessions: new Map<string, KindxSession>(),
-  _reaperTimer: null as ReturnType<typeof setInterval> | null,
+export const SessionRegistry = (() => {
+  const sessions = new Map<string, KindxSession>();
+  let reaperTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Configurable idle timeout (env: KINDX_SESSION_IDLE_TIMEOUT_MS, default: 10 minutes). */
-  get _idleTimeoutMs(): number {
+  const idleTimeoutMs = () => {
     const raw = parseInt(process.env.KINDX_SESSION_IDLE_TIMEOUT_MS || "", 10);
     return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
-  },
+  };
 
-  /** Configurable reaper interval (env: KINDX_SESSION_REAPER_INTERVAL_MS, default: 60 seconds). */
-  get _reaperIntervalMs(): number {
+  const reaperIntervalMs = () => {
     const raw = parseInt(process.env.KINDX_SESSION_REAPER_INTERVAL_MS || "", 10);
     return Number.isFinite(raw) && raw > 0 ? raw : 60 * 1000;
-  },
+  };
 
-  /** Configurable max sessions limit (env: KINDX_MAX_SESSIONS, default: 100). */
-  get _maxSessions(): number {
+  const maxSessions = () => {
     const raw = parseInt(process.env.KINDX_MAX_SESSIONS || "", 10);
     return Number.isFinite(raw) && raw > 0 ? raw : 100;
-  },
+  };
 
-  /**
-   * Create and register a new session.
-   * If a session with the same ID already exists, it is replaced.
-   * When the max sessions limit is reached, the oldest session (by createdAt) is evicted.
-   * Auto-starts the idle reaper on first create.
-   */
-  create(sessionId: string, scopeContext: SessionScopeContext = {}): KindxSession {
-    this.startReaper();
-
-    // Evict oldest session if at capacity
-    if (this._sessions.size >= this._maxSessions) {
-      let oldestId: string | null = null;
-      let oldestCreatedAt = Infinity;
-      for (const [id, sess] of this._sessions) {
-        if (sess.createdAt < oldestCreatedAt) {
-          oldestCreatedAt = sess.createdAt;
-          oldestId = id;
-        }
-      }
-      if (oldestId) {
-        process.stderr.write(
-          `[SessionRegistry] max sessions (${this._maxSessions}) reached, evicting oldest session ${oldestId}\n`
-        );
-        const oldest = this._sessions.get(oldestId);
-        oldest?.dispose();
-      }
-    }
-
-    const existing = this._sessions.get(sessionId);
-    if (existing) {
-      existing.dispose();
-    }
-    // Use a KindxSession that reports the caller's sessionId (not a new generated one)
-    const session = new _KindxSessionWithId(sessionId, scopeContext);
-    this._sessions.set(sessionId, session);
-    return session;
-  },
-
-  /**
-   * Get an existing session by ID.
-   * Returns null if the session does not exist.
-   */
-  get(sessionId: string): KindxSession | null {
-    return this._sessions.get(sessionId) ?? null;
-  },
-
-  /**
-   * Remove a session from the registry (does NOT call dispose).
-   * Use session.dispose() to fully clean up and then remove.
-   */
-  delete(sessionId: string): void {
-    this._sessions.delete(sessionId);
-  },
-
-  /** Active session count. */
-  get size(): number {
-    return this._sessions.size;
-  },
-
-  /** Start the idle session reaper if not already running. */
-  startReaper(): void {
-    if (this._reaperTimer) return;
-    this._reaperTimer = setInterval(() => {
+  function startReaper(): void {
+    if (reaperTimer) return;
+    reaperTimer = setInterval(() => {
       const now = Date.now();
-      for (const [id, session] of this._sessions) {
-        if (now - session.lastActivityAt > this._idleTimeoutMs) {
+      for (const [id, session] of sessions) {
+        if (now - session.lastActivityAt > idleTimeoutMs()) {
           process.stderr.write(
             `[SessionRegistry] reaping idle session ${id} (idle for ${Math.round((now - session.lastActivityAt) / 1000)}s)\n`
           );
           session.dispose();
         }
       }
-    }, this._reaperIntervalMs);
-    this._reaperTimer.unref?.();
-  },
+    }, reaperIntervalMs());
+    reaperTimer.unref?.();
+  }
 
-  /** Stop the idle session reaper. */
-  stopReaper(): void {
-    if (this._reaperTimer) {
-      clearInterval(this._reaperTimer);
-      this._reaperTimer = null;
+  function stopReaper(): void {
+    if (reaperTimer) {
+      clearInterval(reaperTimer);
+      reaperTimer = null;
     }
-  },
+  }
 
-  /** Dispose all sessions and stop the reaper (call on server shutdown). */
-  async disposeAll(): Promise<void> {
-    this.stopReaper();
-    for (const session of this._sessions.values()) {
-      session.dispose();
-    }
-    this._sessions.clear();
-  },
-};
+  return {
+    create(sessionId: string, scopeContext: SessionScopeContext = {}): KindxSession {
+      startReaper();
+
+      if (sessions.size >= maxSessions()) {
+        let oldestId: string | null = null;
+        let oldestCreatedAt = Infinity;
+        for (const [id, sess] of sessions) {
+          if (sess.createdAt < oldestCreatedAt) {
+            oldestCreatedAt = sess.createdAt;
+            oldestId = id;
+          }
+        }
+        if (oldestId) {
+          process.stderr.write(
+            `[SessionRegistry] max sessions (${maxSessions()}) reached, evicting oldest session ${oldestId}\n`
+          );
+          const oldest = sessions.get(oldestId);
+          oldest?.dispose();
+        }
+      }
+
+      const existing = sessions.get(sessionId);
+      if (existing) {
+        existing.dispose();
+      }
+      const session = new _KindxSessionWithId(sessionId, scopeContext);
+      sessions.set(sessionId, session);
+      return session;
+    },
+
+    get(sessionId: string): KindxSession | null {
+      return sessions.get(sessionId) ?? null;
+    },
+
+    delete(sessionId: string): void {
+      sessions.delete(sessionId);
+    },
+
+    get size(): number {
+      return sessions.size;
+    },
+
+    startReaper,
+
+    stopReaper,
+
+    async disposeAll(): Promise<void> {
+      stopReaper();
+      for (const session of sessions.values()) {
+        session.dispose();
+      }
+      sessions.clear();
+    },
+  };
+})();
 
 // =============================================================================
 // Utility
@@ -379,7 +379,11 @@ function generateSessionId(): string {
 class _KindxSessionWithId extends KindxSession {
   constructor(id: string, scopeContext: SessionScopeContext) {
     super(scopeContext);
-    // Override the auto-generated sessionId with the caller's id.
-    (this as any).sessionId = id;
+    Object.defineProperty(this, 'sessionId', {
+      value: id,
+      writable: false,
+      enumerable: true,
+      configurable: false
+    });
   }
 }
