@@ -71,8 +71,18 @@ jobs:
       - name: Build SDK packages
         run: npm run build:packages
 
+      # Coverage thresholds are enforced on Node 22 only: V8 coverage
+      # instrumentation differs across Node versions and reports ~5% lower
+      # numbers on Node 20 for an identical test run.
       - name: Run unit and integration tests with coverage and JUnit
+        if: matrix.node-version == '22'
         run: npm run test:ci
+        env:
+          CI: 'true'
+
+      - name: Run unit and integration tests with JUnit (no coverage)
+        if: matrix.node-version != '22'
+        run: npx vitest run --reporter=verbose --reporter=junit --outputFile.junit=test-results/junit.xml specs/
         env:
           CI: 'true'
 
