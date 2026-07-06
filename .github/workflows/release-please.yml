@@ -31,7 +31,7 @@ jobs:
 
       - name: Checkout repository
         if: ${{ steps.release.outputs.release_created }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
         if: ${{ steps.release.outputs.release_created }}
@@ -143,7 +143,7 @@ jobs:
       contents: write
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Set up Node.js
         uses: actions/setup-node@v4
