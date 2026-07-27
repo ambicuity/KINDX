@@ -70,7 +70,7 @@
   "dependencies": {
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "better-sqlite3": "^12.4.5",
+    "better-sqlite3": "^13.0.1",
     "chokidar": "^5.0.0",
     "fast-glob": "^3.3.0",
     "node-llama-cpp": "^3.17.1",
